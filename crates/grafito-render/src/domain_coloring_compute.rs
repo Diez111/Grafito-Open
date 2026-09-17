@@ -84,7 +84,6 @@ pub struct DomainColoringComputePipeline {
     params_buffer: wgpu::Buffer,
     bytecode_buffer: wgpu::Buffer,
     constants_buffer: wgpu::Buffer,
-    in_buffer: wgpu::Buffer,
     out_buffer: wgpu::Buffer,
     out_readback: wgpu::Buffer,
     /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
@@ -98,6 +97,38 @@ struct GridParamsUniform {
     code_len: u32,
     dc_mode: u32,
     _pad1: u32,
+    /// Origen de la malla regular (x_min, y_min).
+    grid_origin: [f32; 2],
+    /// Paso de celda (dx, dy).
+    grid_step: [f32; 2],
+    /// Lado en celdas (`grid_size == grid_res * grid_res`).
+    grid_res: u32,
+    _pad2: u32,
+}
+
+/// Malla regular de domain coloring: los centros de celda se derivan en el
+/// shader (`origin + (idx/res + 0.5, idx%res + 0.5) * step`, fila-mayor igual
+/// que el CPU). Sin subir `in_points`: -2 MiB por dispatch de 250k celdas
+/// (más el `Vec` huésped de 4 MB).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DomainGrid {
+    /// Esquina inferior-izquierda del dominio.
+    pub x_min: f64,
+    /// Esquina inferior-izquierda del dominio.
+    pub y_min: f64,
+    /// Ancho de celda en x.
+    pub dx: f64,
+    /// Ancho de celda en y.
+    pub dy: f64,
+    /// Lado en celdas (celdas totales = `res * res`).
+    pub res: usize,
+}
+
+impl DomainGrid {
+    /// Celdas totales (`None` si desborda `usize`).
+    pub fn cell_count(&self) -> Option<usize> {
+        self.res.checked_mul(self.res)
+    }
 }
 
 /// Result of a GPU domain coloring evaluation: one RGBA color per grid cell.
@@ -109,7 +140,7 @@ struct DomainColoringSubmit {
     params: GridParamsUniform,
     code: Vec<u32>,
     constants: Vec<[f32; 2]>,
-    in_data: Vec<[f32; 2]>,
+    cells: usize,
 }
 
 /// Dispatch en vuelo: el submit ya está en la GPU y la espera se distribuye
@@ -173,16 +204,6 @@ impl DomainColoringComputePipeline {
                     binding: 3,
                     visibility: wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Storage { read_only: true },
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 4,
-                    visibility: wgpu::ShaderStages::COMPUTE,
-                    ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: false },
                         has_dynamic_offset: false,
                         min_binding_size: None,
@@ -238,14 +259,6 @@ impl DomainColoringComputePipeline {
             &[0u8; 512 * std::mem::size_of::<f32>()],
         );
 
-        let cell_bytes = MAX_CELLS * std::mem::size_of::<[f32; 2]>();
-        let in_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Domain Coloring In Points"),
-            size: cell_bytes as u64,
-            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let color_bytes = MAX_CELLS * std::mem::size_of::<[f32; 4]>();
         let out_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Domain Coloring Out Colors"),
@@ -267,7 +280,6 @@ impl DomainColoringComputePipeline {
             params_buffer,
             bytecode_buffer,
             constants_buffer,
-            in_buffer,
             out_buffer,
             out_readback,
             timing: crate::gpu_timing::create(device, queue, "Domain Coloring", 1),
@@ -278,24 +290,29 @@ impl DomainColoringComputePipeline {
     /// síncrono (`evaluate`) y el asíncrono (`dispatch`).
     fn plan_submit(
         expr: &ComplexExpr,
-        points: &[(f64, f64)],
         variables: &BTreeMap<String, f64>,
         dc_mode: u32,
+        grid: &DomainGrid,
     ) -> Option<DomainColoringSubmit> {
-        if points.is_empty() || !domain_cells_within_budget(points.len()) {
-            if points.is_empty() {
-                return Some(DomainColoringSubmit {
-                    params: GridParamsUniform {
-                        grid_size: 0,
-                        code_len: 0,
-                        dc_mode,
-                        _pad1: 0,
-                    },
-                    code: Vec::new(),
-                    constants: Vec::new(),
-                    in_data: Vec::new(),
-                });
-            }
+        let cells = grid.cell_count()?;
+        if cells == 0 {
+            return Some(DomainColoringSubmit {
+                params: GridParamsUniform {
+                    grid_size: 0,
+                    code_len: 0,
+                    dc_mode,
+                    _pad1: 0,
+                    grid_origin: [0.0, 0.0],
+                    grid_step: [0.0, 0.0],
+                    grid_res: 0,
+                    _pad2: 0,
+                },
+                code: Vec::new(),
+                constants: Vec::new(),
+                cells: 0,
+            });
+        }
+        if !domain_cells_within_budget(cells) {
             return None;
         }
 
@@ -311,16 +328,14 @@ impl DomainColoringComputePipeline {
         }
         let f32_constants = crate::complex_compute::pack_complex_constants(&prog.constants)?;
 
-        let grid_size = u32::try_from(points.len()).ok()?;
-
-        let mut in_data = Vec::with_capacity(points.len());
-        for &(x, y) in points {
-            let x = x as f32;
-            let y = y as f32;
-            if !x.is_finite() || !y.is_finite() {
-                return None;
-            }
-            in_data.push([x, y]);
+        let grid_size = u32::try_from(cells).ok()?;
+        let grid_res = u32::try_from(grid.res).ok()?;
+        // Origen y paso en f32 (igual que antes por punto): no finitos
+        // rechazan el submit en vez de subir basura a la GPU.
+        let origin = [grid.x_min as f32, grid.y_min as f32];
+        let step = [grid.dx as f32, grid.dy as f32];
+        if !origin.iter().chain(step.iter()).all(|v| v.is_finite()) {
+            return None;
         }
 
         let params = GridParamsUniform {
@@ -328,12 +343,16 @@ impl DomainColoringComputePipeline {
             code_len: u32::try_from(prog.code.len()).ok()?,
             dc_mode,
             _pad1: 0,
+            grid_origin: origin,
+            grid_step: step,
+            grid_res,
+            _pad2: 0,
         };
         Some(DomainColoringSubmit {
             params,
             code: prog.code,
             constants: f32_constants,
-            in_data,
+            cells,
         })
     }
 
@@ -357,7 +376,6 @@ impl DomainColoringComputePipeline {
             0,
             bytemuck::cast_slice(&submit.constants),
         );
-        queue.write_buffer(&self.in_buffer, 0, bytemuck::cast_slice(&submit.in_data));
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Domain Coloring Bind Group"),
@@ -377,10 +395,6 @@ impl DomainColoringComputePipeline {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: self.in_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
                     resource: self.out_buffer.as_entire_binding(),
                 },
             ],
@@ -402,7 +416,7 @@ impl DomainColoringComputePipeline {
             cpass.dispatch_workgroups(wg, 1, 1);
         }
 
-        let color_bytes = (submit.in_data.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+        let color_bytes = (submit.cells * std::mem::size_of::<[f32; 4]>()) as u64;
         encoder.copy_buffer_to_buffer(&self.out_buffer, 0, &self.out_readback, 0, color_bytes);
         crate::gpu_timing::resolve(&self.timing, &mut encoder);
         queue.submit(std::iter::once(encoder.finish()));
@@ -458,15 +472,15 @@ impl DomainColoringComputePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         expr: &ComplexExpr,
-        points: &[(f64, f64)],
+        grid: &DomainGrid,
         variables: &BTreeMap<String, f64>,
         dc_mode: u32,
     ) -> Option<PendingDomainColoringEval> {
-        let submit = Self::plan_submit(expr, points, variables, dc_mode)?;
-        if submit.in_data.is_empty() {
+        let submit = Self::plan_submit(expr, variables, dc_mode, grid)?;
+        if submit.cells == 0 {
             return None;
         }
-        let cell_count = submit.in_data.len();
+        let cell_count = submit.cells;
         let map_ok = self.submit_buffers(device, queue, &submit);
         log::trace!("Domain coloring async dispatch (wait distributed over frames)");
         Some(PendingDomainColoringEval {
@@ -503,15 +517,15 @@ impl DomainColoringComputePipeline {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         expr: &ComplexExpr,
-        points: &[(f64, f64)],
+        grid: &DomainGrid,
         variables: &BTreeMap<String, f64>,
         dc_mode: u32,
     ) -> Option<GridColors> {
-        if points.is_empty() {
+        let submit = Self::plan_submit(expr, variables, dc_mode, grid)?;
+        if submit.cells == 0 {
             return Some(Vec::new());
         }
-        let submit = Self::plan_submit(expr, points, variables, dc_mode)?;
-        let cell_count = submit.in_data.len();
+        let cell_count = submit.cells;
         let map_ok = self.submit_buffers(device, queue, &submit);
         log::trace!("Domain coloring sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);

@@ -2373,6 +2373,30 @@ impl Drop for SessionApiKey {
     }
 }
 
+/// Tope por buffer del acumulado de streaming (texto y razonamiento).
+/// Espeja el body cap del worker (256 KiB): sin esto, un stream patológico
+/// crece sin cota en RAM (era la única `String` sin validar del path).
+const STREAM_ACCUM_MAX_BYTES: usize = 256 * 1024;
+
+/// Empuja con tope en boundary UTF-8 y marca truncado (el preview lo avisa).
+fn push_stream_capped(buf: &mut String, suffix: &str, truncated: &mut bool) {
+    if buf.len() >= STREAM_ACCUM_MAX_BYTES {
+        *truncated = true;
+        return;
+    }
+    let room = STREAM_ACCUM_MAX_BYTES - buf.len();
+    if suffix.len() <= room {
+        buf.push_str(suffix);
+        return;
+    }
+    let mut end = room;
+    while !suffix.is_char_boundary(end) {
+        end -= 1;
+    }
+    buf.push_str(&suffix[..end]);
+    *truncated = true;
+}
+
 impl AssistantRuntime {
     /// Modelo que deben traer los resultados en vuelo: el fallback si hay un
     /// reintento activo, si no el configurado por el usuario.
@@ -2551,13 +2575,17 @@ impl AssistantRuntime {
         for delta in deltas {
             match delta {
                 StreamDelta::Reasoning(suffix) => {
-                    job.stream_reasoning.push_str(&suffix);
+                    push_stream_capped(
+                        &mut job.stream_reasoning,
+                        &suffix,
+                        &mut job.stream_truncated,
+                    );
                     if job.first_reasoning_at.is_none() {
                         job.first_reasoning_at = Some(std::time::Instant::now());
                     }
                 }
                 StreamDelta::Text(suffix) => {
-                    job.stream_text.push_str(&suffix);
+                    push_stream_capped(&mut job.stream_text, &suffix, &mut job.stream_truncated);
                     if job.first_delta_at.is_none() {
                         job.first_delta_at = Some(std::time::Instant::now());
                     }
@@ -2567,11 +2595,16 @@ impl AssistantRuntime {
                 }
             }
         }
-        let display: String = job
+        let mut display: String = job
             .stream_text
             .chars()
             .take(MAX_CONVERSATION_TURN_CHARS)
             .collect();
+        // Aviso honesto de truncado en el preview (el final llega por el
+        // canal de completado con su propio presupuesto).
+        if job.stream_truncated {
+            display.push_str("…[truncado]");
+        }
         // Razonamiento plegable del turno provisional (cap propio): viaja al
         // chat para verse en vivo, nunca al texto final ni al proveedor.
         let reasoning: Option<String> = if job.stream_reasoning.trim().is_empty() {
@@ -10156,6 +10189,7 @@ mod tests {
             stream_rx: None,
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
@@ -10672,9 +10706,10 @@ mod tests {
             app.assistant.conversation[1].media.is_some(),
             "la última tiene su mini-card"
         );
-        // Replay de la vieja CON frames: reutiliza SIN re-render (sincrónico,
-        // sin worker) y setea dueño=0 (el player va a ESE turno, no a la última).
-        app.replay_assistant_history_media(&ctx, 0);
+        // Replay de la ÚLTIMA (con frames: `HISTORY_FULL_FRAMES_MAX` = 1
+        // conserva solo el último turno): reutiliza SIN re-render
+        // (sincrónico, sin worker) y setea dueño=1.
+        app.replay_assistant_history_media(&ctx, 1);
         assert!(
             app.assistant_runtime.anim_job.is_none(),
             "con frames no se spawnea worker"
@@ -10686,8 +10721,8 @@ mod tests {
         assert!(app.assistant.media.is_some(), "slot reinyectado");
         assert_eq!(
             app.assistant.media_owner_turn(),
-            Some(0),
-            "tras el replay el player vive en el turno viejo"
+            Some(1),
+            "tras el replay el player vive en el último turno"
         );
         assert!(
             app.assistant.conversation[0].media.is_some(),
@@ -10697,7 +10732,34 @@ mod tests {
             app.assistant.conversation[1].media.is_some(),
             "la última sigue con mini-card"
         );
-        // Replay SIN frames (evictado por el cap): re-renderiza por el camino
+        // Replay de la VIEJA (evictada por el cap de 1): re-renderiza por
+        // el camino single con worker + marcador, como antes.
+        app.replay_assistant_history_media(&ctx, 0);
+        assert!(
+            app.assistant_runtime.anim_job.is_some(),
+            "sin frames el replay spawnea worker"
+        );
+        assert_eq!(app.assistant_runtime.anim_replay_owner, Some(0));
+        drenar(&mut app, &ctx);
+        assert!(app.assistant.media.is_some(), "slot reinyectado");
+        assert_eq!(
+            app.assistant.media_owner_turn(),
+            Some(0),
+            "tras el replay el player vive en el turno viejo"
+        );
+        assert!(
+            app.assistant_runtime.anim_replay_owner.is_none(),
+            "el marcador se consume en el drain"
+        );
+        assert!(
+            app.assistant.conversation[0].media.is_some(),
+            "la vieja sigue con mini-card"
+        );
+        assert!(
+            app.assistant.conversation[1].media.is_some(),
+            "la última sigue con mini-card"
+        );
+        // Replay SIN frames (evictado manual): re-renderiza por el camino
         // single con worker + marcador, como antes.
         app.assistant.conversation[0]
             .media
@@ -11707,6 +11769,7 @@ mod tests {
             stream_rx: None,
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
@@ -12839,6 +12902,7 @@ mod tests {
             stream_rx: None,
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
@@ -12884,6 +12948,7 @@ mod tests {
             stream_rx: Some(delta_rx),
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
@@ -12971,6 +13036,29 @@ mod tests {
     }
 
     #[test]
+    fn stream_acumulado_corta_en_256kib_con_flag_y_sin_romper_utf8() {
+        // Ola 4: el acumulado no crece sin cota; el corte cae en boundary.
+        let mut buf = String::new();
+        let mut truncado = false;
+        super::push_stream_capped(&mut buf, "hola", &mut truncado);
+        assert_eq!(buf, "hola");
+        assert!(!truncado);
+        // Llenar hasta el borde con multibyte (😀 = 4 bytes; "hola" ya ocupa 4).
+        let grande = "😀".repeat((super::STREAM_ACCUM_MAX_BYTES - 4) / 4);
+        super::push_stream_capped(&mut buf, &grande, &mut truncado);
+        assert!(!truncado, "cabe justo");
+        assert_eq!(buf.len(), super::STREAM_ACCUM_MAX_BYTES);
+        assert!(buf.is_char_boundary(buf.len()));
+        super::push_stream_capped(&mut buf, "😀x", &mut truncado);
+        assert!(truncado, "el exceso marca el flag");
+        assert_eq!(buf.len(), super::STREAM_ACCUM_MAX_BYTES);
+        assert!(buf.is_char_boundary(buf.len()));
+        // Una vez lleno, no crece más.
+        super::push_stream_capped(&mut buf, "zz", &mut truncado);
+        assert_eq!(buf.len(), super::STREAM_ACCUM_MAX_BYTES);
+    }
+
+    #[test]
     fn remote_stages_go_in_order_with_rioplatense_texts() {
         // autorizada → conectando → esperando primer token → recibiendo (KiB).
         assert_eq!(remote_stage_for_job(0, false, 0), RemoteStage::Autorizada);
@@ -13040,6 +13128,7 @@ mod tests {
             stream_rx: Some(delta_rx),
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,

@@ -18,6 +18,37 @@ use grafito_ui::Tool;
 
 use crate::{to_color32, GrafitoApp};
 
+/// Tope del memo de centros paramétricos 3D.
+const PARAM_CENTER_CACHE_CAP: usize = 64;
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const PARAM_CENTER_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(PARAM_CENTER_CACHE_CAP) };
+
+thread_local! {
+    /// Centros de superficies/curvas paramétricas por (objeto, versión).
+    static PARAM_CENTERS: std::cell::RefCell<lru::LruCache<(ObjectId, u64), Vec3>> =
+        std::cell::RefCell::new(lru::LruCache::new(PARAM_CENTER_CACHE_SIZE));
+}
+
+/// Centro memoizado: el cálculo evalúa el AST 3 veces (parse completo en
+/// cada una vía `prepare_function_ast`, sin caché) y corría por frame por
+/// superficie/curva aunque nada cambie. La versión cubre ediciones de
+/// expresión y cambios de variables (ambos con commit).
+fn cached_parametric_center(
+    obj_id: ObjectId,
+    version: u64,
+    compute: impl FnOnce() -> Vec3,
+) -> Vec3 {
+    if let Some(hit) = PARAM_CENTERS.with(|c| c.borrow_mut().get(&(obj_id, version)).copied()) {
+        return hit;
+    }
+    let center = compute();
+    PARAM_CENTERS.with(|c| {
+        c.borrow_mut().put((obj_id, version), center);
+    });
+    center
+}
+
 /// La superficie 4D histórica no entra en el `WorldMesh` y conserva su
 /// proyección CPU cuando el callback GPU está activo.
 pub(crate) fn requires_cpu_3d_overlay(object: &GeoObject) -> bool {
@@ -2092,25 +2123,31 @@ impl GrafitoApp {
                 GeoObject::Torus3D(t) => t.center.to_vec3(),
                 GeoObject::MoebiusStrip(m) => m.center.to_vec3(),
                 GeoObject::Surface3D(surface) => {
-                    grafito_core::parametric_sampling::evaluate_surface_3d(
-                        surface,
-                        2,
-                        &self.document.variables,
-                    )
-                    .get(1)
-                    .and_then(|row| row.get(1))
-                    .map(|point| point.to_vec3())
-                    .unwrap_or(Vec3::ZERO)
+                    let version = self.document.version;
+                    cached_parametric_center(surface.id, version, || {
+                        grafito_core::parametric_sampling::evaluate_surface_3d(
+                            surface,
+                            2,
+                            &self.document.variables,
+                        )
+                        .get(1)
+                        .and_then(|row| row.get(1))
+                        .map(|point| point.to_vec3())
+                        .unwrap_or(Vec3::ZERO)
+                    })
                 }
                 GeoObject::ParametricCurve3D(c) => {
-                    grafito_core::parametric_sampling::evaluate_parametric_curve_3d(
-                        c,
-                        2,
-                        &self.document.variables,
-                    )
-                    .get(1)
-                    .map(|&(x, y, z)| Vec3::new(x as f32, y as f32, z as f32))
-                    .unwrap_or(Vec3::ZERO)
+                    let version = self.document.version;
+                    cached_parametric_center(c.id, version, || {
+                        grafito_core::parametric_sampling::evaluate_parametric_curve_3d(
+                            c,
+                            2,
+                            &self.document.variables,
+                        )
+                        .get(1)
+                        .map(|&(x, y, z)| Vec3::new(x as f32, y as f32, z as f32))
+                        .unwrap_or(Vec3::ZERO)
+                    })
                 }
                 GeoObject::Attractor3D(a) => Vec3::new(a.x0 as f32, a.y0 as f32, a.z0 as f32) * 0.2,
                 GeoObject::RegularPolychoron4D(_) => typed_projection

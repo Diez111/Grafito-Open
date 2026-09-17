@@ -534,6 +534,41 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         }
     }
 
+    // Libro de pizarra (Ola 4): la carga acota en deserialización, pero un
+    // documento construido en memoria también debe respetar hojas,
+    // elementos y — sobre todo — una cota TOTAL de bytes de trazo (el
+    // espejo `doc.whiteboard` no se cuenta: es la hoja actual duplicada).
+    if doc.whiteboard_pages.len() > crate::document::MAX_WHITEBOARD_PAGES {
+        return Err(format!(
+            "Whiteboard supera {} hojas",
+            crate::document::MAX_WHITEBOARD_PAGES
+        ));
+    }
+    let mut whiteboard_bytes = 0usize;
+    for page in &doc.whiteboard_pages {
+        if page.doc.len() > crate::document::MAX_WHITEBOARD_ELEMENTS_PER_PAGE {
+            return Err(format!(
+                "Whiteboard supera {} elementos por hoja",
+                crate::document::MAX_WHITEBOARD_ELEMENTS_PER_PAGE
+            ));
+        }
+        for element in page.doc.elements() {
+            whiteboard_bytes = whiteboard_bytes.saturating_add(match element {
+                grafito_whiteboard::WhiteboardElement::Stroke { points, .. } => {
+                    points.len().saturating_mul(16)
+                }
+                grafito_whiteboard::WhiteboardElement::Text { text, .. } => text.len(),
+                _ => 64,
+            });
+        }
+    }
+    if whiteboard_bytes > crate::document::MAX_WHITEBOARD_TOTAL_BYTES {
+        return Err(format!(
+            "Whiteboard supera {} MiB de trazo total",
+            crate::document::MAX_WHITEBOARD_TOTAL_BYTES / (1024 * 1024)
+        ));
+    }
+
     for (id, object) in doc.objects_iter() {
         let GeoObject::Pencil(locus) = object else {
             continue;
@@ -2083,5 +2118,57 @@ mod tests_budgets_ola4 {
             err.contains("exceeds maximum"),
             "la guarda de tamaño debe rechazar, fue: {err}"
         );
+    }
+
+    /// Ola 4: el libro de pizarra respeta hojas, elementos y bytes totales.
+    ///
+    /// Determinista: 33 hojas se rechazan; una hoja con trazo gigante que
+    /// supera los 32 MiB totales también (sin esta guarda, el teórico era
+    /// ~1 GiB clonado por snapshot de undo).
+    #[test]
+    fn whiteboard_book_caps_reject_oversized() {
+        use crate::document::{
+            WhiteboardPageData, MAX_WHITEBOARD_ELEMENTS_PER_PAGE, MAX_WHITEBOARD_PAGES,
+            MAX_WHITEBOARD_TOTAL_BYTES,
+        };
+        use grafito_whiteboard::{WhiteboardDoc, WhiteboardElement};
+        assert_eq!(MAX_WHITEBOARD_PAGES, 32);
+        assert_eq!(MAX_WHITEBOARD_TOTAL_BYTES, 32 * 1024 * 1024);
+        // Vacío pasa.
+        assert!(validate_document(&Document::new()).is_ok());
+        // 33 hojas se rechazan.
+        let mut doc = Document::new();
+        doc.whiteboard_pages = (0..MAX_WHITEBOARD_PAGES + 1)
+            .map(|i| WhiteboardPageData {
+                title: format!("H{i}"),
+                doc: WhiteboardDoc::new(),
+                pan: (0.0, 0.0),
+                zoom: 1.0,
+            })
+            .collect();
+        let err = validate_document(&doc).unwrap_err();
+        assert!(err.contains("hojas"), "fue: {err}");
+        // Trazo gigante: supera los 32 MiB totales.
+        let mut doc = Document::new();
+        let mut big = WhiteboardDoc::new();
+        let puntos_por_trazo = crate::pencil::MAX_PENCIL_POINTS;
+        let trazos = MAX_WHITEBOARD_TOTAL_BYTES / (puntos_por_trazo * 16) + 2;
+        for _ in 0..trazos.min(MAX_WHITEBOARD_ELEMENTS_PER_PAGE + 1) {
+            big.add(WhiteboardElement::Stroke {
+                points: vec![(1.0, 2.0); puntos_por_trazo],
+                color: (0, 0, 0),
+                width: 1.0,
+            });
+        }
+        doc.whiteboard_pages = vec![WhiteboardPageData {
+            title: "grande".to_string(),
+            doc: big,
+            pan: (0.0, 0.0),
+            zoom: 1.0,
+        }];
+        // Con 258 trazos de 128 KiB (< 501 elementos) cae por el tope
+        // TOTAL de 32 MiB, no por elementos/hoja.
+        let err = validate_document(&doc).unwrap_err();
+        assert!(err.contains("MiB"), "debe citar el tope total, fue: {err}");
     }
 }

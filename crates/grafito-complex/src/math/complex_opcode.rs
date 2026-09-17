@@ -1,4 +1,5 @@
 use crate::math::complex_expr::ComplexExpr;
+use num_complex::Complex64;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -335,10 +336,308 @@ fn validate_complex_program(prog: &ComplexBytecodeProgram) -> Result<(), Compile
     Ok(())
 }
 
+/// Ejecuta un programa compilado sobre valores directos (sin `HashMap`).
+///
+/// `vars[slot]` = valor del slot (ver `var_map` de compilación; los
+/// `document_vars` ya van horneados como constantes). Semántica idéntica al
+/// walk (`ComplexExpr::eval`): mismas llamadas (`ComplexMatrix::add/sub/mul/div`,
+/// `powc` con su gate, mismas trascendentes y especiales), así que el
+/// resultado es bit a bit el del árbol.
+///
+/// `None` = opcode desconocido, slot/constante fuera de rango o pila
+/// degenerada (el llamante conserva el walk como fallback honesto; con
+/// programas de `compile_complex_expr` — ya validados — no ocurre).
+pub fn exec_cpu(prog: &ComplexBytecodeProgram, vars: &[Complex64]) -> Option<Complex64> {
+    use crate::math::complex_expr::{
+        complex_bessel_j, complex_bessel_y, complex_erf, complex_gamma, complex_lambert_w,
+        complex_zeta, ComplexMatrix,
+    };
+    use num_complex::Complex64;
+
+    // Pila fija (el validador acota la profundidad a 64): sin allocs por
+    // ejecución, sin pánicos por desborde (chequeos defensivos).
+    let mut stack = [Complex64::new(0.0, 0.0); 64];
+    let mut sp = 0usize;
+    macro_rules! push {
+        ($v:expr) => {{
+            if sp >= stack.len() {
+                return None;
+            }
+            stack[sp] = $v;
+            sp += 1;
+        }};
+    }
+    macro_rules! pop {
+        () => {{
+            if sp == 0 {
+                return None;
+            }
+            sp -= 1;
+            stack[sp]
+        }};
+    }
+    macro_rules! unary {
+        ($f:expr) => {{
+            let a = pop!();
+            // Mismas llamadas que el walk (round-trip matricial exacto;
+            // num-complex 0.4 toma `self` por valor).
+            push!(
+                ComplexMatrix::from_complex($f(ComplexMatrix::from_complex(a).to_complex()))
+                    .to_complex()
+            );
+        }};
+    }
+    for word in prog.code.iter() {
+        let op = (word & 0xFF) as u8;
+        let operand = word >> 8;
+        match op {
+            x if x == ComplexOp::Nop as u8 => {}
+            x if x == ComplexOp::PushConst as u8 => {
+                // Ojo: el operando ya es offset en ELEMENTOS (`idx` =
+                // `constants.len()` antes del push del par), no índice de par.
+                let i = operand as usize;
+                let re = *prog.constants.get(i)?;
+                let im = *prog.constants.get(i + 1)?;
+                push!(Complex64::new(re, im));
+            }
+            x if x == ComplexOp::PushVar as u8 => {
+                push!(*vars.get(operand as usize)?);
+            }
+            x if x == ComplexOp::Add as u8 => {
+                let b = pop!();
+                let a = pop!();
+                let ma = ComplexMatrix::from_complex(a);
+                let mb = ComplexMatrix::from_complex(b);
+                push!(ma.add(&mb).to_complex());
+            }
+            x if x == ComplexOp::Sub as u8 => {
+                let b = pop!();
+                let a = pop!();
+                push!(ComplexMatrix::from_complex(a)
+                    .sub(&ComplexMatrix::from_complex(b))
+                    .to_complex());
+            }
+            x if x == ComplexOp::Mul as u8 => {
+                let b = pop!();
+                let a = pop!();
+                push!(ComplexMatrix::from_complex(a)
+                    .mul(&ComplexMatrix::from_complex(b))
+                    .to_complex());
+            }
+            x if x == ComplexOp::Div as u8 => {
+                let b = pop!();
+                let a = pop!();
+                // Mismo gate que el walk (`det < 1e-30` → singular).
+                let res = ComplexMatrix::from_complex(a).div(&ComplexMatrix::from_complex(b))?;
+                push!(res.to_complex());
+            }
+            x if x == ComplexOp::Pow as u8 => {
+                let exp = pop!();
+                let base = pop!();
+                if base.norm() < 1e-300 && exp.re < 0.0 && exp.im.abs() < 1e-12 {
+                    return None;
+                }
+                push!(base.powc(exp));
+            }
+            x if x == ComplexOp::Neg as u8 => {
+                let a = pop!();
+                push!(-a);
+            }
+            x if x == ComplexOp::Sin as u8 => unary!(Complex64::sin),
+            x if x == ComplexOp::Cos as u8 => unary!(Complex64::cos),
+            x if x == ComplexOp::Tan as u8 => unary!(Complex64::tan),
+            x if x == ComplexOp::Exp as u8 => unary!(Complex64::exp),
+            // Ojo: el opcode se llama `Log` pero el compilador lo emite
+            // para `Ln` (logaritmo principal, no log10).
+            x if x == ComplexOp::Log as u8 => unary!(Complex64::ln),
+            x if x == ComplexOp::Sqrt as u8 => unary!(Complex64::sqrt),
+            x if x == ComplexOp::Abs as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.norm(), 0.0));
+            }
+            x if x == ComplexOp::Min as u8 => {
+                let b = pop!();
+                let a = pop!();
+                push!(if a.norm() <= b.norm() { a } else { b });
+            }
+            x if x == ComplexOp::Max as u8 => {
+                let b = pop!();
+                let a = pop!();
+                push!(if a.norm() >= b.norm() { a } else { b });
+            }
+            x if x == ComplexOp::Floor as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.re.floor(), a.im.floor()));
+            }
+            x if x == ComplexOp::Ceil as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.re.ceil(), a.im.ceil()));
+            }
+            x if x == ComplexOp::Asin as u8 => unary!(Complex64::asin),
+            x if x == ComplexOp::Acos as u8 => unary!(Complex64::acos),
+            x if x == ComplexOp::Atan as u8 => unary!(Complex64::atan),
+            x if x == ComplexOp::Sinh as u8 => unary!(Complex64::sinh),
+            x if x == ComplexOp::Cosh as u8 => unary!(Complex64::cosh),
+            x if x == ComplexOp::Tanh as u8 => unary!(Complex64::tanh),
+            x if x == ComplexOp::Asinh as u8 => unary!(Complex64::asinh),
+            x if x == ComplexOp::Acosh as u8 => unary!(Complex64::acosh),
+            x if x == ComplexOp::Atanh as u8 => unary!(Complex64::atanh),
+            x if x == ComplexOp::Sec as u8 => {
+                let a = pop!();
+                let c = a.cos();
+                if c.norm() < 1e-15 {
+                    return None;
+                }
+                push!(Complex64::new(1.0, 0.0) / c);
+            }
+            x if x == ComplexOp::Csc as u8 => {
+                let a = pop!();
+                let s = a.sin();
+                if s.norm() < 1e-15 {
+                    return None;
+                }
+                push!(Complex64::new(1.0, 0.0) / s);
+            }
+            x if x == ComplexOp::Cot as u8 => {
+                let a = pop!();
+                let t = a.tan();
+                if t.norm() < 1e-15 {
+                    return None;
+                }
+                push!(Complex64::new(1.0, 0.0) / t);
+            }
+            x if x == ComplexOp::Gamma as u8 => unary!(complex_gamma),
+            x if x == ComplexOp::BesselJ as u8 => {
+                let a = pop!();
+                push!(complex_bessel_j(0.0, a));
+            }
+            x if x == ComplexOp::Conjugate as u8 => {
+                let a = pop!();
+                // `conj` es el único que toma `&self` en num-complex 0.4.
+                push!(ComplexMatrix::from_complex(a.conj()).to_complex());
+            }
+            x if x == ComplexOp::RealPart as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.re, 0.0));
+            }
+            x if x == ComplexOp::ImagPart as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.im, 0.0));
+            }
+            x if x == ComplexOp::Arg as u8 => {
+                let a = pop!();
+                push!(Complex64::new(a.arg(), 0.0));
+            }
+            x if x == ComplexOp::Erf as u8 => unary!(complex_erf),
+            x if x == ComplexOp::LambertW as u8 => unary!(complex_lambert_w),
+            x if x == ComplexOp::Zeta as u8 => unary!(complex_zeta),
+            x if x == ComplexOp::BesselY as u8 => {
+                let a = pop!();
+                push!(complex_bessel_y(0.0, a));
+            }
+            _ => return None,
+        }
+    }
+    if sp == 1 {
+        Some(stack[0])
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::math::complex_expr::parse;
+    use num_complex::Complex64;
+    use std::collections::HashMap;
+
+    /// Paridad Ola 2 B13: `exec_cpu` acuerda con el walk en gaps
+    /// (finito/no-finito: lo que decide celdas dibujadas) y en valores
+    /// cuando ambos son finitos. NOTA: no se exige bit a bit en NaN porque
+    /// los payloads dependen del codegen del call-site (destino vs fuente
+    /// en MULSD/ADDSD): el mismo `add` da payloads distintos según el
+    /// contexto de inlineado. Los renderers solo miran `is_finite`, así
+    /// que la paridad que importa es la de gaps + valores finitos.
+    ///
+    /// Casos: polos (`1/(z^2+1)` en ±i), divisiones casi-singulares (gate
+    /// 1e-30), gates de `Pow`, entradas no finitas.
+    #[test]
+    fn exec_cpu_coincide_con_walk_en_malla_adversarial() {
+        let casos = [
+            "z",
+            "1/z",
+            "z^2+2*z+1",
+            "sin(z)/cos(z)",
+            "exp(z)/z",
+            "sqrt(z-1)",
+            "z^z",
+            "z^(-1)",
+            "gamma(z)",
+            "conj(z)*z",
+            "1/(z^2+1)",
+            "log(z)",
+            "(z-1)/(z+1)",
+            "z^0.5",
+        ];
+        let coords = [
+            -2.0,
+            -1.0,
+            -0.5,
+            0.0,
+            0.5,
+            1.0,
+            2.0,
+            1e-16,
+            -1e-16,
+            1e-300,
+            1e300,
+            f64::INFINITY,
+            f64::NAN,
+        ];
+        for expr_str in casos {
+            let expr = parse(expr_str).unwrap_or_else(|e| panic!("parsea: {expr_str}: {e}"));
+            let mut prog = ComplexBytecodeProgram::default();
+            compile_complex_expr(&expr, &BTreeMap::new(), &[("z", 0)], &mut prog)
+                .unwrap_or_else(|e| panic!("compila: {expr_str}: {e:?}"));
+            for &x in &coords {
+                for &y in &coords {
+                    let z = Complex64::new(x, y);
+                    let mut vars = HashMap::new();
+                    vars.insert("z".to_string(), z);
+                    // Efectivo para render: `Some` solo si finito (igual que
+                    // los call-sites filtran). Así la paridad es sobre lo que
+                    // el usuario ve (celda dibujada o no + valor).
+                    let walk = expr
+                        .eval(&vars)
+                        .ok()
+                        .filter(|v| v.re.is_finite() && v.im.is_finite());
+                    let flat =
+                        exec_cpu(&prog, &[z]).filter(|v| v.re.is_finite() && v.im.is_finite());
+                    match (walk, flat) {
+                        (Some(w), Some(f)) => {
+                            let tol = 1e-12 * 1.0f64.max(w.norm()).max(f.norm());
+                            assert!(
+                                (w - f).norm() <= tol,
+                                "deriva en {expr_str} z=({x},{y}): walk={w:?} flat={f:?}"
+                            );
+                        }
+                        (None, None) => {}
+                        (w, f) => {
+                            panic!("gap en {expr_str} z=({x},{y}): walk={w:?} flat={f:?}")
+                        }
+                    }
+                }
+            }
+        }
+        // DerivZ no compila (fallback al walk en los llamantes).
+        let deriv = parse("deriv_z(z^2)").expect("parse deriv");
+        let mut prog = ComplexBytecodeProgram::default();
+        assert!(
+            compile_complex_expr(&deriv, &BTreeMap::new(), &[("z", 0)], &mut prog).is_err(),
+            "deriv_z debe rechazar compilación"
+        );
+    }
 
     fn right_nested_sum(terms: usize) -> String {
         (1..terms).fold("z".to_owned(), |expr, _| format!("z + ({expr})"))

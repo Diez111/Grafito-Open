@@ -428,8 +428,13 @@ fn compute_pixel(fractal: &FractalType, x: f64, y: f64, max_iter: u32) -> Fracta
 /// Presupuestos intactos: 160k píxeles / 64M work / 10k iter / caché 4.
 /// [`FractalPixel`] y [`FractalError`] no cambian de forma (solo se agrega la
 /// variante `Cancelled`, honesta y no exhaustiva en los callers).
+///
+/// Devuelve el buffer compartido (`Arc`): en hit de caché no se clonan los
+/// hasta 160k píxeles (el `Vec` vive en la caché y el llamante solo suma un
+/// refcount). Para la firma histórica con `Vec` ver
+/// [`try_compute_fractal_cancelable`].
 #[allow(clippy::too_many_arguments)]
-pub fn try_compute_fractal_cancelable(
+pub fn try_compute_fractal_shared_cancelable(
     fractal: &FractalType,
     x_min: f64,
     x_max: f64,
@@ -438,11 +443,11 @@ pub fn try_compute_fractal_cancelable(
     width: usize,
     height: usize,
     should_cancel: &dyn Fn(usize) -> bool,
-) -> Result<Vec<FractalPixel>, FractalError> {
+) -> Result<std::sync::Arc<Vec<FractalPixel>>, FractalError> {
     use rayon::prelude::*;
 
     if width == 0 || height == 0 {
-        return Ok(Vec::new());
+        return Ok(std::sync::Arc::new(Vec::new()));
     }
     if !x_min.is_finite()
         || !x_max.is_finite()
@@ -458,7 +463,7 @@ pub fn try_compute_fractal_cancelable(
 
     let key = cache_key(fractal, x_min, x_max, y_min, y_max, width, height);
     if let Some(pixels) = cached_pixels(key) {
-        return Ok(std::sync::Arc::unwrap_or_clone(pixels));
+        return Ok(pixels);
     }
 
     let dx = (x_max - x_min) / width as f64;
@@ -506,11 +511,63 @@ pub fn try_compute_fractal_cancelable(
         pixels.extend(tile);
         rows_done += tile_rows;
     }
-    // Un solo `Arc` para la caché; `unwrap_or_clone` evita el clon extra del
-    // `pixels.clone()` previo cuando nadie más retiene el buffer.
+    // Un solo `Arc` para la caché y el llamante: nadie clona el buffer
+    // (hasta 160k píxeles); la caché retiene su ref y el llamante el suyo.
     let shared = std::sync::Arc::new(pixels);
     cache_pixels(key, std::sync::Arc::clone(&shared));
-    Ok(std::sync::Arc::unwrap_or_clone(shared))
+    Ok(shared)
+}
+
+/// Compatibilidad con la firma histórica (`Vec` propio): en hit de caché
+/// clona el buffer una vez (hasta 160k píxeles). El camino caliente de
+/// render usa [`try_compute_fractal_shared`] y no paga ese clon.
+#[allow(clippy::too_many_arguments)]
+pub fn try_compute_fractal_cancelable(
+    fractal: &FractalType,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
+    should_cancel: &dyn Fn(usize) -> bool,
+) -> Result<Vec<FractalPixel>, FractalError> {
+    Ok(std::sync::Arc::unwrap_or_clone(
+        try_compute_fractal_shared_cancelable(
+            fractal,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+            width,
+            height,
+            should_cancel,
+        )?,
+    ))
+}
+
+/// Variante compartida sin cancelación para el camino caliente de render:
+/// en hit devuelve el `Arc` de la caché sin clonar el buffer.
+#[allow(clippy::too_many_arguments)]
+pub fn try_compute_fractal_shared(
+    fractal: &FractalType,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    width: usize,
+    height: usize,
+) -> Result<std::sync::Arc<Vec<FractalPixel>>, FractalError> {
+    try_compute_fractal_shared_cancelable(
+        fractal,
+        x_min,
+        x_max,
+        y_min,
+        y_max,
+        width,
+        height,
+        &|_| false,
+    )
 }
 
 /// Calcula un fractal con límites de recursos y caché LRU acotada para escenas estáticas.

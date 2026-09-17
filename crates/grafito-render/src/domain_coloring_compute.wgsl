@@ -159,6 +159,13 @@ struct GridParams {
     code_len: u32,
     dc_mode: u32,
     _pad1: u32,
+    // Origen y paso de la malla regular (los centros se derivan en el
+    // shader: sin subir `in_points`, -2 MiB por dispatch de 250k celdas).
+    grid_origin: vec2<f32>,
+    grid_step: vec2<f32>,
+    // Lado de la malla cuadrada (`grid_size == grid_res * grid_res`).
+    grid_res: u32,
+    _pad2: u32,
 }
 
 @group(0) @binding(0)
@@ -171,9 +178,6 @@ var<storage, read> bytecode: array<u32>;
 var<storage, read> constants: array<vec2<f32>>;
 
 @group(0) @binding(3)
-var<storage, read> in_points: array<vec2<f32>>;
-
-@group(0) @binding(4)
 var<storage, read_write> out_colors: array<vec4<f32>>;
 
 const OP_PUSH_CONST: u32 = 1u;
@@ -325,7 +329,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    let in_pos = in_points[gid.x];
+    // Centros de celda derivados en el shader (malla regular fila-mayor:
+    // `i = idx / res`, `j = idx % res`, igual que el CPU): sin `in_points`.
+    let res = params.grid_res;
+    let fi = f32(gid.x / res);
+    let fj = f32(gid.x % res);
+    let in_pos = params.grid_origin + (vec2<f32>(fi, fj) + vec2<f32>(0.5, 0.5)) * params.grid_step;
     let z = dc_new(in_pos.x, in_pos.y);
     let result = eval_bytecode_dc(z);
 

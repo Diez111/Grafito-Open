@@ -422,6 +422,220 @@ impl PendingParametricEval {
     }
 }
 
+/// Contexto de un dispatch de superficie (lo que el pending no lleva y el
+/// resolve necesita para ensamblar la malla). Va en el slot junto al job.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreparedSurfaceCtx {
+    /// Lado en celdas del dispatch.
+    pub res: usize,
+    /// Dominio del dispatch.
+    pub x_min: f64,
+    /// Dominio del dispatch.
+    pub x_max: f64,
+    /// Dominio del dispatch.
+    pub y_min: f64,
+    /// Dominio del dispatch.
+    pub y_max: f64,
+}
+
+/// Preparación compartida sync/async de superficie (guardas + programa).
+struct PreparedSurfaceEval {
+    params: ParametricParamsUniform,
+    prog: BytecodeProgram,
+    output_count: usize,
+    ctx: PreparedSurfaceCtx,
+}
+
+/// Prepara una superficie (origen único sync/async): mismas guardas que el
+/// `evaluate_surface` histórico (flags, budget, bounds, exp inseguro,
+/// precisión f32, compilación). `None` = CPU honesto.
+fn prepare_surface_eval(
+    pipeline: &ParametricComputePipeline,
+    surf: &Surface3DObj,
+    res: usize,
+    variables: &BTreeMap<String, f64>,
+) -> Option<PreparedSurfaceEval> {
+    if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
+        return None;
+    }
+    let res = res.max(1);
+    if res > pipeline.max_surface_res {
+        return None;
+    }
+    debug_assert!(surface_res_within_budget(res));
+    let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
+    let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
+    let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
+    let y_max = ParametricComputePipeline::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
+        || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
+    {
+        return None;
+    }
+    if surface_expression_has_unsafe_f32_exp(&surf.expr, (x_min, x_max), (y_min, y_max), variables)
+    {
+        return None;
+    }
+    let min_step =
+        ((x_max - x_min).abs() / res.max(1) as f64).min((y_max - y_min).abs() / res.max(1) as f64);
+    if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
+        return None;
+    }
+
+    let mut prog = BytecodeProgram::default();
+    let ast =
+        grafito_geometry::expr::prepare_function_ast(&surf.expr, variables, &["x", "y"]).ok()?;
+    compile_expr_with_mapping(&ast, variables, &[("x", 0), ("y", 1)], &mut prog).ok()?;
+
+    let params = ParametricParamsUniform {
+        mode: 3,
+        n: (res + 1) as u32,
+        m: (res + 1) as u32,
+        t_min: 0.0,
+        t_max: 0.0,
+        x_min: x_min as f32,
+        x_max: x_max as f32,
+        y_min: y_min as f32,
+        y_max: y_max as f32,
+        code_len: prog.code.len() as u32,
+        _pad: [0; 2],
+    };
+
+    let output_count = (res + 1) * (res + 1);
+    Some(PreparedSurfaceEval {
+        params,
+        prog,
+        output_count,
+        ctx: PreparedSurfaceCtx {
+            res,
+            x_min,
+            x_max,
+            y_min,
+            y_max,
+        },
+    })
+}
+
+/// Ensambla la malla desde valores planos (origen único sync/async).
+fn assemble_surface_grid(
+    values: &[f32],
+    res: usize,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+) -> SurfaceSamples {
+    let mut grid = Vec::with_capacity(res + 1);
+    for i in 0..=res {
+        let mut row = Vec::with_capacity(res + 1);
+        for j in 0..=res {
+            let idx = j * (res + 1) + i;
+            let v = values[idx];
+            let x = x_min + (i as f64 / res as f64) * (x_max - x_min);
+            let y = y_min + (j as f64 / res as f64) * (y_max - y_min);
+            let z = if v.is_finite() { v as f64 } else { f64::NAN };
+            row.push(grafito_geometry::Point3D::new(x, y, z));
+        }
+        grid.push(row);
+    }
+    grid
+}
+
+/// Clave de caché para superficie (origen único sync/async).
+pub fn surface_cache_key(
+    surf: &Surface3DObj,
+    res: usize,
+    variables: &BTreeMap<String, f64>,
+) -> Option<grafito_core::SurfaceCacheKey> {
+    if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
+        return None;
+    }
+    let res = res.max(1);
+    let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
+    let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
+    let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
+    let y_max = ParametricComputePipeline::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
+        || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
+    {
+        return None;
+    }
+    Some(grafito_core::SurfaceCacheKey {
+        x_domain: (x_min, x_max),
+        y_domain: (y_min, y_max),
+        res,
+        is_parametric: false,
+        expr_hash: parametric_sampling::surface_expr_hash(surf),
+        variables_hash: parametric_sampling::variables_hash(variables),
+    })
+}
+
+/// Escribe malla + key en el caché del objeto (origen único sync/async).
+pub fn populate_surface_cache(
+    surf: &Surface3DObj,
+    key: grafito_core::SurfaceCacheKey,
+    grid: SurfaceSamples,
+) {
+    *surf.cached_grid.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = grid;
+    *surf.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+}
+
+/// Resolve non-blocking para el slot: re-chequea vigencia, resuelve,
+/// valida finitud y popula. `false` = el llamante cae al CPU honesto.
+/// El contexto de ensamblado se deriva de la key ya validada (dominios +
+/// res viajan en ella, así que son los del dispatch).
+pub fn resolve_surface_job(
+    compute: &ParametricComputePipeline,
+    surf: &Surface3DObj,
+    variables: &BTreeMap<String, f64>,
+    res: usize,
+    job: PendingParametricEval,
+    key: &grafito_core::SurfaceCacheKey,
+) -> bool {
+    let Some(fresh) = surface_cache_key(surf, res, variables) else {
+        compute.abort_raw();
+        return false;
+    };
+    if &fresh != key {
+        log::debug!("Surface GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_raw();
+        return false;
+    }
+    {
+        let cached_key = surf.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(key) {
+            compute.abort_raw();
+            return true;
+        }
+    }
+    let Some(grid) = compute.resolve_surface(
+        job,
+        &PreparedSurfaceCtx {
+            res: key.res,
+            x_min: key.x_domain.0,
+            x_max: key.x_domain.1,
+            y_min: key.y_domain.0,
+            y_max: key.y_domain.1,
+        },
+    ) else {
+        return false;
+    };
+    if !surface_samples_are_finite(&grid) {
+        return false;
+    }
+    populate_surface_cache(surf, key.clone(), grid);
+    true
+}
+
 impl ParametricComputePipeline {
     pub fn new(
         device: &wgpu::Device,
@@ -907,73 +1121,56 @@ impl ParametricComputePipeline {
         res: usize,
         variables: &BTreeMap<String, f64>,
     ) -> Option<SurfaceSamples> {
-        if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
-            return None;
-        }
-        let res = res.max(1);
-        if res > self.max_surface_res {
-            return None;
-        }
-        debug_assert!(surface_res_within_budget(res));
-        let x_min = Self::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
-        let x_max = Self::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
-        let y_min = Self::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
-        let y_max = Self::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
-        if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
-            || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
-        {
-            return None;
-        }
-        if surface_expression_has_unsafe_f32_exp(
-            &surf.expr,
-            (x_min, x_max),
-            (y_min, y_max),
-            variables,
-        ) {
-            return None;
-        }
-        let min_step = ((x_max - x_min).abs() / res.max(1) as f64)
-            .min((y_max - y_min).abs() / res.max(1) as f64);
-        if !f32_bounds_have_precision(&[x_min, x_max, y_min, y_max], min_step) {
-            return None;
-        }
+        let prepared = prepare_surface_eval(self, surf, res, variables)?;
+        let values = self.dispatch_and_readback(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )?;
+        Some(assemble_surface_grid(
+            &values,
+            prepared.ctx.res,
+            prepared.ctx.x_min,
+            prepared.ctx.x_max,
+            prepared.ctx.y_min,
+            prepared.ctx.y_max,
+        ))
+    }
 
-        let mut prog = BytecodeProgram::default();
-        let ast = grafito_geometry::expr::prepare_function_ast(&surf.expr, variables, &["x", "y"])
-            .ok()?;
-        compile_expr_with_mapping(&ast, variables, &[("x", 0), ("y", 1)], &mut prog).ok()?;
+    /// Dispatch sin espera de una superficie (misma semántica que
+    /// [`Self::dispatch_curve_2d`]; resolve con [`Self::resolve_surface`]).
+    pub fn dispatch_surface(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surf: &Surface3DObj,
+        res: usize,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<PendingParametricEval> {
+        let prepared = prepare_surface_eval(self, surf, res, variables)?;
+        self.dispatch_raw(
+            device,
+            queue,
+            prepared.params,
+            &prepared.prog,
+            prepared.output_count,
+        )
+    }
 
-        let params = ParametricParamsUniform {
-            mode: 3,
-            n: (res + 1) as u32,
-            m: (res + 1) as u32,
-            t_min: 0.0,
-            t_max: 0.0,
-            x_min: x_min as f32,
-            x_max: x_max as f32,
-            y_min: y_min as f32,
-            y_max: y_max as f32,
-            code_len: prog.code.len() as u32,
-            _pad: [0; 2],
-        };
-
-        let output_count = (res + 1) * (res + 1);
-        let values = self.dispatch_and_readback(device, queue, params, &prog, output_count)?;
-
-        let mut grid = Vec::with_capacity(res + 1);
-        for i in 0..=res {
-            let mut row = Vec::with_capacity(res + 1);
-            for j in 0..=res {
-                let idx = j * (res + 1) + i;
-                let v = values[idx];
-                let x = x_min + (i as f64 / res as f64) * (x_max - x_min);
-                let y = y_min + (j as f64 / res as f64) * (y_max - y_min);
-                let z = if v.is_finite() { v as f64 } else { f64::NAN };
-                row.push(grafito_geometry::Point3D::new(x, y, z));
-            }
-            grid.push(row);
-        }
-        Some(grid)
+    /// Resolve non-blocking de [`Self::dispatch_surface`]. El llamante
+    /// aporta el contexto del dispatch (el pending no lo lleva); debe ser
+    /// el mismo con el que se despachó (la key del slot lo garantiza).
+    pub fn resolve_surface(
+        &self,
+        pending: PendingParametricEval,
+        ctx: &PreparedSurfaceCtx,
+    ) -> Option<SurfaceSamples> {
+        let values = self.resolve_raw(pending)?;
+        Some(assemble_surface_grid(
+            &values, ctx.res, ctx.x_min, ctx.x_max, ctx.y_min, ctx.y_max,
+        ))
     }
 
     /// Evaluate multiple 2D parametric curves in a single GPU submit.
@@ -1333,6 +1530,232 @@ fn surface_samples_are_finite(gpu: &SurfaceSamples) -> bool {
 }
 
 /// Try to populate the 2D parametric curve cache using the GPU.
+/// Clave de caché para curva 2D (extraída de `maybe_compute_*`: origen
+/// único sync/async). `None` si el dominio no es válido.
+pub fn curve_2d_cache_key(
+    pc: &ParametricCurve2DObj,
+    steps: usize,
+    variables: &BTreeMap<String, f64>,
+) -> Option<grafito_core::ParametricCacheKey> {
+    let steps = steps.min(MAX_CURVE_STEPS);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    Some(grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        expr_hash: parametric_sampling::curve_2d_expr_hash(pc),
+        variables_hash: parametric_sampling::variables_hash(variables),
+    })
+}
+
+/// Escribe samples + key en el caché del objeto (origen único sync/async).
+pub fn populate_curve_2d_cache(
+    pc: &ParametricCurve2DObj,
+    key: grafito_core::ParametricCacheKey,
+    samples: Curve2DSamples,
+) {
+    *pc.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pc.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+}
+
+/// Resolve non-blocking para el slot: re-chequea vigencia con el estado
+/// actual, resuelve, valida contra CPU y popula. `false` = el llamante cae
+/// al CPU honesto (mismo contrato que `maybe_compute_*` sin el bloqueo).
+pub fn resolve_curve_2d_job(
+    compute: &ParametricComputePipeline,
+    pc: &ParametricCurve2DObj,
+    variables: &BTreeMap<String, f64>,
+    steps: usize,
+    job: PendingParametricEval,
+    key: &grafito_core::ParametricCacheKey,
+) -> bool {
+    let Some(fresh) = curve_2d_cache_key(pc, steps, variables) else {
+        compute.abort_raw();
+        return false;
+    };
+    if &fresh != key {
+        log::debug!("Parametric 2D GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_raw();
+        return false;
+    }
+    {
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(key) {
+            compute.abort_raw();
+            return true;
+        }
+    }
+    let Some(samples) = compute.resolve_curve_2d(job) else {
+        return false;
+    };
+    if !nonfinite_curve_2d_samples_match_cpu(&samples, pc, steps, variables) {
+        return false;
+    }
+    populate_curve_2d_cache(pc, key.clone(), samples);
+    true
+}
+
+/// Clave de caché para curva 3D (origen único sync/async).
+pub fn curve_3d_cache_key(
+    pc: &ParametricCurve3DObj,
+    steps: usize,
+    variables: &BTreeMap<String, f64>,
+) -> Option<grafito_core::ParametricCacheKey> {
+    let steps = steps.min(MAX_CURVE_STEPS);
+    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    Some(grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        expr_hash: parametric_sampling::curve_3d_expr_hash(pc),
+        variables_hash: parametric_sampling::variables_hash(variables),
+    })
+}
+
+/// Escribe samples + key en el caché del objeto (origen único sync/async).
+pub fn populate_curve_3d_cache(
+    pc: &ParametricCurve3DObj,
+    key: grafito_core::ParametricCacheKey,
+    samples: Curve3DSamples,
+) {
+    *pc.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pc.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+}
+
+/// Resolve non-blocking para el slot (misma semántica que 2D).
+pub fn resolve_curve_3d_job(
+    compute: &ParametricComputePipeline,
+    pc: &ParametricCurve3DObj,
+    variables: &BTreeMap<String, f64>,
+    steps: usize,
+    job: PendingParametricEval,
+    key: &grafito_core::ParametricCacheKey,
+) -> bool {
+    let Some(fresh) = curve_3d_cache_key(pc, steps, variables) else {
+        compute.abort_raw();
+        return false;
+    };
+    if &fresh != key {
+        log::debug!("Parametric 3D GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_raw();
+        return false;
+    }
+    {
+        let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(key) {
+            compute.abort_raw();
+            return true;
+        }
+    }
+    let Some(samples) = compute.resolve_curve_3d(job) else {
+        return false;
+    };
+    if !nonfinite_curve_3d_samples_match_cpu(&samples, pc, steps, variables) {
+        return false;
+    }
+    populate_curve_3d_cache(pc, key.clone(), samples);
+    true
+}
+
+/// Clave de caché para polar (origen único sync/async).
+pub fn polar_cache_key(
+    pol: &PolarCurveObj,
+    steps: usize,
+    variables: &BTreeMap<String, f64>,
+) -> Option<grafito_core::ParametricCacheKey> {
+    let steps = steps.min(MAX_CURVE_STEPS);
+    let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
+    let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
+    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+        return None;
+    }
+    Some(grafito_core::ParametricCacheKey {
+        t_domain: (t_min, t_max),
+        steps,
+        expr_hash: parametric_sampling::polar_expr_hash(pol),
+        variables_hash: parametric_sampling::variables_hash(variables),
+    })
+}
+
+/// Escribe samples + key en el caché del objeto (origen único sync/async).
+pub fn populate_polar_cache(
+    pol: &PolarCurveObj,
+    key: grafito_core::ParametricCacheKey,
+    samples: Curve2DSamples,
+) {
+    *pol.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *pol.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+}
+
+/// Resolve non-blocking para el slot (misma semántica que 2D).
+pub fn resolve_polar_job(
+    compute: &ParametricComputePipeline,
+    pol: &PolarCurveObj,
+    variables: &BTreeMap<String, f64>,
+    steps: usize,
+    job: PendingParametricEval,
+    key: &grafito_core::ParametricCacheKey,
+) -> bool {
+    let Some(fresh) = polar_cache_key(pol, steps, variables) else {
+        compute.abort_raw();
+        return false;
+    };
+    if &fresh != key {
+        log::debug!("Polar GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_raw();
+        return false;
+    }
+    {
+        let cached_key = pol.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(key) {
+            compute.abort_raw();
+            return true;
+        }
+    }
+    let Some(samples) = compute.resolve_polar(job) else {
+        return false;
+    };
+    if !nonfinite_polar_samples_match_cpu(&samples, pol, steps, variables) {
+        return false;
+    }
+    populate_polar_cache(pol, key.clone(), samples);
+    true
+}
+
+/// Clave de caché para polar (origen único sync/async).
 pub fn maybe_compute_curve_2d_on_gpu(
     compute: &ParametricComputePipeline,
     device: &wgpu::Device,
@@ -1341,18 +1764,10 @@ pub fn maybe_compute_curve_2d_on_gpu(
     steps: usize,
     variables: &BTreeMap<String, f64>,
 ) -> bool {
-    let steps = steps.min(MAX_CURVE_STEPS);
-    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
-    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+    let Some(key) = curve_2d_cache_key(pc, steps, variables) else {
         return false;
-    }
-    let key = grafito_core::ParametricCacheKey {
-        t_domain: (t_min, t_max),
-        steps,
-        expr_hash: parametric_sampling::curve_2d_expr_hash(pc),
-        variables_hash: parametric_sampling::variables_hash(variables),
     };
+    let steps = key.steps;
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
             log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -1370,14 +1785,7 @@ pub fn maybe_compute_curve_2d_on_gpu(
         return false;
     }
 
-    *pc.cached_samples.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = samples;
-    *pc.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_curve_2d_cache(pc, key, samples);
     true
 }
 
@@ -1390,18 +1798,10 @@ pub fn maybe_compute_curve_3d_on_gpu(
     steps: usize,
     variables: &BTreeMap<String, f64>,
 ) -> bool {
-    let steps = steps.min(MAX_CURVE_STEPS);
-    let t_min = ParametricComputePipeline::resolve_expr(&pc.t_min_expr, pc.t_min, variables);
-    let t_max = ParametricComputePipeline::resolve_expr(&pc.t_max_expr, pc.t_max, variables);
-    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+    let Some(key) = curve_3d_cache_key(pc, steps, variables) else {
         return false;
-    }
-    let key = grafito_core::ParametricCacheKey {
-        t_domain: (t_min, t_max),
-        steps,
-        expr_hash: parametric_sampling::curve_3d_expr_hash(pc),
-        variables_hash: parametric_sampling::variables_hash(variables),
     };
+    let steps = key.steps;
     {
         let cached_key = pc.cached_key.read().unwrap_or_else(|p| {
             log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -1419,14 +1819,7 @@ pub fn maybe_compute_curve_3d_on_gpu(
         return false;
     }
 
-    *pc.cached_samples.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = samples;
-    *pc.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_curve_3d_cache(pc, key, samples);
     true
 }
 
@@ -1439,18 +1832,10 @@ pub fn maybe_compute_polar_on_gpu(
     steps: usize,
     variables: &BTreeMap<String, f64>,
 ) -> bool {
-    let steps = steps.min(MAX_CURVE_STEPS);
-    let t_min = ParametricComputePipeline::resolve_expr(&pol.t_min_expr, pol.t_min, variables);
-    let t_max = ParametricComputePipeline::resolve_expr(&pol.t_max_expr, pol.t_max, variables);
-    if !has_strictly_increasing_finite_bounds(&[t_min, t_max]) {
+    let Some(key) = polar_cache_key(pol, steps, variables) else {
         return false;
-    }
-    let key = grafito_core::ParametricCacheKey {
-        t_domain: (t_min, t_max),
-        steps,
-        expr_hash: parametric_sampling::polar_expr_hash(pol),
-        variables_hash: parametric_sampling::variables_hash(variables),
     };
+    let steps = key.steps;
     {
         let cached_key = pol.cached_key.read().unwrap_or_else(|p| {
             log::warn!("cache lock envenenado; recuperando estado parcial");
@@ -1468,14 +1853,7 @@ pub fn maybe_compute_polar_on_gpu(
         return false;
     }
 
-    *pol.cached_samples.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = samples;
-    *pol.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_polar_cache(pol, key, samples);
     true
 }
 
@@ -1488,29 +1866,8 @@ pub fn maybe_compute_surface_on_gpu(
     res: usize,
     variables: &BTreeMap<String, f64>,
 ) -> bool {
-    if surf.is_parametric || surf.is_complex || surf.legacy_axis_swap {
+    let Some(key) = surface_cache_key(surf, res, variables) else {
         return false;
-    }
-    let res = res.max(1);
-    if !surface_res_within_budget(res) {
-        return false;
-    }
-    let x_min = ParametricComputePipeline::resolve_expr(&surf.x_min_expr, surf.x_min, variables);
-    let x_max = ParametricComputePipeline::resolve_expr(&surf.x_max_expr, surf.x_max, variables);
-    let y_min = ParametricComputePipeline::resolve_expr(&surf.y_min_expr, surf.y_min, variables);
-    let y_max = ParametricComputePipeline::resolve_expr(&surf.y_max_expr, surf.y_max, variables);
-    if !has_strictly_increasing_finite_bounds(&[x_min, x_max])
-        || !has_strictly_increasing_finite_bounds(&[y_min, y_max])
-    {
-        return false;
-    }
-    let key = grafito_core::SurfaceCacheKey {
-        x_domain: (x_min, x_max),
-        y_domain: (y_min, y_max),
-        res,
-        is_parametric: false,
-        expr_hash: parametric_sampling::surface_expr_hash(surf),
-        variables_hash: parametric_sampling::variables_hash(variables),
     };
     {
         let cached_key = surf.cached_key.read().unwrap_or_else(|p| {
@@ -1529,14 +1886,7 @@ pub fn maybe_compute_surface_on_gpu(
         return false;
     }
 
-    *surf.cached_grid.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = grid;
-    *surf.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_surface_cache(surf, key, grid);
     true
 }
 

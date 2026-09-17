@@ -699,12 +699,17 @@ pub const TURN_MEDIA_MIN_FRAMES: u8 = 1;
 pub const TURN_MEDIA_MAX_FRAMES: u8 = 64;
 /// Turnos con media que conservan frames completos en memoria.
 ///
-/// Los últimos 3 turnos con media guardan sus frames RGBA compartidos
+/// Solo el ÚLTIMO turno con media guarda sus frames RGBA compartidos
 /// (`TurnMediaRef.frames: Option<Arc<TurnFrameSet>>`); al exceder, el más
 /// viejo suelta frames y conserva thumb+meta (mini-card + replay re-renderiza
 /// por el camino existente). El trim por par dropea todo junto (la media
 /// viaja dentro del turno). Puro presupuesto en memoria, sin I/O.
-pub const HISTORY_FULL_FRAMES_MAX: usize = 3;
+///
+/// 1 (antes 3): cada set pesa hasta 64 MiB y el vivo existe duplicado
+/// (RGBA plano + `ColorImage`), así que 3 sets retenían ~200 MiB. El replay
+/// del turno anterior re-renderiza por el camino existente (rápido: plantillas
+/// nativas) en vez de retener ~130 MiB extra.
+pub const HISTORY_FULL_FRAMES_MAX: usize = 1;
 /// Lado máximo de un frame guardado en memoria (paridad chat 480×360).
 pub const TURN_FRAME_SET_MAX_DIM: u32 = 1024;
 /// Tope total de bytes RGBA de un set de frames guardado (64 MiB).

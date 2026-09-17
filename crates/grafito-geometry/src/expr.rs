@@ -1154,18 +1154,34 @@ const RAYON_BATCH_THRESHOLD: usize = 1024;
 
 /// Evalúa un AST ya sustituido/simplificado sobre un Vec, en paralelo.
 /// `collect` preserva el orden → resultado idéntico al loop escalar.
+///
+/// Compila a opcodes planos UNA vez por llamada (no por muestra): el loop
+/// por elemento corre la pila sin walk recursivo ni allocs. Si el AST usa
+/// nodos sin opcode, cae al walk de siempre (paridad exacta verificada en
+/// `flat_matches_walk_en_muestreo_adversarial`).
 fn eval_prepared_1d_par(ast: &crate::ast::Expr, var_name: &str, xs: Vec<f64>) -> Vec<Option<f64>> {
     use rayon::prelude::*;
+    let flat = compile_flat_ops(ast, var_name, "", "");
     let chunk = (xs.len() / rayon::current_num_threads().max(1)).max(64);
     xs.par_chunks(chunk)
         .map(|c| {
             c.iter()
                 .map(|&x| {
-                    let res = ast.eval_at(var_name, x);
-                    if res.is_nan() {
-                        None
+                    if let Some(ops) = &flat {
+                        // Mapeo idéntico al walk: NaN → None, Inf → Some.
+                        let raw = eval_opcodes_flat_raw(ops, x, 0.0, 0.0);
+                        if raw.is_nan() {
+                            None
+                        } else {
+                            Some(raw)
+                        }
                     } else {
-                        Some(res)
+                        let res = ast.eval_at(var_name, x);
+                        if res.is_nan() {
+                            None
+                        } else {
+                            Some(res)
+                        }
                     }
                 })
                 .collect::<Vec<Option<f64>>>()
@@ -1175,6 +1191,7 @@ fn eval_prepared_1d_par(ast: &crate::ast::Expr, var_name: &str, xs: Vec<f64>) ->
 }
 
 /// Variante 2D del batch paralelo (domain coloring, implícitas, superficies).
+/// Mismo esquema que la 1D: opcodes una vez, walk solo como fallback.
 fn eval_prepared_2d_par(
     ast: &crate::ast::Expr,
     var1_name: &str,
@@ -1182,16 +1199,26 @@ fn eval_prepared_2d_par(
     pts: Vec<(f64, f64)>,
 ) -> Vec<Option<f64>> {
     use rayon::prelude::*;
+    let flat = compile_flat_ops(ast, var1_name, var2_name, "");
     let chunk = (pts.len() / rayon::current_num_threads().max(1)).max(64);
     pts.par_chunks(chunk)
         .map(|c| {
             c.iter()
                 .map(|&(v1, v2)| {
-                    let res = ast.eval_2d(var1_name, v1, var2_name, v2);
-                    if res.is_nan() {
-                        None
+                    if let Some(ops) = &flat {
+                        let raw = eval_opcodes_flat_raw(ops, v1, v2, 0.0);
+                        if raw.is_nan() {
+                            None
+                        } else {
+                            Some(raw)
+                        }
                     } else {
-                        Some(res)
+                        let res = ast.eval_2d(var1_name, v1, var2_name, v2);
+                        if res.is_nan() {
+                            None
+                        } else {
+                            Some(res)
+                        }
                     }
                 })
                 .collect::<Vec<Option<f64>>>()
@@ -1260,13 +1287,25 @@ pub fn eval_batch_1d(
         if xs.size_hint().0 >= RAYON_BATCH_THRESHOLD {
             return Ok(eval_prepared_1d_par(&ast, var_name, xs.collect()));
         }
+        // Opcodes una vez (no walk por muestra); fallback al walk si el AST
+        // usa nodos sin opcode. Mapeo NaN → None idéntico en ambos.
+        let flat = compile_flat_ops(&ast, var_name, "", "");
         let mut results = Vec::new();
         for x in xs {
-            let res = ast.eval_at(var_name, x);
-            if res.is_nan() {
-                results.push(None);
+            if let Some(ops) = &flat {
+                let raw = eval_opcodes_flat_raw(ops, x, 0.0, 0.0);
+                if raw.is_nan() {
+                    results.push(None);
+                } else {
+                    results.push(Some(raw));
+                }
             } else {
-                results.push(Some(res));
+                let res = ast.eval_at(var_name, x);
+                if res.is_nan() {
+                    results.push(None);
+                } else {
+                    results.push(Some(res));
+                }
             }
         }
         return Ok(results);
@@ -1853,8 +1892,363 @@ pub fn compile_ast(
 pub struct CompiledExpr {
     ast: Option<crate::ast::Expr>,
     tree: Option<evalexpr::Node>,
-    ops: Option<Vec<Opcode>>,
+    ops: Option<ValidatedOps>,
     var_names: Vec<String>,
+}
+
+/// Tamaño de la pila del intérprete plano (ver `validate_opcode_stack`:
+/// el mismo número acota la profundidad validada y la pila real).
+const FLAT_STACK_SIZE: usize = 256;
+
+/// Opcodes con disciplina de pila verificada una vez.
+///
+/// La validación estática (`validate_opcode_stack`: sin underflow,
+/// profundidad ≤ `FLAT_STACK_SIZE`, cierre en 1 valor) prueba que el
+/// intérprete nunca lee sin escribir ni sale de la pila. Por eso el
+/// intérprete NO inicializa la pila por evaluación (un `memset` de 2 KiB
+/// medido en ~15 ns/eval fijos) y NO chequea bounds por acceso.
+///
+/// Solo se construye validado (`compile_flat_ops` / `CompiledExpr::new`;
+/// campo privado): es la única forma sound de obtenerlo.
+#[derive(Debug, Clone)]
+pub struct ValidatedOps {
+    ops: Vec<Opcode>,
+}
+
+impl ValidatedOps {
+    /// Vista para el intérprete y la medición.
+    pub fn as_slice(&self) -> &[Opcode] {
+        &self.ops
+    }
+
+    /// Cantidad de opcodes (para heurísticas de camino, no para corrección).
+    pub fn len(&self) -> usize {
+        self.ops.len()
+    }
+
+    /// `true` si no hay opcodes (nunca ocurre tras compilar con éxito).
+    pub fn is_empty(&self) -> bool {
+        self.ops.is_empty()
+    }
+}
+
+/// Resultado del intérprete plano de opcodes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FlatOutcome {
+    /// La pila cerró en un valor (`stack[0]`; puede ser no finito).
+    Value(f64),
+    /// `clamp` con cotas no finitas o invertidas (el walk da `NaN` ahí).
+    ClampError,
+}
+
+/// Intérprete plano de opcodes con pila fija, sin allocs.
+///
+/// Cuerpo movido byte a byte desde `CompiledExpr::eval` (única copia):
+/// mismo despacho, mismos gates (`Div` NaN si `|den| < 1e-300`,
+/// `trig_reduce`, `safe_*`, Sec/Csc/Cot), mismo `Clamp` estricto.
+///
+/// CONTRATO: `ops` debe venir validado ([`ValidatedOps`] o validación en
+/// `new`). La disciplina estática prueba que cada lectura fue precedida
+/// por su escritura y que `sp` siempre está en `[0, FLAT_STACK_SIZE)`, por
+/// eso la pila NO se inicializa por evaluación (un `memset` de 2 KiB medido
+/// en ~15 ns/eval fijos) y NO hay bounds checks por acceso.
+/// `f64: Copy` sin `Drop` y aritmética f64 sin pánicos: sin lecturas sin
+/// inicializar ni valores sin dropear en ningún camino.
+/// Si `sp != 1` al final (imposible validado), `NaN` honesto en vez de pánico.
+fn run_opcodes_flat(ops: &ValidatedOps, v1: f64, v2: f64, v3: f64) -> FlatOutcome {
+    let ops = ops.as_slice();
+    thread_local! {
+        // Pila reutilizada por evaluación: evita el `memset` de 2 KiB por
+        // llamada (medido en ~15 ns/eval fijos). Sound sin `unsafe`: cada
+        // slot se escribe antes de leerse por disciplina validada, y no hay
+        // reentrancia (el intérprete no se llama a sí mismo; cada hilo
+        // rayon tiene su propio buffer).
+        static FLAT_STACK: std::cell::RefCell<[f64; FLAT_STACK_SIZE]> =
+            const { std::cell::RefCell::new([0.0; FLAT_STACK_SIZE]) };
+    }
+    FLAT_STACK.with(|cell| {
+        let mut stack = cell.borrow_mut();
+        let mut sp = 0usize;
+        for op in ops {
+            match op {
+                Opcode::PushConst(c) => {
+                    stack[sp] = *c;
+                    sp += 1;
+                }
+                Opcode::PushVar1 => {
+                    stack[sp] = v1;
+                    sp += 1;
+                }
+                Opcode::PushVar2 => {
+                    stack[sp] = v2;
+                    sp += 1;
+                }
+                Opcode::PushVar3 => {
+                    stack[sp] = v3;
+                    sp += 1;
+                }
+                Opcode::Add => {
+                    sp -= 1;
+                    stack[sp - 1] += stack[sp];
+                }
+                Opcode::Sub => {
+                    sp -= 1;
+                    stack[sp - 1] -= stack[sp];
+                }
+                Opcode::Mul => {
+                    sp -= 1;
+                    stack[sp - 1] *= stack[sp];
+                }
+                Opcode::Div => {
+                    // Paridad con el AST nativo (`ast::Expr::eval_at`):
+                    // `Div` con `|den| < 1e-300` es NaN, nunca Inf.
+                    // El `/` crudo de f64 propagaba un Inf intermedio
+                    // (p. ej. `1/(1/x)` en x=0 devolvía Ok(0.0) vía
+                    // `1/Inf`), divergiendo del AST y filtrando un
+                    // valor finito falso; el gate final `is_finite`
+                    // lo convierte en Err igualmente.
+                    sp -= 1;
+                    let den = stack[sp];
+                    let num = stack[sp - 1];
+                    stack[sp - 1] = if den.abs() < 1e-300 {
+                        f64::NAN
+                    } else {
+                        num / den
+                    };
+                }
+                Opcode::Pow => {
+                    sp -= 1;
+                    stack[sp - 1] = stack[sp - 1].powf(stack[sp]);
+                }
+                Opcode::Neg => {
+                    stack[sp - 1] = -stack[sp - 1];
+                }
+                Opcode::Sin => {
+                    stack[sp - 1] = trig_reduce(stack[sp - 1]).sin();
+                }
+                Opcode::Cos => {
+                    stack[sp - 1] = trig_reduce(stack[sp - 1]).cos();
+                }
+                Opcode::Tan => {
+                    stack[sp - 1] = trig_reduce(stack[sp - 1]).tan();
+                }
+                Opcode::Asin => {
+                    stack[sp - 1] = stack[sp - 1].asin();
+                }
+                Opcode::Acos => {
+                    stack[sp - 1] = stack[sp - 1].acos();
+                }
+                Opcode::Atan => {
+                    stack[sp - 1] = stack[sp - 1].atan();
+                }
+                Opcode::Exp => {
+                    stack[sp - 1] = stack[sp - 1].exp();
+                }
+                Opcode::Ln => {
+                    stack[sp - 1] = stack[sp - 1].ln();
+                }
+                Opcode::Log => {
+                    stack[sp - 1] = stack[sp - 1].log10();
+                }
+                Opcode::Sqrt => {
+                    stack[sp - 1] = stack[sp - 1].sqrt();
+                }
+                Opcode::Abs => {
+                    stack[sp - 1] = stack[sp - 1].abs();
+                }
+                Opcode::Sinh => {
+                    stack[sp - 1] = safe_sinh(stack[sp - 1]);
+                }
+                Opcode::Cosh => {
+                    stack[sp - 1] = safe_cosh(stack[sp - 1]);
+                }
+                Opcode::Tanh => {
+                    stack[sp - 1] = safe_tanh(stack[sp - 1]);
+                }
+                Opcode::Floor => {
+                    stack[sp - 1] = stack[sp - 1].floor();
+                }
+                Opcode::Ceil => {
+                    stack[sp - 1] = stack[sp - 1].ceil();
+                }
+                Opcode::Round => {
+                    stack[sp - 1] = stack[sp - 1].round();
+                }
+                Opcode::Sec => {
+                    let c = trig_reduce(stack[sp - 1]).cos();
+                    stack[sp - 1] = if c.abs() < 1e-15 { f64::NAN } else { 1.0 / c };
+                }
+                Opcode::Csc => {
+                    let s = trig_reduce(stack[sp - 1]).sin();
+                    stack[sp - 1] = if s.abs() < 1e-15 { f64::NAN } else { 1.0 / s };
+                }
+                Opcode::Cot => {
+                    let t = trig_reduce(stack[sp - 1]).tan();
+                    stack[sp - 1] = if t.abs() < 1e-15 { f64::NAN } else { 1.0 / t };
+                }
+                Opcode::Asinh => {
+                    stack[sp - 1] = stack[sp - 1].asinh();
+                }
+                Opcode::Acosh => {
+                    stack[sp - 1] = stack[sp - 1].acosh();
+                }
+                Opcode::Atanh => {
+                    stack[sp - 1] = stack[sp - 1].atanh();
+                }
+                Opcode::Sign => {
+                    stack[sp - 1] = stack[sp - 1].signum();
+                }
+                Opcode::Heaviside => {
+                    stack[sp - 1] = if stack[sp - 1] >= 0.0 { 1.0 } else { 0.0 };
+                }
+                Opcode::Cbrt => {
+                    stack[sp - 1] = stack[sp - 1].cbrt();
+                }
+                Opcode::Atan2 => {
+                    sp -= 1;
+                    stack[sp - 1] = stack[sp - 1].atan2(stack[sp]);
+                }
+                Opcode::Modulo => {
+                    sp -= 1;
+                    stack[sp - 1] %= stack[sp];
+                }
+                Opcode::Min => {
+                    sp -= 1;
+                    stack[sp - 1] = stack[sp - 1].min(stack[sp]);
+                }
+                Opcode::Max => {
+                    sp -= 1;
+                    stack[sp - 1] = stack[sp - 1].max(stack[sp]);
+                }
+                Opcode::Clamp => {
+                    sp -= 2;
+                    match crate::ast::checked_clamp(stack[sp - 1], stack[sp], stack[sp + 1]) {
+                        Some(clamped) => stack[sp - 1] = clamped,
+                        None => return FlatOutcome::ClampError,
+                    }
+                }
+                Opcode::Erf => {
+                    stack[sp - 1] = crate::special_functions::erf(stack[sp - 1]);
+                }
+                Opcode::Erfc => {
+                    stack[sp - 1] = crate::special_functions::erfc(stack[sp - 1]);
+                }
+                Opcode::Gamma => {
+                    stack[sp - 1] = crate::special_functions::gamma(stack[sp - 1]);
+                }
+                Opcode::LnGamma => {
+                    stack[sp - 1] = crate::special_functions::ln_gamma(stack[sp - 1]);
+                }
+                Opcode::Digamma => {
+                    stack[sp - 1] = crate::special_functions::digamma(stack[sp - 1]);
+                }
+                Opcode::Trigamma => {
+                    stack[sp - 1] = crate::special_functions::trigamma(stack[sp - 1]);
+                }
+                Opcode::Beta => {
+                    sp -= 1;
+                    stack[sp - 1] = crate::special_functions::beta(stack[sp - 1], stack[sp]);
+                }
+                Opcode::BesselJ => {
+                    sp -= 1;
+                    stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                        .map_or(f64::NAN, |order| {
+                            crate::special_functions::bessel_j(order, stack[sp])
+                        });
+                }
+                Opcode::BesselY => {
+                    sp -= 1;
+                    stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                        .map_or(f64::NAN, |order| {
+                            crate::special_functions::bessel_y(order, stack[sp])
+                        });
+                }
+                Opcode::BesselI => {
+                    sp -= 1;
+                    stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
+                        .map_or(f64::NAN, |order| {
+                            crate::special_functions::bessel_i(order, stack[sp])
+                        });
+                }
+                Opcode::Lt => {
+                    sp -= 1;
+                    stack[sp - 1] = if stack[sp - 1] < stack[sp] { 1.0 } else { 0.0 };
+                }
+                Opcode::Gt => {
+                    sp -= 1;
+                    stack[sp - 1] = if stack[sp - 1] > stack[sp] { 1.0 } else { 0.0 };
+                }
+                Opcode::Le => {
+                    sp -= 1;
+                    stack[sp - 1] = if stack[sp - 1] <= stack[sp] { 1.0 } else { 0.0 };
+                }
+                Opcode::Ge => {
+                    sp -= 1;
+                    stack[sp - 1] = if stack[sp - 1] >= stack[sp] { 1.0 } else { 0.0 };
+                }
+                Opcode::Eq => {
+                    sp -= 1;
+                    stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() < 1e-9 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                }
+                Opcode::Ne => {
+                    sp -= 1;
+                    stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() >= 1e-9 {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                }
+            }
+        }
+        if sp == 1 {
+            FlatOutcome::Value(stack[0])
+        } else {
+            FlatOutcome::Value(f64::NAN)
+        }
+    })
+}
+
+/// Ejecuta opcodes validados con valores directos: `Some` si el resultado
+/// es finito. Sin `Vec` ni `String` por muestra (para samplers de miles de
+/// puntos). `None` honesto si no finito, clamp inválido o pila degenerada.
+pub fn eval_opcodes_flat(ops: &ValidatedOps, v1: f64, v2: f64, v3: f64) -> Option<f64> {
+    match run_opcodes_flat(ops, v1, v2, v3) {
+        FlatOutcome::Value(v) if v.is_finite() => Some(v),
+        _ => None,
+    }
+}
+
+/// Versión cruda: el f64 tal cual (`NaN` si no finito/clamp/pila).
+/// Replica el mapeo del walk en caminos batch (`NaN → None`, pero conserva
+/// `Inf` como `Some`, igual que `eval_prepared_1d_par`).
+pub fn eval_opcodes_flat_raw(ops: &ValidatedOps, v1: f64, v2: f64, v3: f64) -> f64 {
+    match run_opcodes_flat(ops, v1, v2, v3) {
+        FlatOutcome::Value(v) => v,
+        FlatOutcome::ClampError => f64::NAN,
+    }
+}
+
+/// Compila un AST ya sustituido/simplificado a opcodes validados una vez.
+/// `None` si usa nodos sin opcode (el llamante conserva el walk).
+/// Los nombres de barrido van posicionales (`"x"`, `"x"/"y"`, `"t"`).
+pub fn compile_flat_ops(
+    ast: &crate::ast::Expr,
+    v1: &str,
+    v2: &str,
+    v3: &str,
+) -> Option<ValidatedOps> {
+    let mut ops = Vec::new();
+    if !compile_ast(ast, &mut ops, v1, v2, v3) {
+        return None;
+    }
+    if validate_opcode_stack(&ops, FLAT_STACK_SIZE).is_err() {
+        return None;
+    }
+    Some(ValidatedOps { ops })
 }
 
 impl CompiledExpr {
@@ -1886,15 +2280,25 @@ impl CompiledExpr {
                 let v2 = vars_list.get(1).map(|s| s.as_str()).unwrap_or("");
                 let v3 = vars_list.get(2).map(|s| s.as_str()).unwrap_or("");
                 if compile_ast(&ast, &mut ops, v1, v2, v3) {
-                    success = true;
-                    var_names = vars_list.clone();
+                    // Validar UNA vez acá (no por eval): pila inválida →
+                    // sin opcodes, el `eval` cae al AST (igual que antes).
+                    if validate_opcode_stack(&ops, FLAT_STACK_SIZE).is_ok() {
+                        success = true;
+                        var_names = vars_list.clone();
+                    } else {
+                        ops.clear();
+                    }
                 }
             }
 
             return Ok(Self {
                 ast: Some(ast),
                 tree: None,
-                ops: if success { Some(ops) } else { None },
+                ops: if success {
+                    Some(ValidatedOps { ops })
+                } else {
+                    None
+                },
                 var_names,
             });
         }
@@ -1912,274 +2316,35 @@ impl CompiledExpr {
     /// Evaluate the compiled expression with the given variable values.
     /// The variable names must match those supplied at construction time.
     ///
-    /// Hot loop sin alloc: pila fija `[0.0; 256]` reutilizada por llamada,
+    /// Hot loop sin alloc: pila fija `[0.0; 256]` en `run_opcodes_flat`,
     /// despacho por opcode sin `HashMap`/`String` por operación (como máximo
-    /// un barrido lineal sobre ≤3 variables) y `validate_opcode_stack` previo
-    /// que impide underflow/pánicos. Un resultado no finito (`NaN` de `Div`
+    /// un barrido lineal sobre ≤3 variables) y pila validada una vez al
+    /// compilar (nunca por eval). Un resultado no finito (`NaN` de `Div`
     /// 1/0, `Inf` de `Pow` desbordado) cae al path AST/evalexpr y, si tampoco
     /// es finito, retorna `Err`: nunca se devuelve `Inf` silencioso.
     pub fn eval(&self, vars: &[(String, f64)]) -> Result<f64, String> {
         if let Some(ops) = &self.ops {
-            if validate_opcode_stack(ops, 256).is_err() {
-                // Fall through to the AST/evalexpr path instead of risking a panic.
-            } else {
-                let mut v1 = 0.0;
-                let mut v2 = 0.0;
-                let mut v3 = 0.0;
+            // Pila validada una vez al compilar (`new`/`compile_flat_ops`).
+            let mut v1 = 0.0;
+            let mut v2 = 0.0;
+            let mut v3 = 0.0;
 
-                for (name, val) in vars {
-                    if !self.var_names.is_empty() && name == &self.var_names[0] {
-                        v1 = *val;
-                    } else if self.var_names.len() > 1 && name == &self.var_names[1] {
-                        v2 = *val;
-                    } else if self.var_names.len() > 2 && name == &self.var_names[2] {
-                        v3 = *val;
-                    }
+            for (name, val) in vars {
+                if !self.var_names.is_empty() && name == &self.var_names[0] {
+                    v1 = *val;
+                } else if self.var_names.len() > 1 && name == &self.var_names[1] {
+                    v2 = *val;
+                } else if self.var_names.len() > 2 && name == &self.var_names[2] {
+                    v3 = *val;
                 }
+            }
 
-                let mut stack = [0.0; 256];
-                let mut sp = 0;
-
-                for op in ops {
-                    match op {
-                        Opcode::PushConst(c) => {
-                            stack[sp] = *c;
-                            sp += 1;
-                        }
-                        Opcode::PushVar1 => {
-                            stack[sp] = v1;
-                            sp += 1;
-                        }
-                        Opcode::PushVar2 => {
-                            stack[sp] = v2;
-                            sp += 1;
-                        }
-                        Opcode::PushVar3 => {
-                            stack[sp] = v3;
-                            sp += 1;
-                        }
-                        Opcode::Add => {
-                            sp -= 1;
-                            stack[sp - 1] += stack[sp];
-                        }
-                        Opcode::Sub => {
-                            sp -= 1;
-                            stack[sp - 1] -= stack[sp];
-                        }
-                        Opcode::Mul => {
-                            sp -= 1;
-                            stack[sp - 1] *= stack[sp];
-                        }
-                        Opcode::Div => {
-                            // Paridad con el AST nativo (`ast::Expr::eval_at`):
-                            // `Div` con `|den| < 1e-300` es NaN, nunca Inf.
-                            // El `/` crudo de f64 propagaba un Inf intermedio
-                            // (p. ej. `1/(1/x)` en x=0 devolvía Ok(0.0) vía
-                            // `1/Inf`), divergiendo del AST y filtrando un
-                            // valor finito falso; el gate final `is_finite`
-                            // lo convierte en Err igualmente.
-                            sp -= 1;
-                            let den = stack[sp];
-                            let num = stack[sp - 1];
-                            stack[sp - 1] = if den.abs() < 1e-300 {
-                                f64::NAN
-                            } else {
-                                num / den
-                            };
-                        }
-                        Opcode::Pow => {
-                            sp -= 1;
-                            stack[sp - 1] = stack[sp - 1].powf(stack[sp]);
-                        }
-                        Opcode::Neg => {
-                            stack[sp - 1] = -stack[sp - 1];
-                        }
-                        Opcode::Sin => {
-                            stack[sp - 1] = trig_reduce(stack[sp - 1]).sin();
-                        }
-                        Opcode::Cos => {
-                            stack[sp - 1] = trig_reduce(stack[sp - 1]).cos();
-                        }
-                        Opcode::Tan => {
-                            stack[sp - 1] = trig_reduce(stack[sp - 1]).tan();
-                        }
-                        Opcode::Asin => {
-                            stack[sp - 1] = stack[sp - 1].asin();
-                        }
-                        Opcode::Acos => {
-                            stack[sp - 1] = stack[sp - 1].acos();
-                        }
-                        Opcode::Atan => {
-                            stack[sp - 1] = stack[sp - 1].atan();
-                        }
-                        Opcode::Exp => {
-                            stack[sp - 1] = stack[sp - 1].exp();
-                        }
-                        Opcode::Ln => {
-                            stack[sp - 1] = stack[sp - 1].ln();
-                        }
-                        Opcode::Log => {
-                            stack[sp - 1] = stack[sp - 1].log10();
-                        }
-                        Opcode::Sqrt => {
-                            stack[sp - 1] = stack[sp - 1].sqrt();
-                        }
-                        Opcode::Abs => {
-                            stack[sp - 1] = stack[sp - 1].abs();
-                        }
-                        Opcode::Sinh => {
-                            stack[sp - 1] = safe_sinh(stack[sp - 1]);
-                        }
-                        Opcode::Cosh => {
-                            stack[sp - 1] = safe_cosh(stack[sp - 1]);
-                        }
-                        Opcode::Tanh => {
-                            stack[sp - 1] = safe_tanh(stack[sp - 1]);
-                        }
-                        Opcode::Floor => {
-                            stack[sp - 1] = stack[sp - 1].floor();
-                        }
-                        Opcode::Ceil => {
-                            stack[sp - 1] = stack[sp - 1].ceil();
-                        }
-                        Opcode::Round => {
-                            stack[sp - 1] = stack[sp - 1].round();
-                        }
-                        Opcode::Sec => {
-                            let c = trig_reduce(stack[sp - 1]).cos();
-                            stack[sp - 1] = if c.abs() < 1e-15 { f64::NAN } else { 1.0 / c };
-                        }
-                        Opcode::Csc => {
-                            let s = trig_reduce(stack[sp - 1]).sin();
-                            stack[sp - 1] = if s.abs() < 1e-15 { f64::NAN } else { 1.0 / s };
-                        }
-                        Opcode::Cot => {
-                            let t = trig_reduce(stack[sp - 1]).tan();
-                            stack[sp - 1] = if t.abs() < 1e-15 { f64::NAN } else { 1.0 / t };
-                        }
-                        Opcode::Asinh => {
-                            stack[sp - 1] = stack[sp - 1].asinh();
-                        }
-                        Opcode::Acosh => {
-                            stack[sp - 1] = stack[sp - 1].acosh();
-                        }
-                        Opcode::Atanh => {
-                            stack[sp - 1] = stack[sp - 1].atanh();
-                        }
-                        Opcode::Sign => {
-                            stack[sp - 1] = stack[sp - 1].signum();
-                        }
-                        Opcode::Heaviside => {
-                            stack[sp - 1] = if stack[sp - 1] >= 0.0 { 1.0 } else { 0.0 };
-                        }
-                        Opcode::Cbrt => {
-                            stack[sp - 1] = stack[sp - 1].cbrt();
-                        }
-                        Opcode::Atan2 => {
-                            sp -= 1;
-                            stack[sp - 1] = stack[sp - 1].atan2(stack[sp]);
-                        }
-                        Opcode::Modulo => {
-                            sp -= 1;
-                            stack[sp - 1] %= stack[sp];
-                        }
-                        Opcode::Min => {
-                            sp -= 1;
-                            stack[sp - 1] = stack[sp - 1].min(stack[sp]);
-                        }
-                        Opcode::Max => {
-                            sp -= 1;
-                            stack[sp - 1] = stack[sp - 1].max(stack[sp]);
-                        }
-                        Opcode::Clamp => {
-                            sp -= 2;
-                            stack[sp - 1] =
-                                crate::ast::checked_clamp(stack[sp - 1], stack[sp], stack[sp + 1])
-                                    .ok_or_else(|| {
-                                        "clamp requires finite bounds where lower <= upper"
-                                            .to_string()
-                                    })?;
-                        }
-                        Opcode::Erf => {
-                            stack[sp - 1] = crate::special_functions::erf(stack[sp - 1]);
-                        }
-                        Opcode::Erfc => {
-                            stack[sp - 1] = crate::special_functions::erfc(stack[sp - 1]);
-                        }
-                        Opcode::Gamma => {
-                            stack[sp - 1] = crate::special_functions::gamma(stack[sp - 1]);
-                        }
-                        Opcode::LnGamma => {
-                            stack[sp - 1] = crate::special_functions::ln_gamma(stack[sp - 1]);
-                        }
-                        Opcode::Digamma => {
-                            stack[sp - 1] = crate::special_functions::digamma(stack[sp - 1]);
-                        }
-                        Opcode::Trigamma => {
-                            stack[sp - 1] = crate::special_functions::trigamma(stack[sp - 1]);
-                        }
-                        Opcode::Beta => {
-                            sp -= 1;
-                            stack[sp - 1] =
-                                crate::special_functions::beta(stack[sp - 1], stack[sp]);
-                        }
-                        Opcode::BesselJ => {
-                            sp -= 1;
-                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
-                                .map_or(f64::NAN, |order| {
-                                    crate::special_functions::bessel_j(order, stack[sp])
-                                });
-                        }
-                        Opcode::BesselY => {
-                            sp -= 1;
-                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
-                                .map_or(f64::NAN, |order| {
-                                    crate::special_functions::bessel_y(order, stack[sp])
-                                });
-                        }
-                        Opcode::BesselI => {
-                            sp -= 1;
-                            stack[sp - 1] = crate::ast::bessel_order(stack[sp - 1])
-                                .map_or(f64::NAN, |order| {
-                                    crate::special_functions::bessel_i(order, stack[sp])
-                                });
-                        }
-                        Opcode::Lt => {
-                            sp -= 1;
-                            stack[sp - 1] = if stack[sp - 1] < stack[sp] { 1.0 } else { 0.0 };
-                        }
-                        Opcode::Gt => {
-                            sp -= 1;
-                            stack[sp - 1] = if stack[sp - 1] > stack[sp] { 1.0 } else { 0.0 };
-                        }
-                        Opcode::Le => {
-                            sp -= 1;
-                            stack[sp - 1] = if stack[sp - 1] <= stack[sp] { 1.0 } else { 0.0 };
-                        }
-                        Opcode::Ge => {
-                            sp -= 1;
-                            stack[sp - 1] = if stack[sp - 1] >= stack[sp] { 1.0 } else { 0.0 };
-                        }
-                        Opcode::Eq => {
-                            sp -= 1;
-                            stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() < 1e-9 {
-                                1.0
-                            } else {
-                                0.0
-                            };
-                        }
-                        Opcode::Ne => {
-                            sp -= 1;
-                            stack[sp - 1] = if (stack[sp - 1] - stack[sp]).abs() >= 1e-9 {
-                                1.0
-                            } else {
-                                0.0
-                            };
-                        }
-                    }
-                }
-                if sp == 1 && stack[0].is_finite() {
-                    return Ok(stack[0]);
+            match run_opcodes_flat(ops, v1, v2, v3) {
+                FlatOutcome::Value(v) if v.is_finite() => return Ok(v),
+                // No finito → fall through al AST/evalexpr (igual que antes).
+                FlatOutcome::Value(_) => {}
+                FlatOutcome::ClampError => {
+                    return Err("clamp requires finite bounds where lower <= upper".to_string());
                 }
             }
         }
@@ -2223,6 +2388,16 @@ impl CompiledExpr {
             }
         }
 
+        if self.tree.is_some() {
+            return self.eval_tree(vars);
+        }
+
+        Err("Compiled expression has no evaluator".to_string())
+    }
+
+    /// Camino lento del árbol evalexpr, compartido por `eval`/`eval_1var`
+    /// para no duplicar el bloque (ni re-correr el loop plano al caer acá).
+    fn eval_tree(&self, vars: &[(String, f64)]) -> Result<f64, String> {
         if let Some(tree) = &self.tree {
             let mut ctx = setup_math_context();
             for (name, val) in vars {
@@ -2244,9 +2419,46 @@ impl CompiledExpr {
         Err("Compiled expression has no evaluator".to_string())
     }
 
+    /// Evalúa con UNA variable sin alocar `Vec` ni clonar `String` por
+    /// muestra (el camino caliente de samplers: miles de puntos). Misma
+    /// resolución posicional que `eval` + mismos fallbacks (AST de 1 var,
+    /// árbol evalexpr); solo cambia que no hay slice que armar.
+    pub fn eval_1var(&self, var: &str, val: f64) -> Result<f64, String> {
+        if let Some(ops) = &self.ops {
+            let mut v1 = 0.0;
+            let mut v2 = 0.0;
+            let mut v3 = 0.0;
+            if !self.var_names.is_empty() && var == self.var_names[0] {
+                v1 = val;
+            } else if self.var_names.len() > 1 && var == self.var_names[1] {
+                v2 = val;
+            } else if self.var_names.len() > 2 && var == self.var_names[2] {
+                v3 = val;
+            }
+            match run_opcodes_flat(ops, v1, v2, v3) {
+                FlatOutcome::Value(v) if v.is_finite() => return Ok(v),
+                FlatOutcome::Value(_) => {}
+                FlatOutcome::ClampError => {
+                    return Err("clamp requires finite bounds where lower <= upper".to_string());
+                }
+            }
+        }
+        if let Some(ast) = &self.ast {
+            let result = ast.eval_at(var, val);
+            if result.is_finite() {
+                return Ok(result);
+            }
+        }
+        // Camino lento (árbol evalexpr): una alloc, raro en la práctica.
+        if self.tree.is_some() {
+            return self.eval_tree(&[(var.to_string(), val)]);
+        }
+        Err("Compiled expression has no evaluator".to_string())
+    }
+
     /// Convenience: evaluate a single-variable compiled expression.
     pub fn eval_at(&self, var: &str, val: f64) -> Result<f64, String> {
-        self.eval(&[(var.to_string(), val)])
+        self.eval_1var(var, val)
     }
 }
 
@@ -2347,9 +2559,12 @@ pub fn eval_integral_batch(
         Ok(p) => p,
         Err(_) => return xs.map(|_| None).collect(),
     };
+    // Opcodes una vez (no walk por nodo de cuadratura: 80 evals por x).
+    let flat = compile_flat_ops(&prepared, int_var, "", "");
 
     fn adaptive_integrate(
         prepared: &crate::ast::Expr,
+        flat: Option<&ValidatedOps>,
         int_var: &str,
         a: f64,
         b: f64,
@@ -2375,34 +2590,177 @@ pub fn eval_integral_batch(
             let mut sum = 0.0;
             for (&xi, &wi) in nodes.iter().zip(weights.iter()) {
                 let t = mid + half * xi;
-                let val = prepared.eval_at(int_var, t);
-                if val.is_finite() {
+                // Plano primero; nodos no finitos se saltean igual que antes.
+                let val = flat
+                    .and_then(|ops| eval_opcodes_flat(ops, t, 0.0, 0.0))
+                    .or_else(|| {
+                        let v = prepared.eval_at(int_var, t);
+                        v.is_finite().then_some(v)
+                    });
+                if let Some(val) = val {
                     sum += wi * val;
                 }
             }
             return Some(sum * half);
         }
         let mid = (a + b) * 0.5;
-        let left = adaptive_integrate(prepared, int_var, a, mid, depth - 1)?;
-        let right = adaptive_integrate(prepared, int_var, mid, b, depth - 1)?;
+        let left = adaptive_integrate(prepared, flat, int_var, a, mid, depth - 1)?;
+        let right = adaptive_integrate(prepared, flat, int_var, mid, b, depth - 1)?;
         Some(left + right)
     }
 
-    xs.map(|x| {
-        if x < lower {
-            adaptive_integrate(&prepared, int_var, x, lower, 4).map(|v| -v)
-        } else if (x - lower).abs() < 1e-12 {
-            Some(0.0)
-        } else {
-            adaptive_integrate(&prepared, int_var, lower, x, 4)
-        }
-    })
-    .collect()
+    // Paralelo por x (orden preservado por `collect`): cada integral es
+    // independiente (todas parten de `lower`).
+    use rayon::prelude::*;
+    let xs_vec: Vec<f64> = xs.collect();
+    xs_vec
+        .into_par_iter()
+        .map(|x| {
+            if x < lower {
+                adaptive_integrate(&prepared, flat.as_ref(), int_var, x, lower, 4).map(|v| -v)
+            } else if (x - lower).abs() < 1e-12 {
+                Some(0.0)
+            } else {
+                adaptive_integrate(&prepared, flat.as_ref(), int_var, lower, x, 4)
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// Paridad flat-vs-walk en muestreo adversarial (Ola 2 B1).
+    ///
+    /// El fast path plano solo es válido si acuerda con el walk en los
+    /// GAPS (finito vs no-finito: ahí vive la forma visible de la curva).
+    /// En valores se exige cercanía; en trigonometría de argumento gigante
+    /// el plano es más preciso a propósito (`trig_reduce`), así que esos
+    /// casos solo pinean gaps.
+    #[test]
+    fn flat_matches_walk_en_muestreo_adversarial() {
+        // (expresión, exacta: true = también cercanía 1e-9, false = solo gaps)
+        let casos: &[(&str, bool)] = &[
+            ("sin(x)", true),
+            ("cos(x)", true),
+            ("x^2 - 2", true),
+            ("x^3 - 2*x + 1", true),
+            ("exp(x)", true),
+            ("log(x)", true),
+            ("sqrt(x)", true),
+            ("1/x", false),
+            ("tan(x)", false),
+            ("x^x", false),
+            ("1/(1/x)", false),
+            ("exp(700*x)", false),
+            ("sinh(500)", false),
+            ("sec(x)", false),
+            ("csc(x)", false),
+            ("cot(x)", false),
+            ("asin(x)", true),
+            ("acos(x)", true),
+            ("atan(x)", true),
+            ("clamp(x,-1,2)", true),
+            ("clamp(x,2,1)", true),
+            ("max(x,sin(x))", true),
+            ("min(x,cos(x))", true),
+            ("erf(x)", true),
+            ("gamma(x+1)", true),
+            ("atan2(x,1)", true),
+            ("0^0", true),
+            ("(-8)^(1/3)", true),
+            ("log(-1)", true),
+            ("sqrt(x^2-1)", false),
+            ("x>0", true),
+            ("abs(x-1)", true),
+            ("sin(1e16*x)", false),
+        ];
+        let mut normales = Vec::new();
+        for i in 0..=2000 {
+            normales.push(-10.0 + 20.0 * f64::from(i) / 2000.0);
+        }
+        let bordes = [
+            0.0,
+            -0.0,
+            1e-300,
+            -1e-300,
+            5e-324,
+            1e300,
+            -1e300,
+            f64::MIN_POSITIVE,
+            std::f64::consts::FRAC_PI_2 - 1e-12,
+            std::f64::consts::FRAC_PI_2 + 1e-12,
+            std::f64::consts::PI - 1e-12,
+            1e16,
+            -1e16,
+        ];
+        let vars_vacias = std::collections::BTreeMap::new();
+        for (expr_str, exacta) in casos {
+            let mut ast = crate::ast::parse_ast(&preprocess_expr(expr_str))
+                .unwrap_or_else(|e| panic!("parsea en batería: {expr_str}: {e}"));
+            ast = ast.substitute_vars(&vars_vacias, &["x"]).simplify();
+            let ops = compile_flat_ops(&ast, "x", "", "")
+                .unwrap_or_else(|| panic!("compila en batería: {expr_str}"));
+            for x in normales.iter().copied().chain(bordes) {
+                let walk = ast.eval_at("x", x);
+                let flat = eval_opcodes_flat_raw(&ops, x, 0.0, 0.0);
+                assert_eq!(
+                    flat.is_finite(),
+                    walk.is_finite(),
+                    "gap finito en {expr_str} x={x}: flat={flat} walk={walk}"
+                );
+                assert_eq!(
+                    flat.is_nan(),
+                    walk.is_nan(),
+                    "gap NaN en {expr_str} x={x}: flat={flat} walk={walk}"
+                );
+            }
+            // Cercanía solo en rango normal: con argumento gigante el plano
+            // (`trig_reduce`) es más preciso que el libm crudo a propósito.
+            if *exacta {
+                for x in normales.iter().copied() {
+                    let walk = ast.eval_at("x", x);
+                    if !walk.is_finite() {
+                        continue;
+                    }
+                    let flat = eval_opcodes_flat_raw(&ops, x, 0.0, 0.0);
+                    let tol = 1e-9 * 1.0f64.max(walk.abs()).max(flat.abs());
+                    assert!(
+                        (flat - walk).abs() <= tol,
+                        "deriva en {expr_str} x={x}: flat={flat} walk={walk}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Paridad 2D (implícitas, campos, paramétricas): acuerdo de gaps en
+    /// malla con diagonal singular incluida (`1/(x-y)`).
+    #[test]
+    fn flat_matches_walk_2d_en_malla_singular() {
+        let casos = ["x*y", "x/y", "sin(x)*cos(y)", "1/(x-y)", "x^2+y^2-1"];
+        let vars_vacias = std::collections::BTreeMap::new();
+        for expr_str in casos {
+            let mut ast = crate::ast::parse_ast(&preprocess_expr(expr_str))
+                .unwrap_or_else(|e| panic!("parsea en batería: {expr_str}: {e}"));
+            ast = ast.substitute_vars(&vars_vacias, &["x", "y"]).simplify();
+            let ops = compile_flat_ops(&ast, "x", "y", "")
+                .unwrap_or_else(|| panic!("compila en batería: {expr_str}"));
+            for i in 0..=40 {
+                for j in 0..=40 {
+                    let x = -2.0 + 4.0 * f64::from(i) / 40.0;
+                    let y = -2.0 + 4.0 * f64::from(j) / 40.0;
+                    let walk = ast.eval_2d("x", x, "y", y);
+                    let flat = eval_opcodes_flat_raw(&ops, x, y, 0.0);
+                    assert_eq!(
+                        flat.is_finite(),
+                        walk.is_finite(),
+                        "gap 2D en {expr_str} ({x},{y}): flat={flat} walk={walk}"
+                    );
+                }
+            }
+        }
+    }
     /// Ola 4 P0: el LRU de 128 (`MAX_COMPILED_EXPR_CACHE`) desaloja de verdad.
     ///
     /// Determinista y sin sleeps: vacía el cache del hilo, inserta 129
@@ -2431,8 +2789,11 @@ mod tests {
     }
     #[test]
     fn batch_par_sobre_umbral_coincide_con_escalar_punto_a_punto() {
-        // F10-D: el path rayon (>=1024) debe dar bit a bit lo mismo que el
-        // evaluador puntual. N=1500 cruza RAYON_BATCH_THRESHOLD.
+        // F10-D: el path rayon (>=1024) debe ser determinista y acordar con
+        // el evaluador puntual. N=1500 cruza RAYON_BATCH_THRESHOLD.
+        // Desde Ola 2 el batch corre opcodes planos (más precisos en trig
+        // por `trig_reduce`, 1 ulp de diferencia documentada): con trig se
+        // exige acuerdo de gaps + tolerancia; con álgebra pura, bit a bit.
         let vars = BTreeMap::new();
         let n = RAYON_BATCH_THRESHOLD + 476;
         let xs: Vec<f64> = (0..n)
@@ -2441,9 +2802,36 @@ mod tests {
         let got = eval_batch_1d("sin(x) + x^2 - cos(2*x)", "x", xs.iter().copied(), &vars)
             .expect("batch");
         assert_eq!(got.len(), n);
+        // Determinista: dos corridas idénticas bit a bit.
+        let got2 = eval_batch_1d("sin(x) + x^2 - cos(2*x)", "x", xs.iter().copied(), &vars)
+            .expect("batch2");
+        assert_eq!(got, got2, "el batch rayon debe ser determinista");
         for (i, &x) in xs.iter().enumerate() {
             let expected = evaluate("sin(x) + x^2 - cos(2*x)", &[("x".to_string(), x)]).ok();
-            assert_eq!(got[i], expected, "mismatch en x={x}");
+            match (got[i], expected) {
+                (Some(a), Some(b)) => {
+                    assert_eq!(
+                        a.is_finite(),
+                        b.is_finite(),
+                        "gap en x={x}: batch={a} escalar={b}"
+                    );
+                    if a.is_finite() && b.is_finite() {
+                        let tol = 1e-12 * 1.0f64.max(a.abs()).max(b.abs());
+                        assert!(
+                            (a - b).abs() <= tol,
+                            "deriva en x={x}: batch={a} escalar={b}"
+                        );
+                    }
+                }
+                (a, b) => assert_eq!(a.is_none(), b.is_none(), "gap None en x={x}"),
+            }
+        }
+        // Álgebra pura (sin trig): bit a bit contra el escalar.
+        let got_alg =
+            eval_batch_1d("x^3 - 2*x^2 + x - 5", "x", xs.iter().copied(), &vars).expect("batch");
+        for (i, &x) in xs.iter().enumerate() {
+            let expected = evaluate("x^3 - 2*x^2 + x - 5", &[("x".to_string(), x)]).ok();
+            assert_eq!(got_alg[i], expected, "mismatch álgebra en x={x}");
         }
     }
     #[test]

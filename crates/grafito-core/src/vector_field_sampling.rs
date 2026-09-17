@@ -104,6 +104,13 @@ pub fn evaluate_vector_field_2d(
 
     let ast_u = expr::prepare_function_ast(&vf.expr_u, variables, &["x", "y"]).ok();
     let ast_v = expr::prepare_function_ast(&vf.expr_v, variables, &["x", "y"]).ok();
+    // Opcodes planos una vez por malla (no walk por celda).
+    let flat_u = ast_u
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "y", ""));
+    let flat_v = ast_v
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "y", ""));
     // Base de variables fuera del hot loop: evita iterar+clonar el mapa
     // (con Strings) en cada celda; el fallback solo clona este Vec lineal.
     let base_vars: Vec<(String, f64)> = variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
@@ -125,15 +132,27 @@ pub fn evaluate_vector_field_2d(
                 .map(|i| {
                     let x = x_min + i as f64 * dx;
 
-                    let u = ast_u
+                    let u = flat_u
                         .as_ref()
-                        .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
+                        .and_then(|ops| expr::eval_opcodes_flat(ops, x, y, 0.0))
+                        .map(finite_clamp)
+                        .or_else(|| {
+                            ast_u
+                                .as_ref()
+                                .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
+                        })
                         .or_else(|| eval_fallback_base(&vf.expr_u, x, y))
                         .unwrap_or(f64::NAN);
 
-                    let v = ast_v
+                    let v = flat_v
                         .as_ref()
-                        .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
+                        .and_then(|ops| expr::eval_opcodes_flat(ops, x, y, 0.0))
+                        .map(finite_clamp)
+                        .or_else(|| {
+                            ast_v
+                                .as_ref()
+                                .map(|ast| finite_clamp(ast.eval_2d("x", x, "y", y)))
+                        })
                         .or_else(|| eval_fallback_base(&vf.expr_v, x, y))
                         .unwrap_or(f64::NAN);
 

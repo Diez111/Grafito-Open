@@ -209,7 +209,34 @@ impl Matrix {
         if self.cols != other.rows {
             return None;
         }
-        let mut result = Matrix::try_zeros(self.rows, other.cols)?;
+        let (rows, inner, cols) = (self.rows, self.cols, other.cols);
+        let mut result = Matrix::try_zeros(rows, cols)?;
+        if rows == 0 || cols == 0 {
+            return Some(result);
+        }
+        // Filas en paralelo (rayon) cuando el trabajo lo amortiza: cada
+        // elemento se calcula con el MISMO orden k que el loop escalar
+        // (bit-idéntico; solo cambia el hilo). Slices directos en vez de
+        // `get`/`set` para no pagar el chequeo por acceso interno.
+        let mults = (rows as u64) * (cols as u64) * (inner as u64);
+        if mults >= 100_000 {
+            use rayon::prelude::*;
+            result
+                .data
+                .par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(i, row)| {
+                    let a_row = &self.data[i * inner..(i + 1) * inner];
+                    for (j, slot) in row.iter_mut().enumerate() {
+                        let mut sum = 0.0;
+                        for (kk, &a) in a_row.iter().enumerate() {
+                            sum += a * other.data[kk * cols + j];
+                        }
+                        *slot = sum;
+                    }
+                });
+            return Some(result);
+        }
         for i in 0..self.rows {
             for j in 0..other.cols {
                 let mut sum = 0.0;

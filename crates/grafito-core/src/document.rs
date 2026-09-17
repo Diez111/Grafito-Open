@@ -222,6 +222,10 @@ pub type DocumentOperation = Box<dyn FnOnce(&mut Document) -> Result<(), String>
 /// necesitan snapshot propio.
 pub type VarMap = BTreeMap<String, f64>;
 
+/// Partes cacheadas del contexto del asistente: `(etiqueta, tipo, huella)`
+/// por objeto visible + variables (alias anti `type_complexity`).
+pub type ContextParts = (Vec<(String, String, String)>, VarMap);
+
 /// Puente F4 BTreeMap: mapa ordenado de metadatos de variable.
 ///
 /// Destino de la migración por dominio de `variable_meta` (privado).
@@ -269,9 +273,13 @@ pub struct ChangeSet {
 }
 
 impl ChangeSet {
+    /// Compara por bytes JSON serializados (no por árbol `Value`): mismo
+    /// resultado semántico (los `#[serde(skip)]` no entran en ninguno de los
+    /// dos), pero sin el pico de 2-4× que armaban los dos `Value` en undo/redo
+    /// de documentos grandes.
     fn same_semantic_state(left: &Document, right: &Document) -> Result<bool, String> {
-        let left = serde_json::to_value(left).map_err(|error| error.to_string())?;
-        let right = serde_json::to_value(right).map_err(|error| error.to_string())?;
+        let left = serde_json::to_vec(left).map_err(|error| error.to_string())?;
+        let right = serde_json::to_vec(right).map_err(|error| error.to_string())?;
         Ok(left == right)
     }
 
@@ -364,6 +372,11 @@ pub const MAX_WHITEBOARD_POINTS_PER_STROKE: usize = 4096;
 pub const MAX_WHITEBOARD_TEXT_CHARS: usize = 2000;
 /// Título de hoja más largo persistido (se trunca por caracteres, sin panic).
 pub const MAX_WHITEBOARD_PAGE_TITLE_CHARS: usize = 64;
+/// Tope TOTAL de bytes de trazo de todo el libro (Ola 4): sin esto, el
+/// teórico 32 hojas × 500 elementos × 4096 puntos × 16 B ≈ 1 GiB por
+/// documento (clonado por snapshot de undo). 32 MiB cubre uso real con
+/// margen y falla cerrado con mensaje antes de crecer sin cota.
+pub const MAX_WHITEBOARD_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 /// Zoom persistido mínimo válido (igual que `ZOOM_WB_MIN` de `grafito-ui`).
 pub const WHITEBOARD_PAGE_ZOOM_MIN: f64 = 1e-6;
 /// Zoom persistido máximo válido (igual que `ZOOM_WB_MAX` de `grafito-ui`).
@@ -916,6 +929,23 @@ pub struct Document {
     pub version: u64,
     #[serde(skip)]
     pub cached_vars_list: CachedVarsList,
+    /// Memo de `estimated_bytes` por `version` (Ola 2 B3): el peso solo se
+    /// re-serializa cuando la versión cambia (cada commit la bumpea). Sin
+    /// esto, cada push/evicción de undo serializaba el documento entero a
+    /// JSON (hasta ~50 serializaciones por edición con la pila llena).
+    /// `Arc<Mutex<..>>` (y no `Cell`): `Document` debe seguir `Send + Sync`
+    /// (callbacks wgpu, temp-data de egui). Compartir el memo entre clones
+    /// es correcto porque va keyeado por versión.
+    #[serde(skip, default)]
+    estimated_bytes_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, usize)>>>,
+    /// Memo de partes del contexto del asistente por `version` (Ola 4):
+    /// `document_context` serializaba cada objeto visible en CADA envío
+    /// (5000 objetos = miles de `String`s por mensaje del agente).
+    /// Acá se cachean las partes caras (etiqueta/tipo/huella + variables);
+    /// el ensamblado final (`from_parts`: sort + FNV, sin serde) corre
+    /// siempre. `Arc` para compartir entre clones e hilos de workers.
+    #[serde(skip, default)]
+    context_parts_cache: std::sync::Arc<std::sync::Mutex<Option<(u64, ContextParts)>>>,
     /// Secuencias vivas: DataTable backing con recálculo automático al cambiar variables.
     #[serde(default)]
     pub live_sequences: BTreeMap<ObjectId, LiveSequenceBinding>,
@@ -1006,6 +1036,17 @@ impl TrailBuffer {
     pub fn as_vec(&self) -> Vec<Point2> {
         self.points.iter().copied().collect()
     }
+
+    /// Última muestra sin clonar el buffer (throttle del renderer).
+    pub fn last(&self) -> Option<Point2> {
+        self.points.back().copied()
+    }
+
+    /// Rebanada contigua sin clonar. Reordena el anillo si está partido
+    /// (`make_contiguous`, típicamente no-op); la secuencia lógica intacta.
+    pub fn points_contiguous(&mut self) -> &[Point2] {
+        self.points.make_contiguous()
+    }
 }
 
 impl Default for Document {
@@ -1036,6 +1077,8 @@ impl Default for Document {
             last_solution: HashMap::new(),
             version: 0,
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            estimated_bytes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            context_parts_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             live_sequences: BTreeMap::new(),
             trace_enabled: BTreeMap::new(),
             trails: BTreeMap::new(),
@@ -3769,6 +3812,29 @@ impl Document {
             .get(&id)
             .map(TrailBuffer::as_vec)
             .unwrap_or_default()
+    }
+
+    /// Última muestra sin clonar el buffer (el renderer la usa para el
+    /// throttle por movimiento; antes pedía el `Vec` completo para `.last()`).
+    pub fn trail_last(&self, id: ObjectId) -> Option<Point2> {
+        if !self.is_trace(id) {
+            return None;
+        }
+        self.trails.get(&id).and_then(TrailBuffer::last)
+    }
+
+    /// Rebanada contigua de la estela sin clonar (`None` si apagado/vacío).
+    /// Para el draw por frame: antes se clonaba el `Vec` dos veces por
+    /// objeto rastreado y por frame.
+    pub fn trail_slice_mut(&mut self, id: ObjectId) -> Option<&[Point2]> {
+        if !self.is_trace(id) {
+            return None;
+        }
+        let trail = self.trails.get_mut(&id)?;
+        if trail.is_empty() {
+            return None;
+        }
+        Some(trail.points_contiguous())
     }
 
     /// Find object near a screen point (in world coordinates).
@@ -6625,7 +6691,7 @@ impl Document {
     /// 50 entradas × 10 MiB = 500 MiB en iGPU/low-RAM y evita evicción
     /// prematura a 1 entrada en docs de 5000 puntos.
     #[allow(clippy::manual_saturating_arithmetic)]
-    pub fn estimated_bytes(&self) -> usize {
+    fn estimated_bytes_uncached(&self) -> usize {
         const MIN_BYTES: usize = 8 * 1024;
         const LEGACY_BYTES_PER_OBJECT: usize = 4 * 1024;
 
@@ -6670,7 +6736,46 @@ impl Document {
             Ok(bytes) => bytes.len(),
             Err(_) => by_objects,
         };
-        by_objects.max(by_json).max(MIN_BYTES)
+        // El índice espacial (`#[serde(skip)]`, R-tree) se clona con cada
+        // snapshot pero el JSON no lo pesa: sumarlo acá cierra el hueco del
+        // presupuesto (nodo R-tree + `ObjectId` ≈ 128 B, conservador).
+        let by_spatial = self.spatial.len().checked_mul(128).unwrap_or(usize::MAX);
+        by_objects.max(by_json).max(by_spatial).max(MIN_BYTES)
+    }
+
+    /// Peso estimado con memo por `version`: la primera llamada tras un
+    /// commit serializa una vez; las siguientes (evicciones, undo/redo,
+    /// contadores) reutilizan el valor sin re-serializar.
+    pub fn estimated_bytes(&self) -> usize {
+        if let Ok(guard) = self.estimated_bytes_cache.lock() {
+            if let Some((version, bytes)) = *guard {
+                if version == self.version {
+                    return bytes;
+                }
+            }
+        }
+        let bytes = self.estimated_bytes_uncached();
+        if let Ok(mut guard) = self.estimated_bytes_cache.lock() {
+            *guard = Some((self.version, bytes));
+        }
+        bytes
+    }
+
+    /// Partes cacheadas del contexto del asistente, si la versión coincide:
+    /// `(etiqueta, tipo, huella)` por objeto visible + variables. `None`
+    /// tras cualquier commit (la versión bumpea). Lo usa `document_context`
+    /// (crate `command`) para no re-serializar en cada envío.
+    pub fn cached_context_parts(&self) -> Option<ContextParts> {
+        let guard = self.context_parts_cache.lock().ok()?;
+        let (version, parts) = guard.as_ref()?;
+        (*version == self.version).then(|| parts.clone())
+    }
+
+    /// Guarda las partes del contexto para la versión actual.
+    pub fn store_context_parts(&self, parts: ContextParts) {
+        if let Ok(mut guard) = self.context_parts_cache.lock() {
+            *guard = Some((self.version, parts));
+        }
     }
 
     /// Peso estimado por variante para `estimated_bytes`. Valores conservadores
@@ -7150,6 +7255,30 @@ mod tests {
         assert_eq!(doc.object_count(), 0);
         assert!(doc.objects_iter().next().is_none());
         assert_eq!(doc.constraints.constraint_count(), 0);
+    }
+
+    #[test]
+    fn estimated_bytes_memo_versiones_y_no_queda_viejo() {
+        // Invariante del memo (Ola 2 B3): toda mutación bumpea `version`;
+        // repetir la lectura no re-serializa (mismo valor) y mutar invalida.
+        let mut doc = Document::new();
+        let v0 = doc.version;
+        let base = doc.estimated_bytes();
+        assert_eq!(doc.estimated_bytes(), base);
+        for i in 0..30 {
+            doc.add_object(GeoObject::Function(FunctionObj::new(format!(
+                "x^{}",
+                i + 2
+            ))));
+        }
+        assert_ne!(doc.version, v0, "mutar debe bumpear versión");
+        let grown = doc.estimated_bytes();
+        assert!(grown > base, "30 funciones deben pesar más que vacío");
+        assert_eq!(doc.estimated_bytes(), grown);
+        // Roundtrip serde: caché fresca, mismo peso.
+        let json = serde_json::to_string(&doc).expect("serializa");
+        let back: Document = serde_json::from_str(&json).expect("deserializa");
+        assert_eq!(back.estimated_bytes(), grown);
     }
 
     #[test]

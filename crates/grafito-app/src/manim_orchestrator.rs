@@ -808,11 +808,10 @@ pub(crate) fn shared_frames_from_media(media: &AssistantMedia) -> Option<Arc<Tur
         if frame.size != [ancho, alto] || frame.pixels.len() != total {
             return None;
         }
-        let mut plano = Vec::with_capacity(por_frame);
-        for pixel in &frame.pixels {
-            plano.extend_from_slice(&[pixel.r(), pixel.g(), pixel.b(), pixel.a()]);
-        }
-        frames_rgba.push(plano);
+        // Reinterpretación RGBA sin loop por píxel (`Color32` es `Pod` con
+        // la feature `bytemuck` de egui; orden [R,G,B,A] verificado en
+        // `ecolor-0.29`): un `memcpy` en vez de N `extend_from_slice`.
+        frames_rgba.push(bytemuck::cast_vec(frame.pixels.clone()));
     }
     let set = TurnFrameSet {
         width: ancho as u32,
@@ -842,12 +841,9 @@ pub(crate) fn assistant_media_from_shared(
         if plano.len() != total.checked_mul(4)? {
             return None;
         }
-        let mut pixels = Vec::with_capacity(total);
-        for rgba in plano.chunks_exact(4) {
-            pixels.push(egui::Color32::from_rgba_unmultiplied(
-                rgba[0], rgba[1], rgba[2], rgba[3],
-            ));
-        }
+        // Reinterpretación inversa sin loop por píxel (un `memcpy`; el
+        // `validate` previo garantiza largo múltiplo de 4).
+        let pixels: Vec<egui::Color32> = bytemuck::cast_slice(plano.as_slice()).to_vec();
         frames.push(egui::ColorImage {
             size: [ancho, alto],
             pixels,
@@ -1453,7 +1449,9 @@ mod tests {
     fn frames_compartidos_roundtrip_sin_rerender() {
         use grafito_assistant_types::ConversationTurn;
         let coords = coords_de_prueba();
-        // Dos animaciones conservan frames: el player reutiliza sin re-render.
+        // Solo la ÚLTIMA animación conserva frames (`HISTORY_FULL_FRAMES_MAX`
+        // = 1): el player del último turno reutiliza sin re-render; los
+        // anteriores re-renderizan por el camino existente.
         let hecha_a =
             turn_media_for_completed_job(&media_de_prueba("A", 2), &coords).expect("media A");
         let hecha_b =
@@ -1478,27 +1476,59 @@ mod tests {
             hecha_b
         ));
         enforce_turn_frames_cap(&mut conversacion);
-        let rea = reusable_media_from_turn(&conversacion[1]).expect("A reutilizable");
+        assert!(
+            reusable_media_from_turn(&conversacion[1]).is_none(),
+            "A evictada: re-renderiza"
+        );
         let reb = reusable_media_from_turn(&conversacion[3]).expect("B reutilizable");
-        assert_eq!(rea.frames.len(), 2, "A sin re-render");
         assert_eq!(reb.frames.len(), 3, "B sin re-render");
-        assert_eq!(rea.title, "A");
-        // El Arc es barato: ambas medias comparten bytes sin copiar.
-        let pa = conversacion[1].media.as_ref().expect("media A");
-        let qa = conversacion[1].media.clone().expect("media A clonada");
+        assert_eq!(reb.title, "B");
+        // El Arc es barato: clonar la media comparte bytes sin copiar.
+        let pb = conversacion[3].media.as_ref().expect("media B");
+        let qb = conversacion[3].media.clone().expect("media B clonada");
         assert!(std::sync::Arc::ptr_eq(
-            pa.frames.as_ref().expect("frames A"),
-            qa.frames.as_ref().expect("frames A clon"),
+            pb.frames.as_ref().expect("frames B"),
+            qb.frames.as_ref().expect("frames B clon"),
         ));
     }
 
     #[test]
-    fn cuarta_animacion_evicta_la_primera_thumb_sobrevive() {
+    fn frames_compartidos_roundtrip_bytes_identicos() {
+        // Paridad Ola 4: RGBA plano → ColorImage → RGBA plano es identidad
+        // byte a byte (incluye alpha parcial: la versión vieja con
+        // `from_rgba_unmultiplied` pre-multiplicaba dos veces).
+        let coords = coords_de_prueba();
+        let hecha =
+            turn_media_for_completed_job(&media_de_prueba("R", 2), &coords).expect("media R");
+        let shared = hecha.frames.as_ref().expect("frames R");
+        let re = assistant_media_from_shared(&hecha.title, shared).expect("re-materializa");
+        assert_eq!(re.frames.len(), shared.len());
+        let shared2 = shared_frames_from_media(&re).expect("re-comparte");
+        assert_eq!(
+            shared.frames_rgba, shared2.frames_rgba,
+            "roundtrip idéntico"
+        );
+        // Alpha parcial explícito: 1 píxel semitransparente sobrevive intacto.
+        let plano = vec![10u8, 20, 30, 128];
+        let set = grafito_assistant_types::TurnFrameSet {
+            width: 1,
+            height: 1,
+            frames_rgba: vec![plano.clone()],
+        };
+        set.validate().expect("set 1x1 válido");
+        let media = assistant_media_from_shared("parcial", &set).expect("media parcial");
+        assert_eq!(media.frames.len(), 1);
+        let set2 = shared_frames_from_media(&media).expect("re-comparte parcial");
+        assert_eq!(set2.frames_rgba, vec![plano], "alpha parcial intacto");
+    }
+
+    #[test]
+    fn segunda_animacion_evicta_la_primera_thumb_sobrevive() {
         use grafito_assistant_types::{ConversationTurn, HISTORY_FULL_FRAMES_MAX};
-        assert_eq!(HISTORY_FULL_FRAMES_MAX, 3);
+        assert_eq!(HISTORY_FULL_FRAMES_MAX, 1);
         let coords = coords_de_prueba();
         // El attach exige dueño == último: se construye incremental sin trim
-        // (8 turnos a propósito: el cap de frames evicta sin dropear el par).
+        // (el cap de frames evicta sin dropear el par).
         let mut conversacion = vec![
             ConversationTurn::user("q1"),
             ConversationTurn::assistant("r1"),
@@ -1510,20 +1540,18 @@ mod tests {
             Some(1),
             hecha1
         ));
-        for (nombre, make_idx) in [("U2", 3), ("U3", 5), ("U4", 7)] {
-            let n = conversacion.len();
-            conversacion.push(ConversationTurn::user(format!("q{n}")));
-            conversacion.push(ConversationTurn::assistant(format!("r{n}")));
-            let hecha = turn_media_for_completed_job(&media_de_prueba(nombre, 2), &coords)
-                .expect("media con frames");
-            assert!(hecha.has_full_frames());
-            assert!(attach_media_to_owner_turn(
-                &mut conversacion,
-                Some(make_idx),
-                hecha
-            ));
-            enforce_turn_frames_cap(&mut conversacion);
-        }
+        let n = conversacion.len();
+        conversacion.push(ConversationTurn::user(format!("q{n}")));
+        conversacion.push(ConversationTurn::assistant(format!("r{n}")));
+        let hecha = turn_media_for_completed_job(&media_de_prueba("U2", 2), &coords)
+            .expect("media con frames");
+        assert!(hecha.has_full_frames());
+        assert!(attach_media_to_owner_turn(
+            &mut conversacion,
+            Some(3),
+            hecha
+        ));
+        enforce_turn_frames_cap(&mut conversacion);
         // La 1ª soltó frames pero conserva thumb+meta (mini-card viva).
         let primera = conversacion[1].media.as_ref().expect("U1 sigue");
         assert_eq!(primera.title, "U1");
@@ -1533,16 +1561,14 @@ mod tests {
             reusable_media_from_turn(&conversacion[1]).is_none(),
             "U1 re-renderiza"
         );
-        for idx in [3, 5, 7] {
-            assert!(
-                conversacion[idx]
-                    .media
-                    .as_ref()
-                    .is_some_and(|m| m.has_full_frames()),
-                "turno {idx} conserva frames",
-            );
-            assert!(reusable_media_from_turn(&conversacion[idx]).is_some());
-        }
+        assert!(
+            conversacion[3]
+                .media
+                .as_ref()
+                .is_some_and(|m| m.has_full_frames()),
+            "turno 3 conserva frames",
+        );
+        assert!(reusable_media_from_turn(&conversacion[3]).is_some());
     }
 
     // ── Puerta anti-grilla-vacía ─────────────────────────────────────────

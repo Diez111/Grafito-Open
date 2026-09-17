@@ -211,12 +211,20 @@ pub const TEXTURE_GRACE_FRAMES: u32 = 3;
 /// best-effort bajo presión, documentado). 96 = 2 playlists completas.
 pub const RETENTION_MAX_PENDING: usize = 96;
 
+/// Tope de BYTES retenidos en gracia (Ola 4): el tope por cantidad no
+/// alcanza cuando cada item es una textura full-viewport (33 MB a 4K):
+/// el primer frame con N curvas implícitas podía retirar ~N texturas de
+/// tamaño canvas (cientos de MB durante 3 frames). 32 MiB = la mitad del
+/// presupuesto vivo del fill cache (64 MB).
+pub const RETENTION_MAX_BYTES: usize = 32 * 1024 * 1024;
+
 const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 
 #[derive(Debug)]
 struct RetentionEntry<T> {
     item: T,
     frames_left: u32,
+    bytes: usize,
 }
 
 /// Cola de retiro con gracia por frames para handles de textura.
@@ -226,6 +234,7 @@ struct RetentionEntry<T> {
 #[derive(Debug, Default)]
 pub struct RetentionQueue<T> {
     entries: Vec<RetentionEntry<T>>,
+    retired_bytes: usize,
 }
 
 impl<T> RetentionQueue<T> {
@@ -233,6 +242,7 @@ impl<T> RetentionQueue<T> {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            retired_bytes: 0,
         }
     }
 
@@ -242,12 +252,29 @@ impl<T> RetentionQueue<T> {
     /// el más viejo (drop inmediato, best-effort bajo presión) para que
     /// `pending()` nunca supere el tope.
     pub fn retire(&mut self, item: T) {
-        if self.entries.len() >= RETENTION_MAX_PENDING {
-            self.entries.remove(0);
+        self.retire_sized(item, 0);
+    }
+
+    /// Retira con tamaño declarado: además del tope por cantidad, evicta
+    /// los más viejos mientras los bytes retenidos superen
+    /// `RETENTION_MAX_BYTES`. Para texturas de tamaño conocido (el fill
+    /// cache conoce `byte_size` al evictar).
+    pub fn retire_sized(&mut self, item: T, bytes: usize) {
+        while !self.entries.is_empty()
+            && (self.entries.len() >= RETENTION_MAX_PENDING
+                || self
+                    .retired_bytes
+                    .saturating_add(bytes)
+                    .gt(&RETENTION_MAX_BYTES))
+        {
+            let old = self.entries.remove(0);
+            self.retired_bytes = self.retired_bytes.saturating_sub(old.bytes);
         }
+        self.retired_bytes = self.retired_bytes.saturating_add(bytes);
         self.entries.push(RetentionEntry {
             item,
             frames_left: TEXTURE_GRACE_FRAMES,
+            bytes,
         });
     }
 
@@ -266,20 +293,28 @@ impl<T> RetentionQueue<T> {
         }
         let mut ready = Vec::new();
         let mut still_pending = Vec::new();
+        let mut still_bytes = 0usize;
         for entry in self.entries.drain(..) {
             if entry.frames_left == 0 {
                 ready.push(entry.item);
             } else {
+                still_bytes = still_bytes.saturating_add(entry.bytes);
                 still_pending.push(entry);
             }
         }
         self.entries = still_pending;
+        self.retired_bytes = still_bytes;
         ready
     }
 
     /// Cuántos handles siguen retenidos (aún no liberables).
     pub fn pending(&self) -> usize {
         self.entries.len()
+    }
+
+    /// Bytes retenidos en gracia (solo lo declarado vía `retire_sized`).
+    pub fn pending_bytes(&self) -> usize {
+        self.retired_bytes
     }
 
     /// Verdadero si no hay nada retenido.
@@ -642,6 +677,29 @@ mod tests {
         ultimos_ordenados.sort_unstable();
         assert_eq!(ultimos_ordenados, vec![8_u64, 9_u64]);
         assert!(cola.is_empty());
+    }
+
+    // ── Ola 4: tope por bytes además de por conteo ──────────────────────
+    #[test]
+    fn retencion_evicta_por_bytes_con_texturas_grandes() {
+        // 4 texturas de 10 MiB superan los 32 MiB: solo sobreviven las
+        // últimas (sin este tope, 96 texturas 4K = ~3 GiB en gracia).
+        let mut cola: RetentionQueue<u64> = RetentionQueue::new();
+        for id in 0_u64..4 {
+            cola.retire_sized(id, 10 * 1024 * 1024);
+        }
+        assert!(
+            cola.pending_bytes() <= RETENTION_MAX_BYTES,
+            "bytes retenidos: {}",
+            cola.pending_bytes()
+        );
+        assert!(cola.pending() < 4, "las más viejas se evictaron");
+        // El tick libera y resta los bytes correspondientes.
+        let _ = cola.tick();
+        let _ = cola.tick();
+        let _ = cola.tick();
+        assert!(cola.is_empty());
+        assert_eq!(cola.pending_bytes(), 0);
     }
 
     #[test]

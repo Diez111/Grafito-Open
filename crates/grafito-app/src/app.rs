@@ -1410,8 +1410,9 @@ pub(crate) struct TrigGraphCache {
     pub y_max_bits: u64,
     pub width_px: u32,
     pub quality: RenderQuality,
-    pub segments: Vec<(Point2, Point2)>,
-    pub asymptotes: Vec<f64>,
+    /// `Arc`: el hit clona el refcount, no los segmentos (~10k) por frame.
+    pub segments: std::sync::Arc<Vec<(Point2, Point2)>>,
+    pub asymptotes: std::sync::Arc<Vec<f64>>,
 }
 
 // Evaluador GPU para la ruta híbrida de integrales definidas.
@@ -1777,6 +1778,9 @@ pub struct GrafitoApp {
     pub command_palette: grafito_ui::command_palette::CommandPaletteState,
     /// Herramientas personalizadas `.ggt` (store en memoria; persistencia por archivo).
     pub custom_tools: grafito_command::ggbscript::CustomToolStore,
+    /// Última época vista de `custom_tools`: las entradas de paleta se
+    /// reconstruyen solo cuando el store cambia, no cada frame.
+    pub custom_tools_revision: u64,
     /// Diálogo "Guardar herramienta" (nombre) y último error mostrable.
     pub show_custom_tool_dialog: bool,
     pub custom_tool_name: String,
@@ -2476,6 +2480,7 @@ impl GrafitoApp {
             snapshot_render_quality,
             command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
             custom_tools: grafito_command::ggbscript::CustomToolStore::new(),
+            custom_tools_revision: 0,
             show_custom_tool_dialog: false,
             custom_tool_name: String::new(),
             assistant,
@@ -3977,11 +3982,16 @@ impl GrafitoApp {
         };
         let time = ctx.input(|i| i.time);
         let total = def.steps.len();
-        // Snapshot pre-script (documento + historial + log).
+        // Snapshot pre-script (documento + historial + log). El redo se
+        // MUEVE (no se clona): hasta 50 ChangeSets (~50 MiB) por ejecución.
+        // Restaurarlo al final es exacto porque los pasos no pueden hacer
+        // undo/redo (no son comandos despachables): el redo solo puede
+        // quedar intacto (pasos de lectura) o vaciado por `push_snapshot`
+        // (pasos que mutan). `undo_len_antes` distingue ambos casos.
         let doc_before = self.document.clone();
         let undo_len_antes = self.undo_stack.len();
         let undo_bytes_antes = self.undo_total_bytes;
-        let redo_antes = self.redo_stack.clone();
+        let mut redo_antes = Some(std::mem::take(&mut self.redo_stack));
         let log_len_antes = self.construction_log.len();
         let cas_antes = self.cas_result.clone();
         let mut done = 0_usize;
@@ -4005,7 +4015,7 @@ impl GrafitoApp {
                     if self.undo_stack.len() == undo_len_antes {
                         self.undo_total_bytes = undo_bytes_antes;
                     }
-                    self.redo_stack = redo_antes;
+                    self.redo_stack = redo_antes.take().unwrap_or_default();
                     self.construction_log.truncate(log_len_antes);
                     self.cas_result = cas_antes;
                     self.selected_object = None;
@@ -4039,6 +4049,16 @@ impl GrafitoApp {
             self.redo_stack.clear();
             self.undo_total_bytes = self.undo_total_bytes.saturating_add(bytes);
             enforce_undo_budgets(&mut self.undo_stack, &mut self.undo_total_bytes);
+        }
+        // Si ningún paso mutó, el redo tomado sigue siendo el vigente:
+        // devolverlo (los pasos de lectura no lo tocan). Si hubo mutación,
+        // `push_snapshot` ya lo vació con semántica normal.
+        if self.undo_stack.len() == undo_len_antes {
+            if let Some(redo) = redo_antes.take() {
+                if !redo.is_empty() {
+                    self.redo_stack = redo;
+                }
+            }
         }
         self.notify(
             format!("{tool_name}: {done} de {total} pasos aplicados"),
@@ -7282,9 +7302,13 @@ impl eframe::App for GrafitoApp {
         }
 
         // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
-        // Las herramientas personalizadas (.ggt) entran como sección propia.
-        self.command_palette.custom_tools =
-            grafito_ui::command_palette::custom_tool_entries(&self.custom_tools);
+        // Las herramientas personalizadas (.ggt) entran como sección propia,
+        // reconstruidas solo cuando el store cambia (época), no cada frame.
+        if self.custom_tools.revision() != self.custom_tools_revision {
+            self.custom_tools_revision = self.custom_tools.revision();
+            self.command_palette.custom_tools =
+                grafito_ui::command_palette::custom_tool_entries(&self.custom_tools);
+        }
         if let Some(name) = self
             .command_palette
             .show_localized(ctx, self.config_locale())
@@ -8701,6 +8725,14 @@ pub fn run_app() -> Result<(), eframe::Error> {
             .with_app_id("grafito")
             .with_icon(std::sync::Arc::new(icon)),
         multisampling: crate::MSAA_SAMPLES,
+        wgpu_options: egui_wgpu::WgpuConfiguration {
+            // Ola 5: latencia 1 (no el default 2 de wgpu): la app pinta por
+            // demanda + repaints presupuestados, no es un game-loop; lo que
+            // importa es input→fotón (lápiz, sliders, pan). Guía upstream:
+            // "Use 1 for low-latency, and 2 for high-throughput".
+            desired_maximum_frame_latency: Some(1),
+            ..Default::default()
+        },
         ..Default::default()
     };
     eframe::run_native(
@@ -9060,6 +9092,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         snapshot_render_quality,
         command_palette: grafito_ui::command_palette::CommandPaletteState::default(),
         custom_tools: grafito_command::ggbscript::CustomToolStore::new(),
+        custom_tools_revision: 0,
         show_custom_tool_dialog: false,
         custom_tool_name: String::new(),
         assistant: grafito_ui::assistant::AssistantPanelState::default(),

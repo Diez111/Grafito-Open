@@ -13969,6 +13969,13 @@ mod tests {
         // Reuso por contenido idéntico sin re-parseo (misma cantidad de bloques).
         let again = cache.blocks(content);
         assert_eq!(first.len(), again.len());
+        // Pin cero-clones del hot path: el hit comparte el `Arc` (mismo
+        // puntero) y no invoca al parser de nuevo.
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &again),
+            "hit del cache debe compartir el Arc, no clonar bloques"
+        );
+        assert_eq!(cache.parse_count, 1, "el hit no debe re-parsear");
         let mutated = cache.blocks(&format!("{content} agregado"));
         assert!(mutated.len() >= first.len());
         let mut empty = AssistantBlocksCache::default();

@@ -278,6 +278,9 @@ pub(crate) struct AssistantRemoteJob {
     pub(crate) stream_text: String,
     /// Razonamiento acumulado del stream (bloque plegable; nunca la respuesta).
     pub(crate) stream_reasoning: String,
+    /// El acumulado tocó el tope (`STREAM_ACCUM_MAX_BYTES`): el preview
+    /// muestra "…[truncado]" en vez de crecer sin cota.
+    pub(crate) stream_truncated: bool,
     /// Hay un turno provisional al final de `conversation` que debe limpiarse
     /// al terminar/cancelar (ver `pop_provisional_stream_turn`).
     pub(crate) preview_active: bool,
@@ -950,6 +953,7 @@ impl AssistantJobsController {
             stream_rx: Some(stream_rx),
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,
@@ -2093,6 +2097,7 @@ mod tests {
             stream_rx: Some(stream_rx),
             stream_text: String::new(),
             stream_reasoning: String::new(),
+            stream_truncated: false,
             preview_active: false,
             started_at: std::time::Instant::now(),
             first_delta_at: None,

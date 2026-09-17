@@ -892,12 +892,16 @@ fn lhopital_numeric_loop(
                 }
             }
         }
-        // Cociente derivado en el entorno (polo puntual honesto).
+        // Cociente derivado en el entorno (polo puntual honesto), sin
+        // round-trip a texto: Richardson directo sobre el AST. El guard de
+        // tamaño se preserva en nodos (`node_count` ≤ bytes de su forma
+        // texto siempre, así que 2000 nodos es tan estricto como los 2000
+        // bytes de `ValidExpr` para acotar el trabajo de Richardson).
         let q = Expr::Div(Box::new(cur_n.clone()), Box::new(cur_d.clone()));
-        let Ok(text) = ValidExpr::try_new(&q.to_expr_string()) else {
+        if q.node_count() > MAX_CAS_EXPR_BYTES {
             continue;
-        };
-        if let Some(value) = gruntz_richardson_any_side(text.as_str(), var, at) {
+        }
+        if let Some(value) = gruntz_richardson_any_side_ast(&q, var, at) {
             return Some((value, step));
         }
     }
@@ -908,20 +912,29 @@ fn lhopital_numeric_loop(
 ///
 /// Ambos lados convergen y acuerdan → ese valor; solo uno converge (el otro
 /// es error de dominio) → el convergente; desacuerdo o nada → `None`.
-fn gruntz_richardson_any_side(expr: &str, var: &str, at: f64) -> Option<f64> {
+/// Variante de Richardson bilateral/unilateral sobre un AST ya construido
+/// (sin serializar ni re-parsear por iteración de L'Hôpital).
+fn gruntz_richardson_any_side_ast(quotient: &crate::ast::Expr, var: &str, at: f64) -> Option<f64> {
     use crate::outcome::MathResult;
+    // Etiqueta solo para mensajes (nunca visibles: `finite` descarta todo
+    // lo que no sea valor): el cociente es derivado, sin texto fuente.
+    let label = "<derived quotient>";
     let finite = |r: MathResult<f64>| match r {
         MathResult::Approximate { value, .. } | MathResult::Exact(value) => {
             value.is_finite().then_some(value)
         }
         _ => None,
     };
-    let both = finite(crate::symbolic::limit_typed(expr, var, at));
+    let both = finite(crate::symbolic::limit_typed_ast(quotient, var, at, label));
     if both.is_some() {
         return both;
     }
-    let above = finite(crate::symbolic::limit_above_typed(expr, var, at));
-    let below = finite(crate::symbolic::limit_below_typed(expr, var, at));
+    let above = finite(crate::symbolic::limit_above_typed_ast(
+        quotient, var, at, label,
+    ));
+    let below = finite(crate::symbolic::limit_below_typed_ast(
+        quotient, var, at, label,
+    ));
     match (above, below) {
         (Some(a), Some(b)) => {
             let scale = a.abs().max(b.abs()).max(1.0);
@@ -2061,48 +2074,35 @@ fn buchberger_run(
             hint: "sistema nulo o vacío; nada que triangular".to_string(),
         });
     }
-    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    // Líderes cacheados por elemento de la base (la base solo crece por
+    // `push`: los líderes nunca cambian) + heap de pares por clave de
+    // azúcar. Antes cada iteración re-escaneaba todos los pares O(P²)
+    // recomputando líderes y LCMs; ahora cada par se evalúa una sola vez
+    // al crearse (la clave es estable: `sugars[i]` no muta tras crearse).
+    let mut leaders: Vec<Option<(Monom, f64)>> = basis
+        .iter()
+        .map(|p| leading_term_ordered(p, order))
+        .collect();
+    let mut heap: BuchbergerPairHeap = std::collections::BinaryHeap::new();
     for i in 0..basis.len() {
         for j in (i + 1)..basis.len() {
-            pairs.push((i, j));
+            heap.push((
+                std::cmp::Reverse(buchberger_pair_key(&leaders, &sugars, i, j)),
+                i,
+                j,
+            ));
         }
     }
-    let pair_key = |basis: &[PolyMap], sugars: &[u32], i: usize, j: usize| -> (u32, u32) {
-        let (lm_f, _) = leading_term_ordered(&basis[i], order).unwrap_or((vec![], 0.0));
-        let (lm_g, _) = leading_term_ordered(&basis[j], order).unwrap_or((vec![], 0.0));
-        let l = monom_lcm(&lm_f, &lm_g);
-        let deg_l = monom_total_deg(&l);
-        let deg_f = monom_total_deg(&lm_f);
-        let deg_g = monom_total_deg(&lm_g);
-        let s_f = sugars.get(i).copied().unwrap_or(0) + deg_l.saturating_sub(deg_f);
-        let s_g = sugars.get(j).copied().unwrap_or(0) + deg_l.saturating_sub(deg_g);
-        (s_f.max(s_g), deg_l)
-    };
     let mut s_used = 0_usize;
-    while !pairs.is_empty() {
-        // Selección por azúcar (mínimo `(max_sugar, deg_lcm)`).
-        let mut best = 0_usize;
-        let mut best_key = pair_key(&basis, &sugars, pairs[0].0, pairs[0].1);
-        for (k, &(i, j)) in pairs.iter().enumerate().skip(1) {
-            if i >= basis.len() || j >= basis.len() {
-                continue;
-            }
-            let key = pair_key(&basis, &sugars, i, j);
-            if key < best_key {
-                best = k;
-                best_key = key;
-            }
-        }
-        let (i, j) = pairs.swap_remove(best);
+    while let Some((_, i, j)) = heap.pop() {
         if i >= basis.len() || j >= basis.len() {
             continue;
         }
-        let (f, g) = (basis[i].clone(), basis[j].clone());
+        // Préstamos, no clones: `basis` no se toca hasta el `push` final.
+        let (f, g) = (&basis[i], &basis[j]);
         // Criterio de Buchberger: líderes primos relativos → reduce a cero.
-        if let (Some((lm_f, _)), Some((lm_g, _))) = (
-            leading_term_ordered(&f, order),
-            leading_term_ordered(&g, order),
-        ) {
+        // (Líderes del caché, sin recomputar.)
+        if let (Some((lm_f, _)), Some((lm_g, _))) = (leaders[i].clone(), leaders[j].clone()) {
             let l = monom_lcm(&lm_f, &lm_g);
             let disjoint = lm_f
                 .iter()
@@ -2124,10 +2124,10 @@ fn buchberger_run(
                 ),
             });
         }
-        let s = s_polynomial_ordered(&f, &g, order)?;
+        let s = s_polynomial_ordered(f, g, order)?;
         // Azúcar del S-polinomio para futuras selecciones.
-        let (lm_f, _) = leading_term_ordered(&f, order).unwrap_or((vec![], 0.0));
-        let (lm_g, _) = leading_term_ordered(&g, order).unwrap_or((vec![], 0.0));
+        let (lm_f, _) = leaders[i].clone().unwrap_or((vec![], 0.0));
+        let (lm_g, _) = leaders[j].clone().unwrap_or((vec![], 0.0));
         let l = monom_lcm(&lm_f, &lm_g);
         let deg_l = monom_total_deg(&l);
         let new_sugar = (sugars[i] + deg_l.saturating_sub(monom_total_deg(&lm_f)))
@@ -2135,14 +2135,49 @@ fn buchberger_run(
         let rest = reduce_poly_ordered(&s, &basis, order)?;
         if !rest.is_empty() {
             let n = basis.len();
-            for k in 0..n {
-                pairs.push((k, n));
-            }
             sugars.push(new_sugar.max(total_deg_of(&rest)));
             basis.push(rest);
+            leaders.push(leading_term_ordered(&basis[n], order));
+            for k in 0..n {
+                heap.push((
+                    std::cmp::Reverse(buchberger_pair_key(&leaders, &sugars, k, n)),
+                    k,
+                    n,
+                ));
+            }
         }
     }
     Ok((basis, s_used))
+}
+
+/// Heap de pares de Buchberger ordenado por clave de azúcar (alias anti
+/// `type_complexity`).
+type BuchbergerPairHeap =
+    std::collections::BinaryHeap<(std::cmp::Reverse<(u32, u32)>, usize, usize)>;
+
+/// Clave de selección por azúcar para un par, sobre líderes cacheados.
+/// (Extraída del closure inline para reusarla al crear pares nuevos.)
+fn buchberger_pair_key(
+    leaders: &[Option<(Monom, f64)>],
+    sugars: &[u32],
+    i: usize,
+    j: usize,
+) -> (u32, u32) {
+    let (lm_f, _) = leaders
+        .get(i)
+        .and_then(|entry| entry.clone())
+        .unwrap_or((vec![], 0.0));
+    let (lm_g, _) = leaders
+        .get(j)
+        .and_then(|entry| entry.clone())
+        .unwrap_or((vec![], 0.0));
+    let l = monom_lcm(&lm_f, &lm_g);
+    let deg_l = monom_total_deg(&l);
+    let deg_f = monom_total_deg(&lm_f);
+    let deg_g = monom_total_deg(&lm_g);
+    let s_f = sugars.get(i).copied().unwrap_or(0) + deg_l.saturating_sub(deg_f);
+    let s_g = sugars.get(j).copied().unwrap_or(0) + deg_l.saturating_sub(deg_g);
+    (s_f.max(s_g), deg_l)
 }
 
 /// Formatea una base a strings ordenados sin duplicados.
@@ -2780,6 +2815,16 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     // --- Frente B2: Gruntz pragmático (aceptación 1:1 con la spec) ---
+
+    #[test]
+    fn richardson_ast_da_limite_clasico() {
+        // Ola 2: la variante AST (sin round-trip a texto) resuelve el 0/0
+        // clásico. (La histórica por texto se eliminó al quedar sin
+        // llamantes: parseaba una vez y delegaba acá mismo.)
+        let ast = crate::ast::parse_ast("sin(x)/x").expect("parse");
+        let value = gruntz_richardson_any_side_ast(&ast, "x", 0.0).expect("ast");
+        assert!((value - 1.0).abs() < 1e-7, "límite clásico: {value}");
+    }
 
     #[test]
     fn b2_pow_one_to_inf_is_e() {

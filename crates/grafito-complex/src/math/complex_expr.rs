@@ -845,7 +845,7 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
 /// Implementación basada en el algoritmo de Lanczos con g=7 y 9 coeficientes,
 /// que da ~15 dígitos de precisión para Re(z) > 0. Para Re(z) < 0 usa la
 /// fórmula de reflexión: Γ(z) = π / (sin(πz) * Γ(1-z)).
-fn complex_gamma(z: Complex64) -> Complex64 {
+pub(crate) fn complex_gamma(z: Complex64) -> Complex64 {
     // Coeficientes de Lanczos (g=7, n=9)
     const G: f64 = 7.0;
     const C: [f64; 9] = [
@@ -909,7 +909,7 @@ fn complex_gamma(z: Complex64) -> Complex64 {
 ///
 /// Para el caso general con n arbitrario, se usa la fórmula integral:
 /// J_n(z) = (1/2π) ∫_{-π}^{π} e^{i(nτ - z sin(τ))} dτ
-fn complex_bessel_j(n: f64, z: Complex64) -> Complex64 {
+pub(crate) fn complex_bessel_j(n: f64, z: Complex64) -> Complex64 {
     // Para z pequeño, usar la serie de potencias (más precisa)
     if z.norm() < 20.0 {
         let half_z = z * 0.5;
@@ -967,7 +967,7 @@ fn complex_bessel_j(n: f64, z: Complex64) -> Complex64 {
 /// donde w(z) = e^{-z²} * erfc(-iz) es la función de Faddeeva.
 ///
 /// Implementación: series de potencias para |z| < 3, fracción continua para |z| >= 3.
-fn complex_erf(z: Complex64) -> Complex64 {
+pub(crate) fn complex_erf(z: Complex64) -> Complex64 {
     let sqrt_pi = std::f64::consts::PI.sqrt();
     let z_norm = z.norm();
 
@@ -1021,7 +1021,7 @@ fn complex_erf(z: Complex64) -> Complex64 {
 
 /// Función de Lambert W (rama principal W_0) usando iteración de Newton.
 /// W(z) es la solución de w * e^w = z.
-fn complex_lambert_w(z: Complex64) -> Complex64 {
+pub(crate) fn complex_lambert_w(z: Complex64) -> Complex64 {
     // Estimación inicial
     let mut w = if z.norm() < 2.7 {
         // Cerca del origen: w ≈ z - z² + 1.5*z³
@@ -1199,7 +1199,7 @@ fn zeta_functional_equation(s: Complex64) -> Complex64 {
 /// funcional en dominio logarítmico para `Re(s) < 0`. La suma directa usa
 /// entre 16 y 2048 términos según `|Im(s)|`; fuera de ese límite devuelve el
 /// par NaN usado por las demás funciones especiales del evaluador.
-fn complex_zeta(s: Complex64) -> Complex64 {
+pub(crate) fn complex_zeta(s: Complex64) -> Complex64 {
     if !s.re.is_finite() || !s.im.is_finite() {
         return zeta_nan();
     }
@@ -1232,7 +1232,7 @@ fn complex_zeta(s: Complex64) -> Complex64 {
 /// Para n entero, se usa el límite:
 /// Y_0(z) = (2/π) * (ln(z/2) + γ) * J_0(z) - (2/π) * Σ_{k=1}^∞ (-1)^k * H_k / (k!)² * (z/2)^{2k}
 /// donde γ es la constante de Euler-Mascheroni y H_k es el k-ésimo número armónico.
-fn complex_bessel_y(n: f64, z: Complex64) -> Complex64 {
+pub(crate) fn complex_bessel_y(n: f64, z: Complex64) -> Complex64 {
     let pi = std::f64::consts::PI;
     let euler_gamma = 0.5772156649015329;
 
@@ -1296,14 +1296,33 @@ pub fn eval_complex_batch(
     points: impl Iterator<Item = Complex64>,
     vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<Complex64>>, String> {
+    use super::complex_opcode::{compile_complex_expr, exec_cpu, ComplexBytecodeProgram};
     let ast = parse(expr)?;
     let mut cmap = HashMap::new();
     for (k, v) in vars {
         cmap.insert(k.clone(), Complex64::new(*v, 0.0));
     }
+    // Bytecode una vez (nombres → slots, resto a constantes): por punto
+    // solo el loop plano sin `HashMap` ni `String`s. Si no compila
+    // (p.ej. `deriv_z`), el walk de abajo lo cubre punto a punto.
+    let flat: Option<ComplexBytecodeProgram> = {
+        let mut prog = ComplexBytecodeProgram::default();
+        compile_complex_expr(&ast, vars, &[(base_symbol, 0)], &mut prog)
+            .ok()
+            .map(|()| prog)
+    };
 
     let mut res = Vec::new();
     for z in points {
+        if let Some(prog) = &flat {
+            if let Some(v) = exec_cpu(prog, &[z]) {
+                if v.re.is_finite() && v.im.is_finite() {
+                    res.push(Some(v));
+                    continue;
+                }
+            }
+            // `None` o no finito → el walk arbitra (igual que antes).
+        }
         cmap.insert(base_symbol.to_string(), z);
         match ast.eval(&cmap) {
             Ok(val) => {

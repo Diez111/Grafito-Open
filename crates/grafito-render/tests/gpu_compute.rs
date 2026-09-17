@@ -258,12 +258,20 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
         .is_none());
 
     let domain = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
+    // Una celda centrada en (1,0): origen 0.5 + 0.5*paso con paso 1.
+    let one_cell = grafito_render::domain_coloring_compute::DomainGrid {
+        x_min: 0.5,
+        y_min: -0.5,
+        dx: 1.0,
+        dy: 1.0,
+        res: 1,
+    };
     let colors = domain
         .evaluate(
             &gpu.device,
             &gpu.queue,
             &valid,
-            &[(1.0, 0.0)],
+            &one_cell,
             &BTreeMap::new(),
             0,
         )
@@ -274,7 +282,7 @@ fn required_vulkan_complex_pipelines_accept_the_stack_limit_and_reject_overflow(
             &gpu.device,
             &gpu.queue,
             &overflow,
-            &[(1.0, 0.0)],
+            &one_cell,
             &BTreeMap::new(),
             0,
         )
@@ -1282,18 +1290,220 @@ fn maybe_compute_batched_3d_and_polar_populate_caches_in_one_submit() {
 
 #[test]
 fn domain_coloring_rejects_over_250k_cells_before_dispatch() {
+    use grafito_render::domain_coloring_compute::DomainGrid;
     let Some(gpu) = gpu_context_or_skip() else {
         return;
     };
     let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
     let expr = grafito_complex::math::complex_expr::parse("z").expect("test expression must parse");
-    let points: Vec<(f64, f64)> = (0..250_001).map(|i| (i as f64 * 1e-6, 0.0)).collect();
+    // 501² = 251001 > 250k: la malla regular se rechaza sin tocar la GPU.
+    let grid = DomainGrid {
+        x_min: 0.0,
+        y_min: 0.0,
+        dx: 1e-6,
+        dy: 1.0,
+        res: 501,
+    };
 
-    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &points, &BTreeMap::new(), 0);
+    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0);
     assert!(
         result.is_none(),
-        "MAX_CELLS 250k es un presupuesto duro: 250_001 celdas se rechazan"
+        "MAX_CELLS 250k es un presupuesto duro: 251_001 celdas se rechazan"
     );
+}
+
+#[test]
+fn domain_coloring_grid_matches_cpu_walk() {
+    use grafito_render::domain_coloring_compute::DomainGrid;
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
+    // f(z) = z^2 + 1 sobre 8×8: la malla del shader (i = idx/res,
+    // j = idx%res, centros +0.5) debe coincidir con la CPU. Se pinea vía
+    // lightness = (max+min)/2 del RGB: depende solo de |f| (mismo |f| =
+    // misma lightness), sin duplicar el HSL del shader en el test.
+    let expr =
+        grafito_complex::math::complex_expr::parse("z^2+1").expect("test expression must parse");
+    let (x_min, y_min, dx, dy, res) = (-2.0, -2.0, 0.5, 0.5, 8usize);
+    let grid = DomainGrid {
+        x_min,
+        y_min,
+        dx,
+        dy,
+        res,
+    };
+    let colors = compute
+        .evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+        .expect("grid 8x8 ejecuta en GPU");
+    assert_eq!(colors.len(), res * res);
+    let light = |idx: usize| {
+        let c = colors[idx];
+        assert!(
+            c.iter().all(|v| v.is_finite()),
+            "celda {idx} finita debe colorear: {c:?}"
+        );
+        (c.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            + c.iter().copied().fold(f32::INFINITY, f32::min))
+            * 0.5
+    };
+    let at = |i: usize, j: usize| light(i * res + j);
+    // Conjugados (x,y)/(x,-y): mismo |f| → misma lightness.
+    // j <-> res-1-j espeja y (centros y_min+(j+0.5)*dy).
+    for i in 0..res {
+        for j in 0..res / 2 {
+            let a = at(i, j);
+            let b = at(i, res - 1 - j);
+            assert!(
+                (a - b).abs() < 1e-2,
+                "simetría conjugada ({i},{j}): {a} vs {b}"
+            );
+        }
+    }
+    // Transpuesta (i,j)/(j,i): |f| distinto en general → lightness distinta
+    // (pinea el orden fila-mayor; un swap i/j lo rompería).
+    let mut distintas = 0;
+    for i in 0..res {
+        for j in (i + 1)..res {
+            if (at(i, j) - at(j, i)).abs() > 1e-3 {
+                distintas += 1;
+            }
+        }
+    }
+    assert!(
+        distintas > 0,
+        "la transpuesta debe diferir en alguna celda (orden fila-mayor)"
+    );
+    // Centro (|f| chico) vs esquina (|f| grande): lightness ordenada igual.
+    assert!(
+        at(3, 3) < at(0, 0),
+        "centro más oscuro que esquina: {} vs {}",
+        at(3, 3),
+        at(0, 0)
+    );
+}
+
+#[test]
+fn domain_coloring_async_dispatch_resolves_like_sync() {
+    use grafito_render::domain_coloring_compute::DomainGrid;
+    use grafito_render::gpu_readback::ReadbackPoll;
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
+    let expr =
+        grafito_complex::math::complex_expr::parse("z^2+1").expect("test expression must parse");
+    let grid = DomainGrid {
+        x_min: -2.0,
+        y_min: -2.0,
+        dx: 0.5,
+        dy: 0.5,
+        res: 8,
+    };
+    let mut pending = compute
+        .dispatch(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+        .expect("dispatch sin espera");
+    // Poll no-bloqueante hasta Mapped (mismo esquema que el prepare: la
+    // espera se distribuye; acá el test sí puede esperar, tope 10 s como
+    // el timeout de cobertura requerida sobre lavapipe).
+    let t0 = std::time::Instant::now();
+    loop {
+        gpu.device.poll(wgpu::Maintain::Poll);
+        if pending.poll() == ReadbackPoll::Mapped {
+            break;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "el dispatch asíncrono debe mapear"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    let async_colors = compute.resolve_eval(pending).expect("resolve tras Mapped");
+    let sync_colors = compute
+        .evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+        .expect("sync de referencia");
+    assert_eq!(
+        async_colors.len(),
+        sync_colors.len(),
+        "mismo largo sync/async"
+    );
+    assert_eq!(
+        async_colors, sync_colors,
+        "async y sync deterministas en misma GPU"
+    );
+}
+
+#[test]
+fn parametric_curve_2d_async_job_populates_object_cache() {
+    use grafito_render::parametric_compute::{curve_2d_cache_key, resolve_curve_2d_job};
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ParametricComputePipeline::new(&gpu.device, &gpu.queue, 4096, 128);
+    let pc = ParametricCurve2DObj::new("t", "t^2", 0.0, 1.0);
+    let vars = BTreeMap::new();
+    let steps = 64usize;
+    let key = curve_2d_cache_key(&pc, steps, &vars).expect("key válida");
+    let mut job = compute
+        .dispatch_curve_2d(&gpu.device, &gpu.queue, &pc, steps, &vars)
+        .expect("dispatch sin espera");
+    // Espera distribuida como el prepare (poll no-bloqueante hasta Mapped).
+    let t0 = std::time::Instant::now();
+    loop {
+        gpu.device.poll(wgpu::Maintain::Poll);
+        if job.poll() == grafito_render::gpu_readback::ReadbackPoll::Mapped {
+            break;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "el dispatch debe mapear"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        resolve_curve_2d_job(&compute, &pc, &vars, steps, job, &key),
+        "el resolve escribe al caché del objeto"
+    );
+    let cached = pc.cached_key.read().unwrap();
+    assert_eq!(cached.as_ref(), Some(&key));
+    assert_eq!(pc.cached_samples.read().unwrap().len(), steps + 1);
+}
+
+#[test]
+fn vector_field_async_job_populates_object_cache() {
+    use grafito_render::vector_compute::{resolve_vector_job, vector_dispatch_bounds};
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute =
+        VectorComputePipeline::new(&gpu.device, &gpu.queue, 128).expect("pipeline vectorial");
+    let vf = VectorField2DObj::new("-y", "x");
+    let vars = BTreeMap::new();
+    // Vista headless 800×600 para derivar bounds (el drain usa la real).
+    let view = grafito_geometry::ViewTransform::new(800.0, 600.0);
+    let (bounds, grid_size) = vector_dispatch_bounds(&vf, &view);
+    let key = grafito_core::vector_field_sampling::cache_key(&vf, bounds, grid_size, &vars);
+    let mut job = compute
+        .dispatch(&gpu.device, &gpu.queue, &vf, bounds, grid_size, &vars)
+        .expect("dispatch sin espera");
+    let t0 = std::time::Instant::now();
+    loop {
+        gpu.device.poll(wgpu::Maintain::Poll);
+        if job.poll() == grafito_render::gpu_readback::ReadbackPoll::Mapped {
+            break;
+        }
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(10),
+            "el dispatch debe mapear"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(
+        resolve_vector_job(&compute, &vf, bounds, grid_size, &vars, job, &key),
+        "el resolve escribe al caché del objeto"
+    );
+    assert_eq!(vf.cached_key.read().unwrap().as_ref(), Some(&key));
+    assert!(!vf.cached_samples.read().unwrap().is_empty());
 }
 
 #[test]

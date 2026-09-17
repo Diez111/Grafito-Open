@@ -51,6 +51,43 @@ fn bench_expr_evaluation(c: &mut Criterion) {
             .unwrap()
         })
     });
+
+    // Ola 2 B1: walk recursivo vs loop plano, mismo AST preparado, 5000
+    // puntos. Decide con datos si el SIMD (B10) vale la pena.
+    {
+        use grafito_geometry::expr::{compile_flat_ops, eval_opcodes_flat, prepare_function_ast};
+        use std::collections::BTreeMap;
+        for (nombre, texto) in [("sin_poly", "sin(x) + x^2 - cos(2*x)"), ("trivial", "x+1")] {
+            let ast = prepare_function_ast(texto, &BTreeMap::new(), &["x"]).expect("parse");
+            let ops = compile_flat_ops(&ast, "x", "", "").expect("opcodes");
+            let xs: Vec<f64> = (0..5000)
+                .map(|i| -3.0 + 6.0 * (i as f64) / 5000.0)
+                .collect();
+            c.bench_function(&format!("walk_{nombre}_5000"), |b| {
+                b.iter(|| {
+                    let mut acc = 0.0;
+                    for &x in &xs {
+                        let v = ast.eval_at("x", black_box(x));
+                        if v.is_finite() {
+                            acc += v;
+                        }
+                    }
+                    black_box(acc)
+                })
+            });
+            c.bench_function(&format!("flat_{nombre}_5000"), |b| {
+                b.iter(|| {
+                    let mut acc = 0.0;
+                    for &x in &xs {
+                        if let Some(v) = eval_opcodes_flat(&ops, black_box(x), 0.0, 0.0) {
+                            acc += v;
+                        }
+                    }
+                    black_box(acc)
+                })
+            });
+        }
+    }
 }
 
 criterion_group!(benches, bench_expr_evaluation);

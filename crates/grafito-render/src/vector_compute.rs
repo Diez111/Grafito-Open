@@ -12,7 +12,7 @@
 
 use crate::gpu_readback::{PendingGpuReadback, ReadbackPoll};
 use crate::implicit_compute::{compile_expr, f32_bounds_have_precision, BytecodeProgram};
-use grafito_core::object::{VectorField2DObj, VectorFieldSamples};
+use grafito_core::object::{VectorField2DObj, VectorFieldCacheKey, VectorFieldSamples};
 use grafito_core::vector_field_sampling;
 use std::collections::BTreeMap;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -499,14 +499,12 @@ impl VectorComputePipeline {
 /// Returns `true` if the cache was populated (either already cached or freshly
 /// computed on the GPU). Returns `false` if the GPU path is unavailable or the
 /// expression is not supported by the bytecode machine.
-pub fn maybe_compute_vector_field_on_gpu(
-    compute: &VectorComputePipeline,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
+/// Bounds con padding + tamaño de malla para un campo (origen único
+/// sync/async del cálculo derivado de la vista).
+pub fn vector_dispatch_bounds(
     vf: &VectorField2DObj,
     view: &grafito_geometry::ViewTransform,
-    variables: &BTreeMap<String, f64>,
-) -> bool {
+) -> ((f64, f64, f64, f64), usize) {
     let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
     let world_br = view.screen_to_world(view.screen_size);
     let view_bounds = (
@@ -517,7 +515,69 @@ pub fn maybe_compute_vector_field_on_gpu(
     );
     let padded_bounds = vector_field_sampling::padded_snapped_bounds(view_bounds, 2.0, 64);
     let grid_size = vf.density.clamp(5, 128);
+    (padded_bounds, grid_size)
+}
 
+/// Escribe samples + key en el caché del objeto (origen único sync/async).
+pub fn populate_vector_cache(
+    vf: &VectorField2DObj,
+    key: VectorFieldCacheKey,
+    samples: VectorFieldSamples,
+) {
+    *vf.cached_samples.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = samples;
+    *vf.cached_key.write().unwrap_or_else(|p| {
+        log::warn!("cache lock envenenado; recuperando estado parcial");
+        p.into_inner()
+    }) = Some(key);
+}
+
+/// Resolve non-blocking para el slot: re-chequea vigencia con el estado
+/// actual (misma vista incluida), resuelve y popula. `false` = el llamante
+/// cae al CPU honesto.
+pub fn resolve_vector_job(
+    compute: &VectorComputePipeline,
+    vf: &VectorField2DObj,
+    bounds: (f64, f64, f64, f64),
+    grid_size: usize,
+    variables: &BTreeMap<String, f64>,
+    job: PendingVectorEval,
+    key: &VectorFieldCacheKey,
+) -> bool {
+    let fresh = vector_field_sampling::cache_key(vf, bounds, grid_size, variables);
+    if &fresh != key {
+        log::debug!("Vector GPU job obsoleto (key cambió); descartando sin escribir");
+        compute.abort_eval();
+        return false;
+    }
+    {
+        let cached_key = vf.cached_key.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        });
+        if cached_key.as_ref() == Some(key) {
+            compute.abort_eval();
+            return true;
+        }
+    }
+    let Some(samples) = compute.resolve_eval(job) else {
+        return false;
+    };
+    populate_vector_cache(vf, key.clone(), samples);
+    true
+}
+
+pub fn maybe_compute_vector_field_on_gpu(
+    compute: &VectorComputePipeline,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    vf: &VectorField2DObj,
+    view: &grafito_geometry::ViewTransform,
+    variables: &BTreeMap<String, f64>,
+) -> bool {
+    let (padded_bounds, grid_size) = vector_dispatch_bounds(vf, view);
     let key = vector_field_sampling::cache_key(vf, padded_bounds, grid_size, variables);
     {
         let cached_key = vf.cached_key.read().unwrap_or_else(|p| {
@@ -534,14 +594,7 @@ pub fn maybe_compute_vector_field_on_gpu(
         return false;
     };
 
-    *vf.cached_samples.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = samples;
-    *vf.cached_key.write().unwrap_or_else(|p| {
-        log::warn!("cache lock envenenado; recuperando estado parcial");
-        p.into_inner()
-    }) = Some(key);
+    populate_vector_cache(vf, key, samples);
     true
 }
 

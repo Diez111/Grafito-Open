@@ -233,3 +233,53 @@ fn fill_cache_texture_size_is_capped_for_extreme_padding() {
 
     assert_eq!(size, (4096, 4096));
 }
+
+#[test]
+fn complex_fill_key_distinguishes_maps_without_formatting() {
+    use grafito_app::render_2d::compute_complex_fill_cache_key;
+    use grafito_complex::algebraic_mappings::ConformalMap;
+
+    let ic = ImplicitCurveObj::new("x^2 + y^2", "1", RelationOperator::Less);
+    let vars = BTreeMap::<String, f64>::new();
+    let fill_color = Color::new(0.4, 0.3, 0.8, 0.5);
+    let canvas_size = (800_u32, 600_u32);
+    let padded = padded_snapped_bounds((-5.0, 5.0, -4.0, 4.0), PAD_FACTOR, SNAP_CELLS);
+
+    let key_inv = compute_complex_fill_cache_key(
+        &ic,
+        &ConformalMap::Inversion,
+        padded,
+        canvas_size,
+        &vars,
+        fill_color,
+    );
+    // Determinista para el mismo mapa.
+    let key_inv2 = compute_complex_fill_cache_key(
+        &ic,
+        &ConformalMap::Inversion,
+        padded,
+        canvas_size,
+        &vars,
+        fill_color,
+    );
+    assert_eq!(key_inv, key_inv2);
+    // Mapas distintos → keys distintas (antes vía `format!("{:?}")` por frame).
+    let key_pow = compute_complex_fill_cache_key(
+        &ic,
+        &ConformalMap::Power(2),
+        padded,
+        canvas_size,
+        &vars,
+        fill_color,
+    );
+    assert_ne!(key_inv, key_pow);
+    let key_pow3 = compute_complex_fill_cache_key(
+        &ic,
+        &ConformalMap::Power(3),
+        padded,
+        canvas_size,
+        &vars,
+        fill_color,
+    );
+    assert_ne!(key_pow, key_pow3);
+}

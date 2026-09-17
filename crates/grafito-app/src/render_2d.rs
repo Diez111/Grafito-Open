@@ -19,6 +19,9 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
+/// Segmentos + asíntotas trigonométricas compartidos (alias anti `type_complexity`).
+type TrigSegments = (Arc<Vec<(Point2, Point2)>>, Arc<Vec<f64>>);
+
 // La gracia cubre el submit GPU en vuelo (N≥2); verificado a compile-time
 // (clippy `assertions_on_constants` prohíbe re-chequear la const en runtime).
 const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
@@ -26,13 +29,10 @@ const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 // ── F3-Render caches: fractal / phase / ordered_visible keyed por document.version ──
 thread_local! {
     // Los valores se guardan como `Arc` para que el cache hit clone solo el
-    // puntero (refcount) y no el payload completo (hasta 160k píxeles de
-    // fractal, density² segmentos de retrato de fase, o el AST complejo).
+    // puntero (refcount) y no el payload completo (density² segmentos de
+    // retrato de fase, o el AST complejo).
     // LRU real (`lru::LruCache`): el hit hace bump O(1) y el `put` desaloja
     // la menos usada (antes `HashMap + keys().next()`, evicción arbitraria).
-    static FRACTAL_RENDER_CACHE: RefCell<
-        lru::LruCache<u64, Arc<Vec<grafito_geometry::fractals::FractalPixel>>>,
-    > = RefCell::new(lru::LruCache::new(FRACTAL_RENDER_CACHE_SIZE));
     static PHASE_PORTRAIT_CACHE: RefCell<lru::LruCache<u64, PhasePortraitSegments>> =
         RefCell::new(lru::LruCache::new(PHASE_RENDER_CACHE_SIZE));
     static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Arc<Vec<ObjectId>>)>> =
@@ -58,21 +58,28 @@ thread_local! {
     /// subida por texto y un solo `painter.image` (tinte = color del rótulo).
     static TEX_LABEL_TEXTURES: RefCell<lru::LruCache<String, egui::TextureHandle>> =
         RefCell::new(lru::LruCache::new(TEX_LABEL_TEXTURE_CACHE_SIZE));
+    /// Texturas de fractales keyed por la misma clave que los píxeles
+    /// (`fractal_render_cache_key`): antes cada frame emitía `res²`
+    /// `rect_filled` (hasta 160k shapes con `resolution: 400`); ahora una
+    /// rasterización por cambio y un solo `painter.image` con `NEAREST`
+    /// (misma estética de píxel nítido que los rects en world-space).
+    static FRACTAL_TEXTURES: RefCell<lru::LruCache<u64, egui::TextureHandle>> =
+        RefCell::new(lru::LruCache::new(FRACTAL_TEXTURE_CACHE_SIZE));
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
     static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
 }
-const FRACTAL_RENDER_CACHE_CAP: usize = 8;
 const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
 const COMPLEX_GRID_TEXTURE_CAP: usize = 16;
 const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
 const TEX_LABEL_TEXTURE_CACHE_CAP: usize = 64;
+const FRACTAL_TEXTURE_CACHE_CAP: usize = 8;
+const DISPLAY_OVERRIDE_CACHE_CAP: usize = 64;
+const TEXT_GALLEY_CACHE_CAP: usize = 64;
+const DOMAIN_GRID_CACHE_CAP: usize = 8;
 // Tamaños `NonZeroUsize` para `lru::LruCache::new` (misma API que
 // `grafito-render/src/lib.rs:TRANSFORMED_CACHE_SIZE`).
-#[allow(clippy::useless_nonzero_new_unchecked)]
-const FRACTAL_RENDER_CACHE_SIZE: std::num::NonZeroUsize =
-    unsafe { std::num::NonZeroUsize::new_unchecked(FRACTAL_RENDER_CACHE_CAP) };
 #[allow(clippy::useless_nonzero_new_unchecked)]
 const PHASE_RENDER_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(PHASE_RENDER_CACHE_CAP) };
@@ -88,6 +95,89 @@ const VECTOR_FIELD_STREAMLINE_CACHE_SIZE: std::num::NonZeroUsize =
 #[allow(clippy::useless_nonzero_new_unchecked)]
 const TEX_LABEL_TEXTURE_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(TEX_LABEL_TEXTURE_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const FRACTAL_TEXTURE_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(FRACTAL_TEXTURE_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const DISPLAY_OVERRIDE_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(DISPLAY_OVERRIDE_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const STAT_MEMO_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(STAT_MEMO_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const TEXT_GALLEY_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(TEXT_GALLEY_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const DOMAIN_GRID_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(DOMAIN_GRID_CACHE_CAP) };
+
+/// Tags del memo de estadísticas (un caché, cuatro formas).
+const STAT_HISTOGRAM: u8 = 0;
+const STAT_BARS: u8 = 1;
+const STAT_SLICES: u8 = 2;
+const STAT_BOXPLOT: u8 = 3;
+const STAT_MEMO_CACHE_CAP: usize = 32;
+
+/// Estadística ya computada, compartida por `Arc`. Histogramas, barras,
+/// tortas y boxplots se recomputaban por frame (el boxplot ordena la
+/// muestra 3 veces); con datos y parámetros cubiertos por
+/// `document.version`, el memo por `(objeto, versión, tag)` lo deja en un
+/// `Arc` por cambio.
+#[derive(Clone)]
+#[allow(clippy::type_complexity)]
+enum StatMemoValue {
+    Histogram(std::sync::Arc<Vec<(f64, f64, f64)>>),
+    Bars(std::sync::Arc<Vec<grafito_core::symbolic::BarSegment>>),
+    Slices(std::sync::Arc<Vec<grafito_core::symbolic::PieSlice>>),
+    Boxplot(std::sync::Arc<Option<(f64, f64, f64, f64, f64, Vec<f64>)>>),
+}
+
+thread_local! {
+    /// Memo de estadísticas por `(objeto, versión, tag)`. Un solo static
+    /// compartido por get/put (dos `thread_local!` serían dos cachés).
+    static STAT_MEMO: RefCell<lru::LruCache<(ObjectId, u64, u8), StatMemoValue>> =
+        RefCell::new(lru::LruCache::new(STAT_MEMO_CACHE_SIZE));
+    /// Galleys de objetos `Text` por `(objeto, versión, tamaño)`.
+    static TEXT_GALLEYS: RefCell<
+        lru::LruCache<(ObjectId, u64, u32), std::sync::Arc<egui::Galley>>,
+    > = RefCell::new(lru::LruCache::new(TEXT_GALLEY_CACHE_SIZE));
+}
+
+/// Galley compartido para un objeto `Text`: en hit ni se clona el `String`
+/// ni se re-resuelve el layout. El color va horneado en el galley pero
+/// también está cubierto por la versión (cambia solo con commit).
+fn text_galley_shared(
+    painter: &egui::Painter,
+    id: ObjectId,
+    version: u64,
+    font_size: f32,
+    content: &str,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let key = (id, version, font_size.to_bits());
+    if let Some(hit) = TEXT_GALLEYS.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return hit;
+    }
+    let galley = painter.layout_no_wrap(
+        content.to_owned(),
+        egui::FontId::proportional(font_size),
+        color,
+    );
+    TEXT_GALLEYS.with(|c| {
+        c.borrow_mut().put(key, galley.clone());
+    });
+    galley
+}
+
+fn stat_memo_get(tag: u8, id: ObjectId, version: u64) -> Option<StatMemoValue> {
+    STAT_MEMO.with(|c| c.borrow_mut().get(&(id, version, tag)).cloned())
+}
+
+fn stat_memo_put(tag: u8, id: ObjectId, version: u64, value: StatMemoValue) {
+    STAT_MEMO.with(|c| {
+        c.borrow_mut().put((id, version, tag), value);
+    });
+}
 
 /// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
 type PhasePortraitSegments = Arc<Vec<(Point2, Point2)>>;
@@ -141,16 +231,15 @@ fn phase_render_cache_key(
     h.finish()
 }
 
-/// Cachea `try_compute_fractal` keyed por `document.version` para evitar recomputar
-/// el mismo fractal en cada frame (hasta 160k píxeles, trabajo pesado).
+/// Píxeles de un fractal, vía la caché de geometría (con tope en bytes).
+///
+/// Sin LRU propio en la capa render: la textura (`FRACTAL_TEXTURES`, misma
+/// key) ya retiene el resultado rasterizado, y la caché de geometría acota
+/// bytes. Un nivel menos de `Arc`s reteniendo hasta 160k píxeles × 40 B.
 fn cached_try_compute_fractal(
     fr: &grafito_core::Fractal2DObj,
-    document_version: u64,
+    _document_version: u64,
 ) -> Option<Arc<Vec<grafito_geometry::fractals::FractalPixel>>> {
-    let key = fractal_render_cache_key(document_version, fr);
-    if let Some(cached) = FRACTAL_RENDER_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
-        return Some(cached);
-    }
     let fractal_type = match fr.fractal_type.as_str() {
         "julia" if fr.params.len() >= 2 => grafito_geometry::fractals::FractalType::Julia {
             cr: fr.params[0],
@@ -167,22 +256,77 @@ fn cached_try_compute_fractal(
             max_iter: fr.max_iter,
         },
     };
-    let pixels = Arc::new(
-        grafito_geometry::fractals::try_compute_fractal(
-            &fractal_type,
-            fr.x_min,
-            fr.x_max,
-            fr.y_min,
-            fr.y_max,
-            fr.resolution,
-            fr.resolution,
-        )
-        .ok()?,
+    // Variante compartida: en hit de la caché de geometría no se clona el
+    // buffer (hasta 160k píxeles × 40 B); el `Arc` se comparte tal cual.
+    grafito_geometry::fractals::try_compute_fractal_shared(
+        &fractal_type,
+        fr.x_min,
+        fr.x_max,
+        fr.y_min,
+        fr.y_max,
+        fr.resolution,
+        fr.resolution,
+    )
+    .ok()
+}
+
+/// Construye la `ColorImage` de un fractal desde sus píxeles ya computados.
+///
+/// Fila 0 de la imagen = fila de `y_max` (los píxeles vienen en filas desde
+/// `y_min`, igual que el grid complejo). Pura y testeable: el draw solo
+/// sube a textura en miss y blitea. `None` si `res == 0` o el buffer no
+/// trae exactamente `res²` píxeles (el llamante omite el dibujo, honesto).
+fn fractal_texture_image(
+    pixels: &[grafito_geometry::fractals::FractalPixel],
+    res: usize,
+) -> Option<egui::ColorImage> {
+    use grafito_geometry::fractals::fractal_color_hsv;
+    let total = res.checked_mul(res)?;
+    if res == 0 || pixels.len() != total {
+        return None;
+    }
+    let mut out = Vec::with_capacity(total);
+    for row in (0..res).rev() {
+        let base = row * res;
+        for px in &pixels[base..base + res] {
+            let (r, g, b, a) = fractal_color_hsv(px.iter, px.max_iter, px.smooth_value);
+            out.push(Color32::from_rgba_premultiplied(
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8,
+                (a * 255.0) as u8,
+            ));
+        }
+    }
+    Some(egui::ColorImage {
+        size: [res, res],
+        pixels: out,
+    })
+}
+
+/// Textura viva de un fractal (get-or-upload). En hit no sube nada a GPU:
+/// el draw blitea un solo `painter.image` en vez de emitir `res²`
+/// `rect_filled` por frame (hasta 160k shapes con `resolution: 400`).
+fn cached_fractal_texture(
+    painter: &egui::Painter,
+    fr: &grafito_core::Fractal2DObj,
+    document_version: u64,
+    pixels: &Arc<Vec<grafito_geometry::fractals::FractalPixel>>,
+) -> Option<egui::TextureHandle> {
+    let key = fractal_render_cache_key(document_version, fr);
+    if let Some(handle) = FRACTAL_TEXTURES.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return Some(handle);
+    }
+    let image = fractal_texture_image(pixels, fr.resolution)?;
+    let handle = painter.ctx().load_texture(
+        format!("grafito_fractal_{}_{key:016x}", fr.id),
+        image,
+        egui::TextureOptions::NEAREST,
     );
-    FRACTAL_RENDER_CACHE.with(|c| {
-        c.borrow_mut().put(key, pixels.clone());
+    FRACTAL_TEXTURES.with(|c| {
+        c.borrow_mut().put(key, handle.clone());
     });
-    Some(pixels)
+    Some(handle)
 }
 
 /// Cachea `sample_phase_portrait` keyed por `document.version` para evitar
@@ -284,18 +428,25 @@ fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Arc<Vec<Obje
     ids
 }
 
-fn cached_ordered_visible_2d_objects(
+/// Itera los objetos visibles ordenados SIN alocar el `Vec` intermedio.
+///
+/// Mismo orden y mismos elementos que el helper anterior (ids cacheados por
+/// versión + `get_object` por id); el callback devuelve `false` para cortar.
+/// Varios caminos por frame (plan de implícitas, paint plan, trails,
+/// animación compleja) reconstruían un `Vec` en cada llamada: 5 allocs +
+/// N lookups por frame eliminados.
+fn for_each_ordered_visible_2d_object(
     document: &grafito_core::Document,
-) -> Vec<(ObjectId, &GeoObject)> {
-    // Usa ids cacheados (keyed por version) y reconstruye refs sin re-ordenar.
+    mut f: impl FnMut(ObjectId, &grafito_core::GeoObject) -> bool,
+) {
     let ids = cached_ordered_visible_ids(document);
-    let mut out = Vec::with_capacity(ids.len());
     for id in ids.iter() {
         if let Some(obj) = document.get_object(*id) {
-            out.push((*id, obj));
+            if !f(*id, obj) {
+                break;
+            }
         }
     }
-    out
 }
 
 /// Read-lock optimizado con fast-path `try_read` y manejo de poison sin `unwrap`.
@@ -618,16 +769,18 @@ fn base_scene_paint_plan(
     document: &grafito_core::Document,
     gpu_base_active: bool,
 ) -> Vec<BasePaint2D> {
-    cached_ordered_visible_2d_objects(document)
-        .into_iter()
-        .map(|(id, object)| {
+    let mut out = Vec::new();
+    for_each_ordered_visible_2d_object(document, |id, object| {
+        out.push(
             if gpu_base_active && is_gpu_base_geometry(document, object) {
                 BasePaint2D::Gpu(id)
             } else {
                 BasePaint2D::Cpu(id)
-            }
-        })
-        .collect()
+            },
+        );
+        true
+    });
+    out
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -664,7 +817,10 @@ fn implicit_curve_grid_size(canvas_rect: Rect, quality: grafito_core::RenderQual
     )
 }
 
-fn complex_grid_cpu_resolution(density: usize, quality: grafito_core::RenderQuality) -> usize {
+pub(crate) fn complex_grid_cpu_resolution(
+    density: usize,
+    quality: grafito_core::RenderQuality,
+) -> usize {
     let base = density.clamp(50, 500);
     if quality == grafito_core::RenderQuality::Preview {
         base.min(64)
@@ -675,7 +831,7 @@ fn complex_grid_cpu_resolution(density: usize, quality: grafito_core::RenderQual
 
 /// Key de la textura de un ComplexGrid: cambia con cualquier edición del
 /// documento (el `version` cubre expr/variables) y con bounds/res/modos.
-fn complex_grid_texture_key(
+pub(crate) fn complex_grid_texture_key(
     document_version: u64,
     cg: &grafito_core::ComplexGridObj,
     res: usize,
@@ -696,8 +852,142 @@ fn complex_grid_texture_key(
     h.finish()
 }
 
-/// Rasteriza el heat map real (modo 2) en una `ColorImage` res×res; fila 0 =
-/// `y_max`. Se cachea como textura: antes emitía res² rects por frame.
+/// Estado de un grid de domain coloring en el puente GPU→textura.
+///
+/// `Absent` no se almacena (ausencia en el mapa). Transiciones:
+/// `claim` (prepare) → `Dispatched`; resolve ok → `Ready`; draw consume →
+/// `Consumed`; resolve-fail/abort → se borra (→ CPU honesto).
+/// La key es la de textura (incluye versión+res): un cambio de calidad o
+/// edición invalida sola. Tope LRU 8 (un estado por grid visible como máximo
+/// en la práctica; los viejos se evictan).
+#[derive(Debug)]
+enum DomainGridState {
+    /// Dispatch en vuelo (el draw salta el grid este frame: nada que mostrar
+    /// aún y el walk CPU no debe correr).
+    Dispatched,
+    /// Colores listos (el draw arma la imagen sin walk CPU).
+    Ready { colors: Vec<[f32; 4]> },
+    /// La textura ya absorbió el resultado (no re-dispatchear).
+    Consumed,
+}
+
+/// Puente GPU→textura para domain coloring, compartido entre prepare
+/// (dispatch/drain, hilo de pintado) y draw. `Mutex` global (no
+/// thread-local): las fases no garantizan mismo hilo.
+static DOMAIN_GRID_STATES: std::sync::OnceLock<
+    std::sync::Mutex<lru::LruCache<u64, DomainGridState>>,
+> = std::sync::OnceLock::new();
+
+fn domain_grid_states() -> &'static std::sync::Mutex<lru::LruCache<u64, DomainGridState>> {
+    DOMAIN_GRID_STATES
+        .get_or_init(|| std::sync::Mutex::new(lru::LruCache::new(DOMAIN_GRID_CACHE_SIZE)))
+}
+
+/// Reclama una key para dispatch: `true` si estaba ausente (el llamante debe
+/// disparar) y queda marcada `Dispatched`.
+pub(crate) fn domain_grid_claim(key: u64) -> bool {
+    let Ok(mut map) = domain_grid_states().lock() else {
+        return false;
+    };
+    if map.contains(&key) {
+        return false;
+    }
+    map.put(key, DomainGridState::Dispatched);
+    true
+}
+
+/// Guarda colores resueltos (solo si sigue `Dispatched`: si se evictó o
+/// consumió entretanto, se descartan sin envenenar nada).
+pub(crate) fn domain_grid_ready(key: u64, colors: Vec<[f32; 4]>) {
+    let Ok(mut map) = domain_grid_states().lock() else {
+        return;
+    };
+    if matches!(map.get(&key), Some(DomainGridState::Dispatched)) {
+        map.put(key, DomainGridState::Ready { colors });
+    }
+}
+
+/// Borra el estado (objeto borrado): el draw vuelve al walk CPU honesto
+/// en el próximo frame y el prepare puede reintentar si sigue visible.
+pub(crate) fn domain_grid_drop(key: u64) {
+    if let Ok(mut map) = domain_grid_states().lock() {
+        map.pop(&key);
+    }
+}
+
+/// Marca `Consumed` sin colores (fallo de resolve, abort por desalojo):
+/// el walk CPU toma el control y NO se reintenta en esta versión (evita
+/// spin de dispatch + inanición del grid bajo contención sostenida).
+/// La próxima edición (nueva key) reintenta una vez.
+pub(crate) fn domain_grid_mark_consumed(key: u64) {
+    if let Ok(mut map) = domain_grid_states().lock() {
+        map.put(key, DomainGridState::Consumed);
+    }
+}
+
+/// Toma los colores listos y marca `Consumed` (un solo consumo por key).
+fn domain_grid_take_ready(key: u64) -> Option<Vec<[f32; 4]>> {
+    let Ok(mut map) = domain_grid_states().lock() else {
+        return None;
+    };
+    match map.get(&key) {
+        Some(DomainGridState::Ready { .. }) => {
+            let Some(DomainGridState::Ready { colors }) = map.pop(&key) else {
+                return None;
+            };
+            map.put(key, DomainGridState::Consumed);
+            Some(colors)
+        }
+        _ => None,
+    }
+}
+
+/// ¿Hay un dispatch en vuelo para esta key? (el draw debe saltar el grid,
+// en vez de pagar el walk CPU, hasta que resuelva o falle).
+fn domain_grid_is_dispatched(key: u64) -> bool {
+    domain_grid_states()
+        .lock()
+        .map(|mut map| matches!(map.get(&key), Some(DomainGridState::Dispatched)))
+        .unwrap_or(false)
+}
+
+/// Arma la `ColorImage` res×res desde colores GPU fila-mayor.
+///
+/// Mapeo inverso al shader (`i = idx/res`, `j = idx%res`, centros
+/// `+0.5`): la fila 0 de la imagen es `y_max`, igual que el builder CPU.
+/// `None` si el largo no es `res²` (el llamante cae al CPU honesto).
+/// Pura y testeable.
+fn domain_grid_image_from_colors(colors: &[[f32; 4]], res: usize) -> Option<egui::ColorImage> {
+    let total = res.checked_mul(res)?;
+    if res == 0 || colors.len() != total {
+        return None;
+    }
+    let mut pixels = Vec::with_capacity(total);
+    for row in 0..res {
+        // Fila de imagen `row` (desde arriba) = fila GPU `res-1-row`.
+        let grow = res - 1 - row;
+        for i in 0..res {
+            let c = colors[i * res + grow];
+            if !c.iter().all(|v| v.is_finite()) {
+                pixels.push(Color32::TRANSPARENT);
+                continue;
+            }
+            // El shader ya entrega RGB premultiplicado 0..1 (mismo rango
+            // que el builder CPU tras `hsl_to_rgb` + `*255`).
+            let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0) as u8;
+            pixels.push(Color32::from_rgba_premultiplied(
+                channel(c[0]),
+                channel(c[1]),
+                channel(c[2]),
+                channel(c[3]),
+            ));
+        }
+    }
+    Some(egui::ColorImage {
+        size: [res, res],
+        pixels,
+    })
+}
 fn complex_grid_heatmap_image(
     document: &grafito_core::Document,
     cg: &grafito_core::ComplexGridObj,
@@ -1065,13 +1355,11 @@ fn visible_implicit_cache_plan(
     canvas_rect: Rect,
 ) -> BTreeSet<grafito_core::ObjectId> {
     let quality = document.render_quality;
-    let objects = cached_ordered_visible_2d_objects(document);
-
     let mut remaining_work = MAX_CPU_IMPLICIT_FRAME_WORK_UNITS;
     let mut admitted = BTreeSet::new();
-    for (id, object) in objects {
+    for_each_ordered_visible_2d_object(document, |id, object| {
         let GeoObject::ImplicitCurve(curve) = object else {
-            continue;
+            return true;
         };
         let cache_matches = implicit_curve_cache_matches_request(
             curve,
@@ -1085,14 +1373,14 @@ fn visible_implicit_cache_plan(
         } else {
             implicit_curve_cache_miss_work(curve, grid_size, view_bounds, canvas_rect, quality)
         }) else {
-            continue;
+            return true;
         };
-        let Some(remaining) = remaining_work.checked_sub(work) else {
-            continue;
-        };
-        remaining_work = remaining;
-        admitted.insert(id);
-    }
+        if let Some(remaining) = remaining_work.checked_sub(work) {
+            remaining_work = remaining;
+            admitted.insert(id);
+        }
+        true
+    });
     admitted
 }
 
@@ -2005,7 +2293,7 @@ impl FillTextureCacheStore {
             // Retiro diferido igual: el submit en vuelo puede referenciar el
             // id que este handle representa si el caller ya emitió con él.
             if let Some(texture) = entry.texture.take() {
-                self.retired_textures.retire(texture);
+                self.retired_textures.retire_sized(texture, entry.byte_size);
             }
             return;
         }
@@ -2021,7 +2309,7 @@ impl FillTextureCacheStore {
         if let Some(entry) = self.entries.remove(&object_id) {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
             if let Some(texture) = entry.texture {
-                self.retired_textures.retire(texture);
+                self.retired_textures.retire_sized(texture, entry.byte_size);
             }
         }
     }
@@ -2033,7 +2321,7 @@ impl FillTextureCacheStore {
             // `forget_image` es no-op para managed y el drop destruiría la
             // textura GPU con el submit en vuelo aún referenciándola.
             if let Some(texture) = entry.texture {
-                self.retired_textures.retire(texture);
+                self.retired_textures.retire_sized(texture, entry.byte_size);
             }
         }
     }
@@ -2042,7 +2330,7 @@ impl FillTextureCacheStore {
         for (_, entry) in self.entries.drain() {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
             if let Some(texture) = entry.texture {
-                self.retired_textures.retire(texture);
+                self.retired_textures.retire_sized(texture, entry.byte_size);
             }
         }
         self.entries.clear();
@@ -2054,7 +2342,7 @@ impl FillTextureCacheStore {
         for (_, entry) in self.entries.drain() {
             self.total_bytes = self.total_bytes.saturating_sub(entry.byte_size);
             if let Some(texture) = entry.texture {
-                self.retired_textures.retire(texture);
+                self.retired_textures.retire_sized(texture, entry.byte_size);
             }
         }
         self.entries.clear();
@@ -2166,6 +2454,8 @@ impl FillTextureCacheStore {
 /// La key depende de (expr_lhs, expr_rhs, operator, padded_bounds,
 /// canvas_w, canvas_h, variables, fill_color). Dos llamadas con la misma
 /// key indican que el caché puede reusarse sin recalcular la rasterización.
+///
+/// FNV-1a sin alocación: el `BTreeMap` ya itera en orden (sin `Vec`+`sort`).
 pub fn compute_fill_cache_key(
     ic: &ImplicitCurveObj,
     padded_bounds: (f64, f64, f64, f64),
@@ -2173,36 +2463,57 @@ pub fn compute_fill_cache_key(
     variables: &std::collections::BTreeMap<String, f64>,
     fill_color: Color,
 ) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = DefaultHasher::new();
-    ic.expr_lhs.hash(&mut hasher);
-    ic.expr_rhs.hash(&mut hasher);
-    std::mem::discriminant(&ic.operator).hash(&mut hasher);
-    padded_bounds.0.to_bits().hash(&mut hasher);
-    padded_bounds.1.to_bits().hash(&mut hasher);
-    padded_bounds.2.to_bits().hash(&mut hasher);
-    padded_bounds.3.to_bits().hash(&mut hasher);
-    canvas_size.0.hash(&mut hasher);
-    canvas_size.1.hash(&mut hasher);
-    let mut variables: Vec<_> = variables.iter().collect();
-    variables.sort_unstable_by_key(|(name, _)| *name);
-    for (k, v) in variables {
-        k.hash(&mut hasher);
-        v.to_bits().hash(&mut hasher);
+    #[inline]
+    fn mix(state: &mut u64, word: u64) {
+        *state ^= word;
+        *state = state.wrapping_mul(0x1000_0000_01b3);
     }
-    fill_color.r.to_bits().hash(&mut hasher);
-    fill_color.g.to_bits().hash(&mut hasher);
-    fill_color.b.to_bits().hash(&mut hasher);
-    fill_color.a.to_bits().hash(&mut hasher);
-    hasher.finish()
+    #[inline]
+    fn mix_str(state: &mut u64, text: &str) {
+        for byte in text.bytes() {
+            mix(state, u64::from(byte));
+        }
+    }
+
+    let mut state = 0xcbf29ce484222325u64;
+    mix_str(&mut state, &ic.expr_lhs);
+    mix(&mut state, 0xFF);
+    mix_str(&mut state, &ic.expr_rhs);
+    mix(&mut state, 0xFF);
+    // Discriminante explícito y exhaustivo (si se agrega una variante, el
+    // match obliga a asignarle código en vez de colisionar en silencio).
+    mix(
+        &mut state,
+        match ic.operator {
+            RelationOperator::Eq => 0,
+            RelationOperator::Less => 1,
+            RelationOperator::Greater => 2,
+            RelationOperator::LessEq => 3,
+            RelationOperator::GreaterEq => 4,
+        },
+    );
+    mix(&mut state, padded_bounds.0.to_bits());
+    mix(&mut state, padded_bounds.1.to_bits());
+    mix(&mut state, padded_bounds.2.to_bits());
+    mix(&mut state, padded_bounds.3.to_bits());
+    mix(&mut state, u64::from(canvas_size.0));
+    mix(&mut state, u64::from(canvas_size.1));
+    for (k, v) in variables.iter() {
+        mix_str(&mut state, k);
+        mix(&mut state, v.to_bits());
+    }
+    mix(&mut state, u64::from(fill_color.r.to_bits()));
+    mix(&mut state, u64::from(fill_color.g.to_bits()));
+    mix(&mut state, u64::from(fill_color.b.to_bits()));
+    mix(&mut state, u64::from(fill_color.a.to_bits()));
+    state
 }
 
 /// Cache key para el fill de un `ComplexMapping`. Extiende la key del
-/// ImplicitCurve con la identidad del `ConformalMap` (su representación
-/// `Debug`), para que cambiar la expresión (p.ej. `1/z` → `z^2`) invalide
-/// el caché aunque el target sea la misma ImplicitCurve.
+/// ImplicitCurve con la identidad del `ConformalMap` (discriminante
+/// explícito + parámetros, sin `format!("{:?}")` por frame), para que
+/// cambiar la expresión (p.ej. `1/z` → `z^2`) invalide el caché aunque el
+/// target sea la misma ImplicitCurve.
 pub fn compute_complex_fill_cache_key(
     ic: &ImplicitCurveObj,
     map: &ConformalMap,
@@ -2211,17 +2522,52 @@ pub fn compute_complex_fill_cache_key(
     variables: &std::collections::BTreeMap<String, f64>,
     fill_color: Color,
 ) -> u64 {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    #[inline]
+    fn mix(state: &mut u64, word: u64) {
+        *state ^= word;
+        *state = state.wrapping_mul(0x1000_0000_01b3);
+    }
+    #[inline]
+    fn mix_complex(state: &mut u64, z: num_complex::Complex64) {
+        mix(state, z.re.to_bits());
+        mix(state, z.im.to_bits());
+    }
 
-    let mut hasher = DefaultHasher::new();
     // Reusar la key base del ImplicitCurve (todavía aplica por los ASTs
     // lhs/rhs, operator, bounds, canvas, variables, fill_color).
     let base = compute_fill_cache_key(ic, padded_bounds, canvas_size, variables, fill_color);
-    base.hash(&mut hasher);
-    // Sumar la identidad del mapeo conforme.
-    format!("{:?}", map).hash(&mut hasher);
-    hasher.finish()
+    let mut state = 0xcbf29ce484222325u64;
+    mix(&mut state, base);
+    mix(&mut state, 0xFF);
+    // Exhaustivo: una variante nueva no compila hasta tener código asignado.
+    match map {
+        ConformalMap::Inversion => mix(&mut state, 0x00),
+        ConformalMap::Power(n) => {
+            mix(&mut state, 0x01);
+            mix(&mut state, *n as u64);
+        }
+        ConformalMap::Exponential => mix(&mut state, 0x02),
+        ConformalMap::Logarithm => mix(&mut state, 0x03),
+        ConformalMap::Sinh => mix(&mut state, 0x04),
+        ConformalMap::Cosh => mix(&mut state, 0x05),
+        ConformalMap::Sine => mix(&mut state, 0x06),
+        ConformalMap::Cosine => mix(&mut state, 0x07),
+        ConformalMap::Tangent => mix(&mut state, 0x08),
+        ConformalMap::Sqrt => mix(&mut state, 0x09),
+        ConformalMap::Joukowski => mix(&mut state, 0x0A),
+        ConformalMap::Mobius { a, b, c, d } => {
+            mix(&mut state, 0x0B);
+            mix_complex(&mut state, *a);
+            mix_complex(&mut state, *b);
+            mix_complex(&mut state, *c);
+            mix_complex(&mut state, *d);
+        }
+        ConformalMap::InversionShifted(a) => {
+            mix(&mut state, 0x0C);
+            mix_complex(&mut state, *a);
+        }
+    }
+    state
 }
 
 /// Evalúa si un punto del plano de salida `w=(output_x, output_y)` cae dentro
@@ -2391,10 +2737,37 @@ fn get_label(base: &str, style: Option<StyleOverride>) -> &str {
 // (skip). Decoración/LOD quedan flag-guardados (nota en el help, nunca error
 // falso). Todo fail-open: sin entrada → comportamiento histórico; condición
 // con error → se dibuja igual (no ocultar por un parse roto).
-fn p4_display_override(
+/// Entrada del memo de display-override (alias contra `type_complexity`).
+type DisplayOverrideEntry = (Option<StyleOverride>, bool);
+
+fn p4_display_override(document: &grafito_core::Document, label: &str) -> DisplayOverrideEntry {
+    if label.is_empty() {
+        return (None, true);
+    }
+    // Memo por (label, version): los flags solo mutan vía comandos con
+    // commit (bump de versión), así que la versión invalida sola. Sin esto,
+    // cada objeto con flags re-evaluaba condición/color (parse + clon de
+    // variables) en cada frame.
+    thread_local! {
+        static DISPLAY_OVERRIDE_CACHE: RefCell<
+            lru::LruCache<(String, u64), DisplayOverrideEntry>,
+        > = RefCell::new(lru::LruCache::new(DISPLAY_OVERRIDE_CACHE_SIZE));
+    }
+    let key = (label.to_owned(), document.version);
+    if let Some(hit) = DISPLAY_OVERRIDE_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return hit;
+    }
+    let computed = p4_display_override_uncached(document, label);
+    DISPLAY_OVERRIDE_CACHE.with(|c| {
+        c.borrow_mut().put(key, computed);
+    });
+    computed
+}
+
+fn p4_display_override_uncached(
     document: &grafito_core::Document,
     label: &str,
-) -> (Option<StyleOverride>, bool) {
+) -> DisplayOverrideEntry {
     if label.is_empty() {
         return (None, true);
     }
@@ -2453,8 +2826,9 @@ fn p4_merge_style(
 // raster de `grafito_core::tex_raster` si el subset lo cubre entero; si un
 // glifo falta, la línea es larguísima o el bitmap excede la cota de dibujo,
 // deja el ASCII original (jamás tofu, jamás texto truncado a escondidas).
-// Render inmediato por píxeles (rects 2×2): sin texturas, sin estado, puro
-// por frame como el resto del canvas. Puro y acotado, sin `unwrap`.
+// Render como UNA imagen con halo: el bitmap viene cacheado por texto
+// (`tex_raster`, cap 64) y la textura vive en LRU thread-local
+// (`TEX_LABEL_TEXTURES`, una subida por texto). Puro y acotado, sin `unwrap`.
 
 /// Escala del píxel TeX a píxel de pantalla (5×7 → 10×14 por glifo).
 pub(crate) const TEX_LABEL_SCALE_PX: f32 = 2.0;
@@ -2469,7 +2843,31 @@ pub(crate) enum FunctionLabelDraw {
     /// ASCII de siempre (`label` tal cual, sin tocar).
     Ascii,
     /// Raster total: `text` compuesta (`"f = x^2"`) + su bitmap cubierto.
-    TexRaster { text: String, bitmap: TexBitmap },
+    /// El bitmap va en `Arc` compartido (TL LRU por texto): antes se
+    /// clonaba el `Vec<u8>` completo por rótulo y por frame.
+    TexRaster {
+        text: String,
+        bitmap: std::sync::Arc<TexBitmap>,
+    },
+}
+
+/// Bitmaps TeX por texto compuesto, compartidos por `Arc`. El raster vive
+/// en `tex_raster` (cap 64) pero devuelve el bitmap por valor dentro del
+/// outcome; sin este nivel, cada frame clonaba el `Vec<u8>` por rótulo.
+fn label_bitmap_shared(text: &str, bitmap: &TexBitmap) -> std::sync::Arc<TexBitmap> {
+    thread_local! {
+        // Mismo tope que las texturas (64): una entrada por texto como máximo.
+        static LABEL_BITMAPS: RefCell<lru::LruCache<String, std::sync::Arc<TexBitmap>>> =
+            RefCell::new(lru::LruCache::new(TEX_LABEL_TEXTURE_CACHE_SIZE));
+    }
+    if let Some(hit) = LABEL_BITMAPS.with(|c| c.borrow_mut().get(text).cloned()) {
+        return hit;
+    }
+    let shared = std::sync::Arc::new(bitmap.clone());
+    LABEL_BITMAPS.with(|c| {
+        c.borrow_mut().put(text.to_owned(), shared.clone());
+    });
+    shared
 }
 
 /// Compone `"label = expr"` y decide ASCII vs raster.
@@ -2507,10 +2905,8 @@ pub(crate) fn decide_function_label(label: &str, expr: &str) -> FunctionLabelDra
     {
         return FunctionLabelDraw::Ascii;
     }
-    FunctionLabelDraw::TexRaster {
-        text,
-        bitmap: outcome.bitmap.clone(),
-    }
+    let bitmap = label_bitmap_shared(&text, &outcome.bitmap);
+    FunctionLabelDraw::TexRaster { text, bitmap }
 }
 
 /// Dibuja un rótulo TeX como UNA imagen con halo (no cientos de rects):
@@ -3082,9 +3478,9 @@ impl GrafitoApp {
         let y_max = world_tl.y.max(world_br.y);
         let (segments, asymptotes) =
             self.trig_graph_segments(x_min, x_max, y_min, y_max, canvas_rect.width());
-        for x in asymptotes {
-            let a = to_pos(Point2::new(x, y_min));
-            let b = to_pos(Point2::new(x, y_max));
+        for x in asymptotes.iter() {
+            let a = to_pos(Point2::new(*x, y_min));
+            let b = to_pos(Point2::new(*x, y_max));
             draw_dashed_line(
                 &painter,
                 a,
@@ -3094,8 +3490,8 @@ impl GrafitoApp {
                 7.0,
             );
         }
-        for (a, b) in segments {
-            painter.line_segment([to_pos(a), to_pos(b)], Stroke::new(2.0, accent));
+        for (a, b) in segments.iter() {
+            painter.line_segment([to_pos(*a), to_pos(*b)], Stroke::new(2.0, accent));
         }
 
         let t = self.trig_angle;
@@ -3251,7 +3647,7 @@ impl GrafitoApp {
         y_min: f64,
         y_max: f64,
         width: f32,
-    ) -> (Vec<(Point2, Point2)>, Vec<f64>) {
+    ) -> TrigSegments {
         let key = (
             self.trig_function,
             x_min.to_bits(),
@@ -3271,7 +3667,11 @@ impl GrafitoApp {
                     && cache.width_px == key.5
                     && cache.quality == key.6
                 {
-                    return (cache.segments.clone(), cache.asymptotes.clone());
+                    // Hit: solo refcounts, sin clonar segmentos ni asíntotas.
+                    return (
+                        std::sync::Arc::clone(&cache.segments),
+                        std::sync::Arc::clone(&cache.asymptotes),
+                    );
                 }
             }
         }
@@ -3305,6 +3705,8 @@ impl GrafitoApp {
             }
         }
 
+        let segments = std::sync::Arc::new(segments);
+        let asymptotes = std::sync::Arc::new(asymptotes);
         if let Ok(mut cache) = self.trig_graph_cache.write() {
             *cache = Some(crate::app::TrigGraphCache {
                 function: key.0,
@@ -3314,10 +3716,11 @@ impl GrafitoApp {
                 y_max_bits: key.4,
                 width_px: key.5,
                 quality: key.6,
-                segments: segments.clone(),
-                asymptotes: asymptotes.clone(),
+                segments: std::sync::Arc::clone(&segments),
+                asymptotes: std::sync::Arc::clone(&asymptotes),
             });
         }
+        // Lock envenenado → igual se devuelve lo recién computado.
         (segments, asymptotes)
     }
 
@@ -3450,21 +3853,29 @@ impl GrafitoApp {
     }
 
     fn active_complex_animation_expr(&self) -> (String, &'static str) {
-        for (_, obj) in cached_ordered_visible_2d_objects(&self.document) {
+        let mut found: Option<(String, &'static str)> = None;
+        for_each_ordered_visible_2d_object(&self.document, |_, obj| {
             if let GeoObject::ComplexMapping(cm) = obj {
                 if cm.visible {
-                    return (cm.expr.clone(), "f");
+                    found = Some((cm.expr.clone(), "f"));
+                    return false;
                 }
             }
+            true
+        });
+        if let Some(found) = found {
+            return found;
         }
-        for (_, obj) in cached_ordered_visible_2d_objects(&self.document) {
+        for_each_ordered_visible_2d_object(&self.document, |_, obj| {
             if let GeoObject::ComplexGrid(cg) = obj {
                 if cg.visible {
-                    return (cg.expr.clone(), "f");
+                    found = Some((cg.expr.clone(), "f"));
+                    return false;
                 }
             }
-        }
-        (self.document.complex_base_symbol.clone(), "id")
+            true
+        });
+        found.unwrap_or_else(|| (self.document.complex_base_symbol.clone(), "id"))
     }
 
     pub(crate) fn draw_objects(
@@ -3851,11 +4262,12 @@ impl GrafitoApp {
         let view = *self.document.view();
         // Recolecta primero (ids + estilo) para no pelear borrows con el muestreo.
         let mut jobs: Vec<(ObjectId, Color)> = Vec::new();
-        for (id, obj) in cached_ordered_visible_2d_objects(&self.document) {
+        for_each_ordered_visible_2d_object(&self.document, |id, obj| {
             if self.document.is_trace(id) {
                 jobs.push((id, obj.color()));
             }
-        }
+            true
+        });
         if jobs.is_empty() {
             return;
         }
@@ -3871,14 +4283,13 @@ impl GrafitoApp {
             if !rep.x.is_finite() || !rep.y.is_finite() {
                 continue;
             }
-            // Throttle por movimiento en pantalla.
+            // Throttle por movimiento en pantalla (sin clonar la estela).
             let screen = view.world_to_screen(rep);
             let moved = self
                 .document
-                .trail_points(id)
-                .last()
+                .trail_last(id)
                 .map(|last| {
-                    let ls = view.world_to_screen(*last);
+                    let ls = view.world_to_screen(last);
                     let dx = f64::from(screen.x - ls.x);
                     let dy = f64::from(screen.y - ls.y);
                     dx * dx + dy * dy >= Self::TRAIL_SAMPLE_MIN_PX * Self::TRAIL_SAMPLE_MIN_PX
@@ -3887,8 +4298,10 @@ impl GrafitoApp {
             if moved {
                 self.document.push_trail_sample(id, rep);
             }
-            let pts = self.document.trail_points(id);
-            draw_trail(painter, &view, expanded, &pts, base);
+            // Draw sin clonar: rebanada contigua del anillo.
+            if let Some(pts) = self.document.trail_slice_mut(id) {
+                draw_trail(painter, &view, expanded, pts, base);
+            }
         }
     }
 
@@ -4974,9 +5387,16 @@ impl GrafitoApp {
             GeoObject::Text(txt) => {
                 let s = view.world_to_screen(txt.position);
                 let color = to_color32(txt.color);
-                let galley = painter.layout_no_wrap(
-                    txt.content.clone(),
-                    egui::FontId::proportional(txt.font_size.max(8.0)),
+                // Galley cacheado por (objeto, versión, tamaño): el contenido
+                // y el color solo cambian con bump de versión. Antes se
+                // clonaba el `String` y se re-resolvía el layout por frame.
+                let font_size = txt.font_size.max(8.0);
+                let galley = text_galley_shared(
+                    &painter,
+                    txt.id,
+                    self.document.version,
+                    font_size,
+                    &txt.content,
                     color,
                 );
                 // Emula el anclaje LEFT_CENTER previo (TextShape pivota en la
@@ -4986,7 +5406,23 @@ impl GrafitoApp {
                     .add(egui::epaint::TextShape::new(pos, galley, color).with_angle(txt.rotation));
             }
             GeoObject::Histogram(h) => {
-                let bins = grafito_geometry::statistics::histogram(&h.data, h.bins);
+                // Memo por (objeto, versión): el histograma se recomputaba
+                // por frame aunque ni datos ni bins cambien.
+                let bins = match stat_memo_get(STAT_HISTOGRAM, h.id, self.document.version) {
+                    Some(StatMemoValue::Histogram(bins)) => bins,
+                    _ => {
+                        let bins = std::sync::Arc::new(grafito_geometry::statistics::histogram(
+                            &h.data, h.bins,
+                        ));
+                        stat_memo_put(
+                            STAT_HISTOGRAM,
+                            h.id,
+                            self.document.version,
+                            StatMemoValue::Histogram(bins.clone()),
+                        );
+                        bins
+                    }
+                };
                 let max_count = bins.iter().map(|(_, _, c)| *c).fold(0.0f64, f64::max);
                 if max_count <= 0.0 {
                     return;
@@ -4997,7 +5433,7 @@ impl GrafitoApp {
                     .map(to_color32)
                     .unwrap_or(Color32::from_rgba_premultiplied(50, 120, 220, 100));
                 let y_scale = (h.y_max - h.y_min) / max_count;
-                for (left, right, count) in &bins {
+                for (left, right, count) in bins.iter() {
                     let bl = view.world_to_screen(Point2::new(*left, h.y_min));
                     let tr = view.world_to_screen(Point2::new(*right, h.y_min + count * y_scale));
                     let rect = Rect::from_min_max(
@@ -5011,9 +5447,22 @@ impl GrafitoApp {
             GeoObject::BarChart(b) => {
                 // Barras por índice: la altura es el valor en mundo
                 // (proporcional a `fraction_of_max` del motor, que valida).
-                let bars = match grafito_core::symbolic::bar_chart_bars(&b.data) {
-                    Ok(bars) => bars,
-                    Err(_) => return,
+                // Memo por (objeto, versión): antes se reagregaba por frame.
+                let bars = match stat_memo_get(STAT_BARS, b.id, self.document.version) {
+                    Some(StatMemoValue::Bars(bars)) => bars,
+                    _ => match grafito_core::symbolic::bar_chart_bars(&b.data) {
+                        Ok(bars) => {
+                            let bars = std::sync::Arc::new(bars);
+                            stat_memo_put(
+                                STAT_BARS,
+                                b.id,
+                                self.document.version,
+                                StatMemoValue::Bars(bars.clone()),
+                            );
+                            bars
+                        }
+                        Err(_) => return,
+                    },
                 };
                 if bars.is_empty() {
                     return;
@@ -5023,7 +5472,7 @@ impl GrafitoApp {
                     .fill_color
                     .map(to_color32)
                     .unwrap_or(Color32::from_rgba_premultiplied(50, 120, 220, 100));
-                for bar in &bars {
+                for bar in bars.iter() {
                     let x = bar.index as f64;
                     let y_lo = 0.0_f64.min(bar.value);
                     let y_hi = 0.0_f64.max(bar.value);
@@ -5040,9 +5489,22 @@ impl GrafitoApp {
             GeoObject::PieChart(p) => {
                 // Sectores desde el ángulo 0 con `start_angle` del motor;
                 // el relleno rota el matiz del color del objeto por sector.
-                let slices = match grafito_core::symbolic::pie_chart_slices(&p.data) {
-                    Ok(slices) => slices,
-                    Err(_) => return,
+                // Memo por (objeto, versión): antes se reagregaba por frame.
+                let slices = match stat_memo_get(STAT_SLICES, p.id, self.document.version) {
+                    Some(StatMemoValue::Slices(slices)) => slices,
+                    _ => match grafito_core::symbolic::pie_chart_slices(&p.data) {
+                        Ok(slices) => {
+                            let slices = std::sync::Arc::new(slices);
+                            stat_memo_put(
+                                STAT_SLICES,
+                                p.id,
+                                self.document.version,
+                                StatMemoValue::Slices(slices.clone()),
+                            );
+                            slices
+                        }
+                        Err(_) => return,
+                    },
                 };
                 if slices.is_empty() {
                     return;
@@ -5062,7 +5524,7 @@ impl GrafitoApp {
                 let stroke = Stroke::new(p.width, to_color32(p.color));
                 let center = view.world_to_screen(p.center);
                 let center_pos = canvas_rect.min + Vec2::new(center.x, center.y);
-                for slice in &slices {
+                for slice in slices.iter() {
                     let mut points = Vec::with_capacity(steps + 2);
                     points.push(center_pos);
                     for step in 0..=steps {
@@ -5133,9 +5595,24 @@ impl GrafitoApp {
                 }
             }
             GeoObject::BoxPlot(bp) => {
-                if let Some((wl, q1, med, q3, wh, outliers)) =
-                    grafito_geometry::statistics::boxplot_stats(&bp.data)
-                {
+                // Memo por (objeto, versión): el boxplot ordenaba la muestra
+                // 3 veces por frame aunque los datos no cambien.
+                let stats = match stat_memo_get(STAT_BOXPLOT, bp.id, self.document.version) {
+                    Some(StatMemoValue::Boxplot(stats)) => stats,
+                    _ => {
+                        let stats = std::sync::Arc::new(
+                            grafito_geometry::statistics::boxplot_stats(&bp.data),
+                        );
+                        stat_memo_put(
+                            STAT_BOXPLOT,
+                            bp.id,
+                            self.document.version,
+                            StatMemoValue::Boxplot(stats.clone()),
+                        );
+                        stats
+                    }
+                };
+                if let Some((wl, q1, med, q3, wh, outliers)) = (*stats).clone() {
                     let stroke = Stroke::new(bp.width, to_color32(bp.color));
                     let fill = bp
                         .fill_color
@@ -5243,8 +5720,9 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Fractal2D(fr) => {
-                use grafito_geometry::fractals::fractal_color_hsv;
-                // Cache keyed por document.version: evita recomputar 160k píxeles cada frame.
+                // Una sola imagen por frame: los píxeles vienen cacheados por
+                // versión y la textura por clave (una subida por cambio). El
+                // camino viejo emitía un shape por píxel y por frame.
                 let Some(pixels) = cached_try_compute_fractal(fr, self.document.version) else {
                     return;
                 };
@@ -5252,27 +5730,23 @@ impl GrafitoApp {
                 if res == 0 {
                     return;
                 }
-                let dx = (fr.x_max - fr.x_min) / res as f64;
-                let dy = (fr.y_max - fr.y_min) / res as f64;
-                for px in pixels.iter() {
-                    let (r, g, b, a) = fractal_color_hsv(px.iter, px.max_iter, px.smooth_value);
-                    let bl = view.world_to_screen(Point2::new(px.x, px.y));
-                    let tr = view.world_to_screen(Point2::new(px.x + dx, px.y + dy));
-                    let rect = Rect::from_min_max(
-                        canvas_rect.min + Vec2::new(bl.x, tr.y),
-                        canvas_rect.min + Vec2::new(tr.x, bl.y),
-                    );
-                    painter.rect_filled(
-                        rect,
-                        0.0,
-                        Color32::from_rgba_premultiplied(
-                            (r * 255.0) as u8,
-                            (g * 255.0) as u8,
-                            (b * 255.0) as u8,
-                            (a * 255.0) as u8,
-                        ),
-                    );
-                }
+                let Some(texture) =
+                    cached_fractal_texture(&painter, fr, self.document.version, &pixels)
+                else {
+                    return;
+                };
+                // Fila 0 de la textura = y_max (ver `fractal_texture_image`).
+                let top_left = view.world_to_screen(Point2::new(fr.x_min, fr.y_max));
+                let bottom_right = view.world_to_screen(Point2::new(fr.x_max, fr.y_min));
+                painter.image(
+                    texture.id(),
+                    Rect::from_min_max(
+                        canvas_rect.min + Vec2::new(top_left.x, top_left.y),
+                        canvas_rect.min + Vec2::new(bottom_right.x, bottom_right.y),
+                    ),
+                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
             }
             GeoObject::ParametricCurve2D(pc) => {
                 let steps = 4000;
@@ -5600,10 +6074,27 @@ impl GrafitoApp {
                     let texture = match cached {
                         Some(handle) => Some(handle),
                         None => {
-                            let image = if cg.render_mode == 2 {
-                                complex_grid_heatmap_image(&self.document, cg, res)
+                            // Puente GPU (Ola 3, solo modo 1): Ready → imagen
+                            // sin walk CPU; Dispatched → None (el `let Some`
+                            // de abajo salta el draw este frame; el resolve
+                            // llega en 1-3 frames); resto → builders CPU.
+                            let image: Option<egui::ColorImage> = if cg.render_mode == 1 {
+                                match domain_grid_take_ready(key) {
+                                    Some(colors) => domain_grid_image_from_colors(&colors, res)
+                                        .or_else(|| {
+                                            complex_grid_domain_coloring_image(
+                                                &self.document,
+                                                cg,
+                                                res,
+                                            )
+                                        }),
+                                    None if domain_grid_is_dispatched(key) => None,
+                                    None => {
+                                        complex_grid_domain_coloring_image(&self.document, cg, res)
+                                    }
+                                }
                             } else {
-                                complex_grid_domain_coloring_image(&self.document, cg, res)
+                                complex_grid_heatmap_image(&self.document, cg, res)
                             };
                             image.map(|image| {
                                 // Ola 2: solo en miss de `COMPLEX_GRID_TEXTURES`
@@ -5643,9 +6134,10 @@ impl GrafitoApp {
                 let dx = (cg.x_max - cg.x_min) / grid_lines as f64;
                 let dy = (cg.y_max - cg.y_min) / grid_lines as f64;
 
-                let expr = match grafito_complex::complex_expr::parse(&cg.expr) {
-                    Ok(e) => e,
-                    Err(_) => return,
+                // AST cacheado por texto (antes se re-parseaba por frame).
+                let expr = match cached_complex_expr(&cg.expr) {
+                    Some(e) => e,
+                    None => return,
                 };
 
                 let mut vars: HashMap<String, Complex64> = HashMap::new();
@@ -6534,6 +7026,257 @@ mod clipping_and_resize_tests {
         assert!(
             grafito_render::aabb_intersects(&aabb, &view_bounds, margin),
             "on-screen fractal must NOT be culled"
+        );
+    }
+
+    fn fractal_test_pixels() -> Vec<grafito_geometry::fractals::FractalPixel> {
+        use grafito_geometry::fractals::FractalPixel;
+        // 2×2 en filas desde y_min: fila 0 = iters 1,2; fila 1 = iters 3,4.
+        let mut out = Vec::new();
+        for (j, iters) in [(0.0, [1u32, 2u32]), (1.0, [3u32, 4u32])] {
+            for (i, iter) in iters.into_iter().enumerate() {
+                out.push(FractalPixel {
+                    x: i as f64,
+                    y: j,
+                    iter,
+                    max_iter: 100,
+                    escaped: true,
+                    smooth_value: f64::from(iter),
+                });
+            }
+        }
+        out
+    }
+
+    fn fractal_expected_color(iter: u32) -> egui::Color32 {
+        use grafito_geometry::fractals::fractal_color_hsv;
+        let (r, g, b, a) = fractal_color_hsv(iter, 100, f64::from(iter));
+        egui::Color32::from_rgba_premultiplied(
+            (r * 255.0) as u8,
+            (g * 255.0) as u8,
+            (b * 255.0) as u8,
+            (a * 255.0) as u8,
+        )
+    }
+
+    #[test]
+    fn fractal_texture_image_maps_rows_top_down() {
+        // La fila 0 de la imagen es y_max (última fila de píxeles).
+        let image = super::fractal_texture_image(&fractal_test_pixels(), 2).expect("2×2 válida");
+        assert_eq!(image.size, [2, 2]);
+        assert_eq!(image.pixels[0], fractal_expected_color(3));
+        assert_eq!(image.pixels[1], fractal_expected_color(4));
+        assert_eq!(image.pixels[2], fractal_expected_color(1));
+        assert_eq!(image.pixels[3], fractal_expected_color(2));
+    }
+
+    #[test]
+    fn fractal_texture_image_rejects_bad_shapes() {
+        assert!(super::fractal_texture_image(&fractal_test_pixels(), 0).is_none());
+        assert!(super::fractal_texture_image(&fractal_test_pixels(), 3).is_none());
+        assert!(super::fractal_texture_image(&[], 2).is_none());
+    }
+
+    #[test]
+    fn fractal_texture_upload_hits_cache_headless() {
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let mut fr = grafito_core::Fractal2DObj::mandelbrot();
+        fr.resolution = 2;
+        let pixels = std::sync::Arc::new(fractal_test_pixels());
+        let first = super::cached_fractal_texture(&painter, &fr, 7, &pixels).expect("sube textura");
+        let second =
+            super::cached_fractal_texture(&painter, &fr, 7, &pixels).expect("hit de caché");
+        // Hit: mismo TextureId sin resubir.
+        assert_eq!(first.id(), second.id());
+        painter.image(
+            second.id(),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::new(4.0, 4.0)),
+            egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+
+    /// Regresión de fuente: el brazo `Fractal2D` de `draw_object_styled`
+    /// debe blitear la textura cacheada, no emitir `rect_filled` por píxel.
+    #[test]
+    fn fractal_arm_uses_texture_not_per_pixel_rects() {
+        let source = include_str!("render_2d.rs");
+        let start = source
+            .find("pub(crate) fn draw_object_styled(")
+            .expect("draw_object_styled not found");
+        let body = &source[start..];
+        let end = body
+            .find("\n    pub(crate) fn ")
+            .or_else(|| body.find("\n    fn "))
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        let arm = body
+            .find("GeoObject::Fractal2D(fr)")
+            .map(|i| &body[i..])
+            .expect("fractal arm not found");
+        let arm_end = arm
+            .find("GeoObject::ParametricCurve2D")
+            .unwrap_or(arm.len());
+        let arm = &arm[..arm_end];
+        assert!(
+            arm.contains("cached_fractal_texture"),
+            "fractal arm must blit the cached texture"
+        );
+        assert!(
+            !arm.contains("rect_filled"),
+            "fractal arm must not emit per-pixel rects"
+        );
+    }
+
+    #[test]
+    fn domain_grid_image_maps_gpu_order_to_texture_rows() {
+        // GPU idx = i*res+j (i→x, j→y desde y_min); fila 0 de imagen = y_max.
+        // res=2: idx0=(0,0) rojo, idx1=(0,1) verde, idx2=(1,0) azul,
+        // idx3=(1,1) blanco → imagen [verde, blanco, rojo, azul].
+        let colors = [
+            [1.0, 0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+        ];
+        let image = super::domain_grid_image_from_colors(&colors, 2).expect("2×2 válida");
+        assert_eq!(image.size, [2, 2]);
+        use egui::Color32;
+        assert_eq!(
+            image.pixels,
+            vec![
+                Color32::from_rgb(0, 255, 0),
+                Color32::WHITE,
+                Color32::from_rgb(255, 0, 0),
+                Color32::from_rgb(0, 0, 255),
+            ]
+        );
+    }
+
+    #[test]
+    fn domain_grid_image_rejects_bad_shapes_and_nonfinite() {
+        let colors = [[1.0, 0.0, 0.0, 1.0]; 4];
+        assert!(super::domain_grid_image_from_colors(&colors, 0).is_none());
+        assert!(super::domain_grid_image_from_colors(&colors, 3).is_none());
+        assert!(super::domain_grid_image_from_colors(&colors[..3], 2).is_none());
+        // No-finito → TRANSPARENT (igual que el builder CPU).
+        let mut nan = colors;
+        nan[0] = [f32::NAN, 0.0, 0.0, 1.0];
+        let image = super::domain_grid_image_from_colors(&nan, 2).expect("con NaN");
+        assert_eq!(image.pixels[2], egui::Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn domain_grid_state_machine_claim_ready_consume() {
+        // claim ausente → true; repetido → false (sin re-dispatch).
+        assert!(super::domain_grid_claim(0xA1));
+        assert!(!super::domain_grid_claim(0xA1));
+        assert!(super::domain_grid_is_dispatched(0xA1));
+        // Ready se consume una sola vez y marca Consumed.
+        super::domain_grid_ready(0xA1, vec![[1.0, 0.0, 0.0, 1.0]]);
+        let taken = super::domain_grid_take_ready(0xA1).expect("ready");
+        assert_eq!(taken.len(), 1);
+        assert!(super::domain_grid_take_ready(0xA1).is_none());
+        assert!(!super::domain_grid_is_dispatched(0xA1));
+        assert!(!super::domain_grid_claim(0xA1), "consumed no re-dispatchea");
+        // Ready sobre no-Dispatched se descarta (sin envenenar).
+        super::domain_grid_ready(0xB2, vec![[0.0; 4]]);
+        assert!(super::domain_grid_take_ready(0xB2).is_none());
+        // Drop reabre (CPU honesto); consumed-marca cierra.
+        super::domain_grid_drop(0xA1);
+        assert!(super::domain_grid_claim(0xA1));
+        super::domain_grid_drop(0xA1);
+        super::domain_grid_mark_consumed(0xA1);
+        assert!(!super::domain_grid_claim(0xA1));
+        super::domain_grid_drop(0xA1);
+    }
+
+    /// Bench de frame CPU headless (estilo `native_rgba`: temporizado con
+    /// `Instant`, imprime miss/hit, pinea cachés poblados sin gates de
+    /// tiempo frágiles).
+    ///
+    /// Escena de referencia: 40 funciones + 5 implícitas + 1 fractal 32² +
+    /// 2 histogramas + 1 boxplot + 1 torta + 1 texto. El primer draw
+    /// calienta (miss), el segundo mide el estado estable.
+    #[test]
+    fn frame_cpu_escena_referencia_mide_miss_y_hit() {
+        use grafito_core::{
+            BoxPlotObj, Document, Fractal2DObj, FunctionObj, GeoObject, HistogramObj,
+            ImplicitCurveObj, PieChartObj, RelationOperator, TextObj,
+        };
+        let mut app = crate::app::dummy_grafito_app();
+        app.document
+            .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        let doc: &mut Document = &mut app.document;
+        for i in 0..40 {
+            let expr = match i % 4 {
+                0 => format!("sin({} * x)", i + 1),
+                1 => format!("x^2 / {} - {i}", i + 2),
+                2 => format!("{i} * cos(x / {})", i + 1),
+                _ => format!("tan(x / {})", i + 10),
+            };
+            doc.add_object(GeoObject::Function(FunctionObj::new(expr)));
+        }
+        for i in 0..5 {
+            doc.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                &format!("x^2 + y^2 + {i}"),
+                "25",
+                RelationOperator::Eq,
+            )));
+        }
+        let mut fractal = Fractal2DObj::mandelbrot();
+        fractal.resolution = 32;
+        let fractal_id = doc.add_object(GeoObject::Fractal2D(fractal));
+        for _ in 0..2 {
+            doc.add_object(GeoObject::Histogram(HistogramObj::new(
+                vec![1.0, 2.0, 3.0, 2.0, 1.0],
+                8,
+            )));
+        }
+        doc.add_object(GeoObject::BoxPlot(BoxPlotObj::new(vec![
+            1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0,
+        ])));
+        doc.add_object(GeoObject::PieChart(PieChartObj::new(vec![1.0, 2.0, 3.0])));
+        doc.add_object(GeoObject::Text(TextObj::new(
+            "hola mundo",
+            Point2::new(1.0, 1.0),
+        )));
+
+        let ctx = egui::Context::default();
+        let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let version = app.document.version;
+        // Las fuentes headless exigen un `run()` previo (si no, `layout`
+        // paniquea con "No fonts available"): los dos draws van adentro.
+        let (mut miss, mut hit) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let t0 = std::time::Instant::now();
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+            miss = t0.elapsed();
+            let t1 = std::time::Instant::now();
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+            hit = t1.elapsed();
+        });
+        println!("frame_cpu_escena_referencia: miss={miss:?} hit={hit:?}");
+
+        // El camino de textura del fractal quedó poblado tras el miss.
+        let GeoObject::Fractal2D(fr) = app
+            .document
+            .get_object(fractal_id)
+            .expect("fractal insertado")
+        else {
+            panic!("id fractal inválido");
+        };
+        let fkey = super::fractal_render_cache_key(version, fr);
+        assert!(
+            super::FRACTAL_TEXTURES.with(|c| c.borrow_mut().get(&fkey).is_some()),
+            "el draw debe poblar la textura del fractal"
+        );
+        // El memo de stats también quedó poblado (histograma de la escena).
+        assert!(
+            super::STAT_MEMO.with(|c| c.borrow().iter().any(|((_, v, _), _)| *v == version)),
+            "el draw debe poblar el memo de estadísticas"
         );
     }
 

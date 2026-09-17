@@ -8,6 +8,7 @@ use egui::epaint::PaintCallbackInfo;
 use egui_wgpu::CallbackTrait;
 use grafito_core::{Document, GeoObject, ObjectId, RenderQuality};
 use grafito_geometry::{Camera3D, Point3D};
+use grafito_render::domain_coloring_compute::PendingDomainColoringEval;
 use grafito_render::function_compute::{
     resolve_function_job, FunctionDispatchOutcome, PendingFunctionJob,
 };
@@ -15,6 +16,8 @@ use grafito_render::gpu_readback::MAX_GPU_READBACK_JOBS_IN_FLIGHT;
 use grafito_render::implicit_compute::{
     advance_implicit_job, ImplicitDispatchOutcome, ImplicitResolveStep, PendingImplicitJob,
 };
+use grafito_render::parametric_compute::PendingParametricEval;
+use grafito_render::vector_compute::PendingVectorEval;
 use grafito_render::{DepthRenderTarget, Renderer, Vertex3D};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -144,6 +147,49 @@ pub(crate) enum PendingGpuComputeJob {
         object_id: ObjectId,
         job: PendingImplicitJob,
     },
+    /// Domain coloring en vuelo: al resolver, los colores van al puente
+    /// GPU→textura (`domain_grid_ready`, render_2d) bajo `key` (si cambió
+    /// la versión/res en el medio, se descartan sin envenenar nada).
+    DomainColoring {
+        object_id: ObjectId,
+        job: PendingDomainColoringEval,
+        key: u64,
+    },
+    /// Curva paramétrica/polar en vuelo (Ola 3 B12): al resolver se escribe
+    /// al caché del objeto (igual que el path síncrono). `key`/`steps` son
+    /// los del dispatch para el re-chequeo de vigencia en el drain.
+    Parametric {
+        object_id: ObjectId,
+        kind: ParametricJobKind,
+        steps: usize,
+        key: grafito_core::ParametricCacheKey,
+        job: PendingParametricEval,
+    },
+    /// Superficie paramétrica en vuelo: al resolver se re-deriva el
+    /// contexto (res + dominios) del estado actual —como la key ya matcheó,
+    /// son los mismos del dispatch— y se escribe a `cached_grid`.
+    ParametricSurface {
+        object_id: ObjectId,
+        key: grafito_core::SurfaceCacheKey,
+        job: PendingParametricEval,
+    },
+    /// Campo vectorial en vuelo: `bounds`/`grid_size` son los del dispatch
+    /// (la vista pudo moverse; la key lo detecta y descarta).
+    Vector {
+        object_id: ObjectId,
+        bounds: (f64, f64, f64, f64),
+        grid_size: usize,
+        key: grafito_core::object::VectorFieldCacheKey,
+        job: PendingVectorEval,
+    },
+}
+
+/// Familia paramétrica de un job en vuelo (el resolve/dispatch varía).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ParametricJobKind {
+    Curve2D,
+    Curve3D,
+    Polar,
 }
 
 /// Slot cap-1 para jobs GPU en vuelo con descarte del viejo por generación.
@@ -233,6 +279,35 @@ fn abort_pending_job(renderer: &Renderer, evicted: PendingGpuComputeJob) {
                 log::warn!("GpuComputeSlot: sin implicit pipeline para abortar job desalojado");
             }
         }
+        PendingGpuComputeJob::DomainColoring { key, .. } => {
+            // Desalojado por contención: el walk CPU toma el control sin
+            // reintentos en esta versión (ver `domain_grid_mark_consumed`).
+            if let Some(compute) = renderer.domain_coloring_compute.as_ref() {
+                compute.abort_eval();
+            }
+            crate::render_2d::domain_grid_mark_consumed(key);
+        }
+        PendingGpuComputeJob::Parametric { .. } => {
+            if let Some(compute) = renderer.parametric_compute.as_ref() {
+                compute.abort_raw();
+            } else {
+                log::warn!("GpuComputeSlot: sin parametric pipeline para abortar job desalojado");
+            }
+        }
+        PendingGpuComputeJob::ParametricSurface { .. } => {
+            if let Some(compute) = renderer.parametric_compute.as_ref() {
+                compute.abort_raw();
+            } else {
+                log::warn!("GpuComputeSlot: sin parametric pipeline para abortar job desalojado");
+            }
+        }
+        PendingGpuComputeJob::Vector { .. } => {
+            if let Some(compute) = renderer.vector_compute.as_ref() {
+                compute.abort_eval();
+            } else {
+                log::warn!("GpuComputeSlot: sin vector pipeline para abortar job desalojado");
+            }
+        }
     }
 }
 
@@ -306,12 +381,139 @@ fn drain_gpu_compute_slot(resources: &mut GpuCanvasResources, document: &Documen
                 }
             }
         }
+        PendingGpuComputeJob::DomainColoring {
+            object_id,
+            job,
+            key,
+        } => {
+            // Objeto borrado o cambiado de tipo entretanto: descartar sin
+            // escribir (la key versionada ya no matchearía en el draw, pero
+            // así ni siquiera ocupa el mapa).
+            let current = document.get_object(object_id);
+            if !matches!(current, Some(grafito_core::GeoObject::ComplexGrid(_))) {
+                crate::render_2d::domain_grid_drop(key);
+                return;
+            }
+            let Some(compute) = renderer.domain_coloring_compute.as_ref() else {
+                crate::render_2d::domain_grid_mark_consumed(key);
+                return;
+            };
+            // Resolve non-blocking: colores listos → puente a textura.
+            // `None` (aún en vuelo, timeout, objeto cambiado) → el walk CPU
+            // toma el control sin reintentos en esta versión (sin spin).
+            match compute.resolve_eval(job) {
+                Some(colors) => crate::render_2d::domain_grid_ready(key, colors),
+                None => crate::render_2d::domain_grid_mark_consumed(key),
+            }
+        }
+        PendingGpuComputeJob::Parametric {
+            object_id,
+            kind,
+            steps,
+            key,
+            job,
+        } => {
+            let Some(compute) = renderer.parametric_compute.as_ref() else {
+                return;
+            };
+            let Some(obj) = document.get_object(object_id) else {
+                compute.abort_raw();
+                return;
+            };
+            let ok = match (kind, obj) {
+                (ParametricJobKind::Curve2D, grafito_core::GeoObject::ParametricCurve2D(pc)) => {
+                    grafito_render::parametric_compute::resolve_curve_2d_job(
+                        compute,
+                        pc,
+                        &document.variables,
+                        steps,
+                        job,
+                        &key,
+                    )
+                }
+                (ParametricJobKind::Curve3D, grafito_core::GeoObject::ParametricCurve3D(pc)) => {
+                    grafito_render::parametric_compute::resolve_curve_3d_job(
+                        compute,
+                        pc,
+                        &document.variables,
+                        steps,
+                        job,
+                        &key,
+                    )
+                }
+                (ParametricJobKind::Polar, grafito_core::GeoObject::PolarCurve(pol)) => {
+                    grafito_render::parametric_compute::resolve_polar_job(
+                        compute,
+                        pol,
+                        &document.variables,
+                        steps,
+                        job,
+                        &key,
+                    )
+                }
+                // Objeto borrado o cambiado de tipo: abortar sin escribir.
+                _ => {
+                    compute.abort_raw();
+                    false
+                }
+            };
+            let _ = ok;
+        }
+        PendingGpuComputeJob::ParametricSurface {
+            object_id,
+            key,
+            job,
+        } => {
+            let Some(compute) = renderer.parametric_compute.as_ref() else {
+                return;
+            };
+            let Some(grafito_core::GeoObject::Surface3D(surf)) = document.get_object(object_id)
+            else {
+                compute.abort_raw();
+                return;
+            };
+            let res = surf.mesh_res.clamp(2, 128);
+            let _ = grafito_render::parametric_compute::resolve_surface_job(
+                compute,
+                surf,
+                &document.variables,
+                res,
+                job,
+                &key,
+            );
+        }
+        PendingGpuComputeJob::Vector {
+            object_id,
+            bounds,
+            grid_size,
+            key,
+            job,
+        } => {
+            let (Some(compute), Some(grafito_core::GeoObject::VectorField2D(vf))) = (
+                renderer.vector_compute.as_ref(),
+                document.get_object(object_id),
+            ) else {
+                if let Some(compute) = renderer.vector_compute.as_ref() {
+                    compute.abort_eval();
+                }
+                return;
+            };
+            let _ = grafito_render::vector_compute::resolve_vector_job(
+                compute,
+                vf,
+                bounds,
+                grid_size,
+                &document.variables,
+                job,
+                &key,
+            );
+        }
     }
 }
 
 pub struct PersistentBuffers {
-    pub vertex_buffer: wgpu::Buffer,
-    pub index_buffer: wgpu::Buffer,
+    pub vertex_buffer: Option<wgpu::Buffer>,
+    pub index_buffer: Option<wgpu::Buffer>,
     pub vertex_capacity: usize,
     pub index_capacity: usize,
     pub index_count: u32,
@@ -489,6 +691,57 @@ fn doubled_buffer_capacity(payload_size: usize) -> Option<(usize, wgpu::BufferAd
     (capacity > 0).then_some((capacity, address))
 }
 
+/// Piso de capacidad bajo el cual no se hace shrink (el desperdicio
+/// retenido ≤ 1 MiB no justifica recrear el buffer y arriesgar thrash).
+const SHRINK_MIN_CAPACITY_BYTES: usize = 1024 * 1024;
+
+/// Asegura capacidad con grow ×2 e histéresis de shrink ×4.
+///
+/// Crece si el payload no entra (o no hay buffer) y ACHICA si la capacidad
+/// supera 4× el payload (recrea a ×2, con piso de 1 MiB). Sin esto, los
+/// buffers quedaban al doble del pico de VRAM de la sesión hasta cerrar la
+/// app (`Cache2DKey` invalida contenido pero no tamaño).
+/// Devuelve `false` si no pudo dimensionar (el llamante degrada a CPU).
+fn ensure_buffer_capacity(
+    device: &wgpu::Device,
+    slot: &mut Option<wgpu::Buffer>,
+    capacity: &mut usize,
+    payload_len: usize,
+    label: &'static str,
+    usage: wgpu::BufferUsages,
+) -> bool {
+    let missing = slot.is_none();
+    let needs_grow = missing || payload_len > *capacity;
+    // Shrink solo con payload no vacío (vacío = `None`, lo maneja el llamante).
+    let wasteful = !needs_grow
+        && payload_len > 0
+        && *capacity > SHRINK_MIN_CAPACITY_BYTES
+        && payload_len
+            .checked_mul(4)
+            .is_some_and(|quad| quad < *capacity);
+    if !needs_grow && !wasteful {
+        return true;
+    }
+    if wasteful {
+        log::info!(
+            "Shrink GPU buffer '{label}': {} MiB → payload {} MiB",
+            *capacity / (1024 * 1024),
+            payload_len / (1024 * 1024)
+        );
+    }
+    let Some((new_capacity, new_size)) = doubled_buffer_capacity(payload_len.max(1)) else {
+        return false;
+    };
+    *slot = Some(device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: new_size,
+        usage,
+        mapped_at_creation: false,
+    }));
+    *capacity = new_capacity;
+    true
+}
+
 fn upload_3d_geometry(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -500,6 +753,12 @@ fn upload_3d_geometry(
 ) -> bool {
     if vertices.is_empty() || indices.is_empty() {
         buffers.index_count = 0;
+        // Escena vacía: soltar VRAM por completo (se recrea al volver
+        // geometría vía `ensure`, que maneja el slot `None`).
+        buffers.vertex_buffer = None;
+        buffers.index_buffer = None;
+        buffers.vertex_capacity = 0;
+        buffers.index_capacity = 0;
         return true;
     }
     let vertex_data = bytemuck::cast_slice(vertices);
@@ -507,29 +766,25 @@ fn upload_3d_geometry(
     let Ok(index_count) = u32::try_from(indices.len()) else {
         return false;
     };
-    if vertex_data.len() > buffers.vertex_capacity || buffers.vertex_buffer.is_none() {
-        let Some((capacity, size)) = doubled_buffer_capacity(vertex_data.len()) else {
-            return false;
-        };
-        buffers.vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(vertex_label),
-            size,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        buffers.vertex_capacity = capacity;
+    if !ensure_buffer_capacity(
+        device,
+        &mut buffers.vertex_buffer,
+        &mut buffers.vertex_capacity,
+        vertex_data.len(),
+        vertex_label,
+        wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+    ) {
+        return false;
     }
-    if index_data.len() > buffers.index_capacity || buffers.index_buffer.is_none() {
-        let Some((capacity, size)) = doubled_buffer_capacity(index_data.len()) else {
-            return false;
-        };
-        buffers.index_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some(index_label),
-            size,
-            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        }));
-        buffers.index_capacity = capacity;
+    if !ensure_buffer_capacity(
+        device,
+        &mut buffers.index_buffer,
+        &mut buffers.index_capacity,
+        index_data.len(),
+        index_label,
+        wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+    ) {
+        return false;
     }
     let (Some(vertex_buffer), Some(index_buffer)) = (&buffers.vertex_buffer, &buffers.index_buffer)
     else {
@@ -563,10 +818,12 @@ const GPU_2D_CURVE_STEPS: usize = 4_000;
 // (`CanvasCallback`) y 3D (`Canvas3DCallback`) son mutuamente excluyentes
 // (match `ViewMode::D2`/`ViewMode::D3` en app.rs), por lo que el `.take(1)` de
 // cada rama acota el readback global a 1 por frame.
-// TODO P1 (B6-Next): migrar `parametric`/`vector`/`complex`/`domain`/`fill`
-// al patrón `dispatch_*` + slot (ver `function_compute`/`implicit_compute`).
-// Sin waiter thread a propósito: en wgpu 22 `Device` no es `Clone`, así que
-// la espera se distribuye en frames (poll no-bloqueante por frame).
+// TODO P1 (B6-Next, parcial Ola 3): `parametric`/`vector`/`domain` ya usan
+// el patrón `dispatch_*` + slot (ver `function_compute`/`implicit_compute`).
+// Restan `complex` (transform en build: exige dos fases) y `fill` (sin
+// consumidor). Sin waiter thread a propósito: en wgpu 22 `Device` no es
+// `Clone`, así que la espera se distribuye en frames (poll no-bloqueante
+// por frame).
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Helper de readback asíncrono sin `device.poll(Wait)` bloqueante.
@@ -984,42 +1241,203 @@ impl CallbackTrait for CanvasCallback {
                         }
                         grafito_core::GeoObject::ParametricCurve2D(pc) => {
                             if let Some(compute) = parametric_comp {
-                                let _ = grafito_render::parametric_compute::maybe_compute_curve_2d_on_gpu(
-                                    compute,
-                                    device,
-                                    queue,
-                                    pc,
-                                    4000,
-                                    &self.document.variables,
-                                );
+                                // Ola 3 B12: dispatch sin espera (el sync
+                                // bloqueaba el prepare); el resolve llega por
+                                // el slot y escribe al caché del objeto. Si
+                                // está fresco o no compila, el sampler CPU
+                                // cubre sin cambios.
+                                let steps = 4000usize;
+                                if let Some(key) =
+                                    grafito_render::parametric_compute::curve_2d_cache_key(
+                                        pc,
+                                        steps,
+                                        &self.document.variables,
+                                    )
+                                {
+                                    let fresh = pc
+                                        .cached_key
+                                        .read()
+                                        .map(|guard| guard.as_ref() == Some(&key))
+                                        .unwrap_or(false);
+                                    if !fresh {
+                                        if let Some(job) = compute.dispatch_curve_2d(
+                                            device,
+                                            queue,
+                                            pc,
+                                            steps,
+                                            &self.document.variables,
+                                        ) {
+                                            if let Some(evicted) = resources
+                                                .gpu_compute_slot
+                                                .submit(PendingGpuComputeJob::Parametric {
+                                                    object_id: id,
+                                                    kind: ParametricJobKind::Curve2D,
+                                                    steps,
+                                                    key,
+                                                    job,
+                                                })
+                                            {
+                                                abort_pending_job(renderer, evicted);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         grafito_core::GeoObject::PolarCurve(pol) => {
                             if let Some(compute) = parametric_comp {
-                                let _ =
-                                    grafito_render::parametric_compute::maybe_compute_polar_on_gpu(
-                                        compute,
-                                        device,
-                                        queue,
+                                let steps = 4000usize;
+                                if let Some(key) =
+                                    grafito_render::parametric_compute::polar_cache_key(
                                         pol,
-                                        4000,
+                                        steps,
                                         &self.document.variables,
-                                    );
+                                    )
+                                {
+                                    let fresh = pol
+                                        .cached_key
+                                        .read()
+                                        .map(|guard| guard.as_ref() == Some(&key))
+                                        .unwrap_or(false);
+                                    if !fresh {
+                                        if let Some(job) = compute.dispatch_polar(
+                                            device,
+                                            queue,
+                                            pol,
+                                            steps,
+                                            &self.document.variables,
+                                        ) {
+                                            if let Some(evicted) = resources
+                                                .gpu_compute_slot
+                                                .submit(PendingGpuComputeJob::Parametric {
+                                                    object_id: id,
+                                                    kind: ParametricJobKind::Polar,
+                                                    steps,
+                                                    key,
+                                                    job,
+                                                })
+                                            {
+                                                abort_pending_job(renderer, evicted);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                         grafito_core::GeoObject::VectorField2D(vf) => {
                             if let Some(compute) = vector_comp {
-                                let _ = grafito_render::vector_compute::maybe_compute_vector_field_on_gpu(
-                                    compute,
-                                    device,
-                                    queue,
+                                let (padded_bounds, grid_size) =
+                                    grafito_render::vector_compute::vector_dispatch_bounds(
+                                        vf, &view,
+                                    );
+                                let key = grafito_core::vector_field_sampling::cache_key(
                                     vf,
-                                    &view,
+                                    padded_bounds,
+                                    grid_size,
                                     &self.document.variables,
                                 );
+                                let fresh = vf
+                                    .cached_key
+                                    .read()
+                                    .map(|guard| guard.as_ref() == Some(&key))
+                                    .unwrap_or(false);
+                                if !fresh {
+                                    if let Some(job) = compute.dispatch(
+                                        device,
+                                        queue,
+                                        vf,
+                                        padded_bounds,
+                                        grid_size,
+                                        &self.document.variables,
+                                    ) {
+                                        if let Some(evicted) = resources.gpu_compute_slot.submit(
+                                            PendingGpuComputeJob::Vector {
+                                                object_id: id,
+                                                bounds: padded_bounds,
+                                                grid_size,
+                                                key,
+                                                job,
+                                            },
+                                        ) {
+                                            abort_pending_job(renderer, evicted);
+                                        }
+                                    }
+                                }
                             }
                         }
                         _ => {}
+                    }
+                }
+
+                // Frente Ola 3: domain coloring asíncrono (un dispatch por
+                // frame, solo con slot libre). Los colores resuelven al
+                // puente GPU→textura (`domain_grid_ready`); el draw los
+                // consume sin walk CPU. Si no compila o excede, se suelta
+                // la key y el draw cae al CPU honesto.
+                if !resources.gpu_compute_slot.is_pending() {
+                    for (_, obj) in self.document.objects_iter() {
+                        let grafito_core::GeoObject::ComplexGrid(cg) = obj else {
+                            continue;
+                        };
+                        if !cg.visible || cg.render_mode != 1 {
+                            continue;
+                        }
+                        let res = crate::render_2d::complex_grid_cpu_resolution(
+                            cg.density,
+                            self.document.render_quality,
+                        );
+                        if res == 0 {
+                            continue;
+                        }
+                        let key = crate::render_2d::complex_grid_texture_key(
+                            self.document.version,
+                            cg,
+                            res,
+                        );
+                        if !crate::render_2d::domain_grid_claim(key) {
+                            continue;
+                        }
+                        let dispatch_ok = (|| {
+                            let parsed = grafito_complex::complex_expr::parse(&cg.expr).ok()?;
+                            let dx = (cg.x_max - cg.x_min) / res as f64;
+                            let dy = (cg.y_max - cg.y_min) / res as f64;
+                            if !dx.is_finite() || !dy.is_finite() || dx <= 0.0 || dy <= 0.0 {
+                                return None;
+                            }
+                            let compute = renderer.domain_coloring_compute.as_ref()?;
+                            let grid = grafito_render::domain_coloring_compute::DomainGrid {
+                                x_min: cg.x_min,
+                                y_min: cg.y_min,
+                                dx,
+                                dy,
+                                res,
+                            };
+                            let job = compute.dispatch(
+                                device,
+                                queue,
+                                &parsed,
+                                &grid,
+                                &self.document.variables,
+                                cg.domain_coloring_mode as u32,
+                            )?;
+                            let evicted = resources.gpu_compute_slot.submit(
+                                PendingGpuComputeJob::DomainColoring {
+                                    object_id: cg.id,
+                                    job,
+                                    key,
+                                },
+                            );
+                            if let Some(evicted) = evicted {
+                                abort_pending_job(renderer, evicted);
+                            }
+                            Some(())
+                        })();
+                        if dispatch_ok.is_none() {
+                            crate::render_2d::domain_grid_drop(key);
+                        }
+                        // Un intento por frame (cap 1 del slot): salga bien o
+                        // mal, el resto espera al próximo frame.
+                        break;
                     }
                 }
             }
@@ -1029,6 +1447,12 @@ impl CallbackTrait for CanvasCallback {
             // Domain/complex compute also performs synchronous readback. Build
             // those objects through the deterministic CPU fallback so this
             // callback cannot add more waits after the bounded cache attempt.
+            // Estado Ola 3: domain coloring ya es async (slot +
+            // puente GPU→textura); parametric/vector también (slots). Solo
+            // `complex` (transform en build) sigue sync: el flip a
+            // device/queue reales espera su reestructura en dos fases
+            // (dispatch en prepare + consumo en build), proyecto propio con
+            // verificación visual (77 tests pinean los vértices actuales).
             // A future async batch can re-enable these device/queue arguments.
             let (vertices, indices, object_ranges, scene_complete) = renderer
                 .build_geometry_with_object_ranges_at(
@@ -1116,8 +1540,8 @@ impl CallbackTrait for CanvasCallback {
                 mapped_at_creation: false,
             });
             PersistentBuffers {
-                vertex_buffer: vb,
-                index_buffer: ib,
+                vertex_buffer: Some(vb),
+                index_buffer: Some(ib),
                 vertex_capacity: initial_vertex_capacity,
                 index_capacity: initial_index_capacity,
                 index_count: 0,
@@ -1126,36 +1550,38 @@ impl CallbackTrait for CanvasCallback {
             }
         });
 
-        if vertex_size > buffers.vertex_capacity {
-            let Some((new_capacity, new_buffer_size)) = doubled_buffer_capacity(vertex_size) else {
-                log::error!("2D vertex geometry exceeds the GPU buffer size limit");
-                return vec![];
-            };
-            buffers.vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Canvas 2D Vertex Buffer"),
-                size: new_buffer_size,
-                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            buffers.vertex_capacity = new_capacity;
+        if !ensure_buffer_capacity(
+            device,
+            &mut buffers.vertex_buffer,
+            &mut buffers.vertex_capacity,
+            vertex_size,
+            "Canvas 2D Vertex Buffer",
+            wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+        ) {
+            log::error!("2D vertex geometry exceeds the GPU buffer size limit");
+            return vec![];
         }
 
-        if index_size > buffers.index_capacity {
-            let Some((new_capacity, new_buffer_size)) = doubled_buffer_capacity(index_size) else {
-                log::error!("2D index geometry exceeds the GPU buffer size limit");
-                return vec![];
-            };
-            buffers.index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Canvas 2D Index Buffer"),
-                size: new_buffer_size,
-                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
-            buffers.index_capacity = new_capacity;
+        if !ensure_buffer_capacity(
+            device,
+            &mut buffers.index_buffer,
+            &mut buffers.index_capacity,
+            index_size,
+            "Canvas 2D Index Buffer",
+            wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+        ) {
+            log::error!("2D index geometry exceeds the GPU buffer size limit");
+            return vec![];
         }
 
-        queue.write_buffer(&buffers.vertex_buffer, 0, vertex_data);
-        queue.write_buffer(&buffers.index_buffer, 0, index_data);
+        let (Some(vertex_buffer), Some(index_buffer)) =
+            (&buffers.vertex_buffer, &buffers.index_buffer)
+        else {
+            log::error!("2D GPU buffers missing after ensure");
+            return vec![];
+        };
+        queue.write_buffer(vertex_buffer, 0, vertex_data);
+        queue.write_buffer(index_buffer, 0, index_data);
         buffers.index_count = index_count;
         buffers.object_ranges = object_ranges;
         // Frente B6: mientras hay un job background en vuelo, la escena queda
@@ -1218,10 +1644,13 @@ impl CallbackTrait for CanvasCallback {
                 log::debug!("CanvasCallback paint: index_count={}", buffers.index_count);
                 render_pass.set_pipeline(&renderer.pipeline);
                 render_pass.set_bind_group(0, &renderer.mvp_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, buffers.vertex_buffer.slice(..));
-                render_pass
-                    .set_index_buffer(buffers.index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-                render_pass.draw_indexed(index_range.clone(), 0, 0..1);
+                if let (Some(vertex_buffer), Some(index_buffer)) =
+                    (&buffers.vertex_buffer, &buffers.index_buffer)
+                {
+                    render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+                    render_pass.draw_indexed(index_range.clone(), 0, 0..1);
+                }
             }
         }
     }
@@ -1498,27 +1927,75 @@ impl CallbackTrait for Canvas3DCallback {
                     };
                     match obj {
                         grafito_core::GeoObject::ParametricCurve3D(pc) => {
-                            let _ =
-                                grafito_render::parametric_compute::maybe_compute_curve_3d_on_gpu(
-                                    compute,
-                                    device,
-                                    queue,
+                            // Ola 3 B12: dispatch sin espera (ver 2D).
+                            let steps = GPU_3D_CURVE_STEPS;
+                            if let Some(key) =
+                                grafito_render::parametric_compute::curve_3d_cache_key(
                                     pc,
-                                    GPU_3D_CURVE_STEPS,
+                                    steps,
                                     &self.document.variables,
-                                );
+                                )
+                            {
+                                let fresh = pc
+                                    .cached_key
+                                    .read()
+                                    .map(|guard| guard.as_ref() == Some(&key))
+                                    .unwrap_or(false);
+                                if !fresh {
+                                    if let Some(job) = compute.dispatch_curve_3d(
+                                        device,
+                                        queue,
+                                        pc,
+                                        steps,
+                                        &self.document.variables,
+                                    ) {
+                                        if let Some(evicted) = resources.gpu_compute_slot.submit(
+                                            PendingGpuComputeJob::Parametric {
+                                                object_id: id,
+                                                kind: ParametricJobKind::Curve3D,
+                                                steps,
+                                                key,
+                                                job,
+                                            },
+                                        ) {
+                                            abort_pending_job(renderer, evicted);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         grafito_core::GeoObject::Surface3D(su) => {
                             let res = su.mesh_res.clamp(2, 128);
-                            let _ =
-                                grafito_render::parametric_compute::maybe_compute_surface_on_gpu(
-                                    compute,
-                                    device,
-                                    queue,
-                                    su,
-                                    res,
-                                    &self.document.variables,
-                                );
+                            if let Some(key) = grafito_render::parametric_compute::surface_cache_key(
+                                su,
+                                res,
+                                &self.document.variables,
+                            ) {
+                                let fresh = su
+                                    .cached_key
+                                    .read()
+                                    .map(|guard| guard.as_ref() == Some(&key))
+                                    .unwrap_or(false);
+                                if !fresh {
+                                    if let Some(job) = compute.dispatch_surface(
+                                        device,
+                                        queue,
+                                        su,
+                                        res,
+                                        &self.document.variables,
+                                    ) {
+                                        if let Some(evicted) = resources.gpu_compute_slot.submit(
+                                            PendingGpuComputeJob::ParametricSurface {
+                                                object_id: id,
+                                                key,
+                                                job,
+                                            },
+                                        ) {
+                                            abort_pending_job(renderer, evicted);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1584,42 +2061,37 @@ impl CallbackTrait for Canvas3DCallback {
         let wire_indices = bytemuck::cast_slice(&mesh.wire_indices);
         if mesh.wire_vertices.is_empty() || mesh.wire_indices.is_empty() {
             buffers.wire_index_count = 0;
+            // Sin wire: soltar VRAM (se recrea al volver geometría).
+            buffers.wire_vertex_buffer = None;
+            buffers.wire_index_buffer = None;
+            buffers.wire_vertex_capacity = 0;
+            buffers.wire_index_capacity = 0;
         } else {
-            let Some((vertex_capacity, vertex_size)) = doubled_buffer_capacity(wire_vertices.len())
-            else {
-                resources.scene_readiness.mark_3d_cpu_only(current_key);
-                return vec![];
-            };
-            let Some((index_capacity, index_size)) = doubled_buffer_capacity(wire_indices.len())
-            else {
-                resources.scene_readiness.mark_3d_cpu_only(current_key);
-                return vec![];
-            };
             let Ok(index_count) = u32::try_from(mesh.wire_indices.len()) else {
                 resources.scene_readiness.mark_3d_cpu_only(current_key);
                 return vec![];
             };
-            if wire_vertices.len() > buffers.wire_vertex_capacity
-                || buffers.wire_vertex_buffer.is_none()
-            {
-                buffers.wire_vertex_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Canvas 3D Wire Vertex Buffer"),
-                    size: vertex_size,
-                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-                buffers.wire_vertex_capacity = vertex_capacity;
+            if !ensure_buffer_capacity(
+                device,
+                &mut buffers.wire_vertex_buffer,
+                &mut buffers.wire_vertex_capacity,
+                wire_vertices.len(),
+                "Canvas 3D Wire Vertex Buffer",
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            ) {
+                resources.scene_readiness.mark_3d_cpu_only(current_key);
+                return vec![];
             }
-            if wire_indices.len() > buffers.wire_index_capacity
-                || buffers.wire_index_buffer.is_none()
-            {
-                buffers.wire_index_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Canvas 3D Wire Index Buffer"),
-                    size: index_size,
-                    usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }));
-                buffers.wire_index_capacity = index_capacity;
+            if !ensure_buffer_capacity(
+                device,
+                &mut buffers.wire_index_buffer,
+                &mut buffers.wire_index_capacity,
+                wire_indices.len(),
+                "Canvas 3D Wire Index Buffer",
+                wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            ) {
+                resources.scene_readiness.mark_3d_cpu_only(current_key);
+                return vec![];
             }
             if let (Some(vertex_buffer), Some(index_buffer)) =
                 (&buffers.wire_vertex_buffer, &buffers.wire_index_buffer)

@@ -12483,19 +12483,52 @@ fn handle_remaining_cas_commands(
             }
 
             let eval_error = std::cell::Cell::new(false);
+            // Campo preparado UNA vez fuera del integrador. Antes cada paso
+            // llamaba a `evaluate()` (preprocess+parse+sustitución: ~4 parses
+            // por paso RK4 × hasta 8191 pasos, más un clon del mapa y un
+            // `Vec` por llamada). Ahora: AST/opcodes una vez, por paso solo
+            // el loop plano sin allocs; el walk arbitra si el plano no es
+            // finito (igual que `CompiledExpr::eval`).
+            enum OdeField {
+                Flat {
+                    ops: grafito_geometry::expr::ValidatedOps,
+                    ast: grafito_geometry::ast::Expr,
+                },
+                Walk(grafito_geometry::ast::Expr),
+                Dead,
+            }
+            fn ode_field(
+                expr: &str,
+                variables: &std::collections::BTreeMap<String, f64>,
+            ) -> OdeField {
+                match prepare_function_ast(expr, variables, &["t", "y"]) {
+                    Ok(ast) => match grafito_geometry::expr::compile_flat_ops(&ast, "t", "y", "") {
+                        Some(ops) => OdeField::Flat { ops, ast },
+                        None => OdeField::Walk(ast),
+                    },
+                    Err(_) => OdeField::Dead,
+                }
+            }
+            fn ode_eval(field: &OdeField, t: f64, y: f64) -> Option<f64> {
+                match field {
+                    OdeField::Flat { ops, ast } => {
+                        grafito_geometry::expr::eval_opcodes_flat(ops, t, y, 0.0).or_else(|| {
+                            let r = ast.eval_2d("t", t, "y", y);
+                            r.is_finite().then_some(r)
+                        })
+                    }
+                    OdeField::Walk(ast) => {
+                        let r = ast.eval_2d("t", t, "y", y);
+                        r.is_finite().then_some(r)
+                    }
+                    OdeField::Dead => None,
+                }
+            }
+            let field = ode_field(expr, &document.variables);
             let f = |t: f64, y: f64| -> f64 {
-                let mut vars = document.variables.clone();
-                vars.insert("t".to_string(), t);
-                vars.insert("y".to_string(), y);
-                match evaluate(
-                    expr,
-                    &vars
-                        .iter()
-                        .map(|(k, v)| (k.clone(), *v))
-                        .collect::<Vec<_>>(),
-                ) {
-                    Ok(v) if v.is_finite() => v,
-                    _ => {
+                match ode_eval(&field, t, y) {
+                    Some(v) => v,
+                    None => {
                         eval_error.set(true);
                         f64::NAN
                     }
@@ -12524,19 +12557,11 @@ fn handle_remaining_cas_commands(
                 }
                 "backward" | "backwardeuler" | "backward_euler" | "implicit" => {
                     let jac_expr = symbolic::derivative(expr, "y").unwrap_or_else(|_| "0".into());
+                    let jac_field = ode_field(&jac_expr, &document.variables);
                     let jac = |t: f64, y: f64| -> f64 {
-                        let mut vars = document.variables.clone();
-                        vars.insert("t".to_string(), t);
-                        vars.insert("y".to_string(), y);
-                        match evaluate(
-                            &jac_expr,
-                            &vars
-                                .iter()
-                                .map(|(k, v)| (k.clone(), *v))
-                                .collect::<Vec<_>>(),
-                        ) {
-                            Ok(v) if v.is_finite() => v,
-                            _ => {
+                        match ode_eval(&jac_field, t, y) {
+                            Some(v) => v,
+                            None => {
                                 eval_error.set(true);
                                 f64::NAN
                             }

@@ -99,16 +99,31 @@ pub fn polar_expr_hash(pol: &PolarCurveObj) -> u64 {
 
 fn eval_ast_or_compiled(
     ast: Option<&grafito_geometry::ast::Expr>,
+    flat: Option<&expr::ValidatedOps>,
     compiled: Option<&expr::CompiledExpr>,
-    vars: &[(String, f64)],
     x_name: &str,
     x: f64,
     y_name: &str,
     y: f64,
 ) -> f64 {
-    ast.map(|a| finite_clamp(a.eval_2d(x_name, x, y_name, y)))
-        .or_else(|| compiled.and_then(|c| c.eval(vars).ok()).map(finite_clamp))
-        .unwrap_or(f64::NAN)
+    // Plano primero (mismo `finite_clamp` que el walk). Los `vars` del
+    // fallback compilado se arman solo ahí: antes se alocaban 2 `String`
+    // por celda aunque el walk los ignore.
+    if let Some(ops) = flat {
+        if let Some(v) = expr::eval_opcodes_flat(ops, x, y, 0.0) {
+            return finite_clamp(v);
+        }
+    }
+    if let Some(a) = ast {
+        return finite_clamp(a.eval_2d(x_name, x, y_name, y));
+    }
+    if let Some(c) = compiled {
+        let vars = [(x_name.to_string(), x), (y_name.to_string(), y)];
+        if let Ok(v) = c.eval(&vars) {
+            return finite_clamp(v);
+        }
+    }
+    f64::NAN
 }
 
 /// Evaluate a 2D parametric curve over its `t` domain.
@@ -127,6 +142,13 @@ pub fn evaluate_parametric_curve_2d(
 
     let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &["t"]).ok();
     let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &["t"]).ok();
+    // Opcodes planos una vez por barrido (no walk por muestra).
+    let flat_x = ast_x
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "t", "", ""));
+    let flat_y = ast_y
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "t", "", ""));
     let compiled_x = ast_x
         .is_none()
         .then(|| expr::CompiledExpr::new(&pc.expr_x, variables).ok())
@@ -140,18 +162,22 @@ pub fn evaluate_parametric_curve_2d(
         .into_par_iter()
         .map(|i| {
             let t = t_min + i as f64 * dt;
-            let x = ast_x
+            let x = flat_x
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| ast_x.as_ref().map(|ast| finite_clamp(ast.eval_at("t", t))))
                 .or_else(|| {
                     compiled_x
                         .as_ref()
                         .and_then(|c| c.eval_at("t", t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
-            let y = ast_y
+            let y = flat_y
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| ast_y.as_ref().map(|ast| finite_clamp(ast.eval_at("t", t))))
                 .or_else(|| {
                     compiled_y
                         .as_ref()
@@ -181,6 +207,15 @@ pub fn evaluate_parametric_curve_3d(
     let ast_x = expr::prepare_function_ast(&pc.expr_x, variables, &[parameter]).ok();
     let ast_y = expr::prepare_function_ast(&pc.expr_y, variables, &[parameter]).ok();
     let ast_z = expr::prepare_function_ast(&pc.expr_z, variables, &[parameter]).ok();
+    let flat_x = ast_x
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, parameter, "", ""));
+    let flat_y = ast_y
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, parameter, "", ""));
+    let flat_z = ast_z
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, parameter, "", ""));
     let compiled_x = ast_x
         .is_none()
         .then(|| expr::CompiledExpr::new(&pc.expr_x, variables).ok())
@@ -198,27 +233,45 @@ pub fn evaluate_parametric_curve_3d(
         .into_par_iter()
         .map(|i| {
             let t = t_min + i as f64 * dt;
-            let x = ast_x
+            let x = flat_x
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| {
+                    ast_x
+                        .as_ref()
+                        .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                })
                 .or_else(|| {
                     compiled_x
                         .as_ref()
                         .and_then(|c| c.eval_at(parameter, t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
-            let y = ast_y
+            let y = flat_y
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| {
+                    ast_y
+                        .as_ref()
+                        .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                })
                 .or_else(|| {
                     compiled_y
                         .as_ref()
                         .and_then(|c| c.eval_at(parameter, t).ok().map(finite_clamp))
                 })
                 .unwrap_or(f64::NAN);
-            let z = ast_z
+            let z = flat_z
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| {
+                    ast_z
+                        .as_ref()
+                        .map(|ast| finite_clamp(ast.eval_at(parameter, t)))
+                })
                 .or_else(|| {
                     compiled_z
                         .as_ref()
@@ -245,6 +298,9 @@ pub fn evaluate_polar_curve(
     let dt = (t_max - t_min) / steps as f64;
 
     let ast_r = expr::prepare_function_ast(&pol.expr_r, variables, &["t"]).ok();
+    let flat_r = ast_r
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "t", "", ""));
     let compiled_r = ast_r
         .is_none()
         .then(|| expr::CompiledExpr::new(&pol.expr_r, variables).ok())
@@ -254,9 +310,11 @@ pub fn evaluate_polar_curve(
         .into_par_iter()
         .map(|i| {
             let t = t_min + i as f64 * dt;
-            let r = ast_r
+            let r = flat_r
                 .as_ref()
-                .map(|ast| finite_clamp(ast.eval_at("t", t)))
+                .and_then(|ops| expr::eval_opcodes_flat(ops, t, 0.0, 0.0))
+                .map(finite_clamp)
+                .or_else(|| ast_r.as_ref().map(|ast| finite_clamp(ast.eval_at("t", t))))
                 .or_else(|| {
                     compiled_r
                         .as_ref()
@@ -298,6 +356,15 @@ pub fn evaluate_surface_3d(
         let ast_x = expr::prepare_function_ast(&surf.expr_x, variables, &["u", "v"]).ok();
         let ast_y = expr::prepare_function_ast(&surf.expr_y, variables, &["u", "v"]).ok();
         let ast_z = expr::prepare_function_ast(&surf.expr_z, variables, &["u", "v"]).ok();
+        let flat_x = ast_x
+            .as_ref()
+            .and_then(|ast| expr::compile_flat_ops(ast, "u", "v", ""));
+        let flat_y = ast_y
+            .as_ref()
+            .and_then(|ast| expr::compile_flat_ops(ast, "u", "v", ""));
+        let flat_z = ast_z
+            .as_ref()
+            .and_then(|ast| expr::compile_flat_ops(ast, "u", "v", ""));
         let compiled_x = ast_x
             .is_none()
             .then(|| expr::CompiledExpr::new(&surf.expr_x, variables).ok())
@@ -318,11 +385,10 @@ pub fn evaluate_surface_3d(
                 let mut row = Vec::with_capacity(res + 1);
                 for j in 0..=res {
                     let v = v_min + j as f64 * dv;
-                    let vars = [("u".to_string(), u), ("v".to_string(), v)];
                     let x = eval_ast_or_compiled(
                         ast_x.as_ref(),
+                        flat_x.as_ref(),
                         compiled_x.as_ref(),
-                        &vars,
                         "u",
                         u,
                         "v",
@@ -330,8 +396,8 @@ pub fn evaluate_surface_3d(
                     );
                     let y = eval_ast_or_compiled(
                         ast_y.as_ref(),
+                        flat_y.as_ref(),
                         compiled_y.as_ref(),
-                        &vars,
                         "u",
                         u,
                         "v",
@@ -339,8 +405,8 @@ pub fn evaluate_surface_3d(
                     );
                     let z = eval_ast_or_compiled(
                         ast_z.as_ref(),
+                        flat_z.as_ref(),
                         compiled_z.as_ref(),
-                        &vars,
                         "u",
                         u,
                         "v",
@@ -399,6 +465,9 @@ pub fn evaluate_surface_3d(
     }
 
     let ast = expr::prepare_function_ast(&surf.expr, variables, &["x", "y"]).ok();
+    let flat = ast
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "y", ""));
     let compiled = ast
         .is_none()
         .then(|| expr::CompiledExpr::new(&surf.expr, variables).ok())
@@ -411,9 +480,15 @@ pub fn evaluate_surface_3d(
             let mut row = Vec::with_capacity(res + 1);
             for j in 0..=res {
                 let y = y_min + j as f64 * dy;
-                let vars = [("x".to_string(), x), ("y".to_string(), y)];
-                let z =
-                    eval_ast_or_compiled(ast.as_ref(), compiled.as_ref(), &vars, "x", x, "y", y);
+                let z = eval_ast_or_compiled(
+                    ast.as_ref(),
+                    flat.as_ref(),
+                    compiled.as_ref(),
+                    "x",
+                    x,
+                    "y",
+                    y,
+                );
                 row.push(surf.explicit_sample_point(x, y, z));
             }
             row

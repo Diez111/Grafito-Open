@@ -366,6 +366,12 @@ fn evaluate_function_samples(
     }
 
     let parsed_ast = expr::prepare_function_ast(&fun.expr, variables, &["x"]).ok();
+    // Opcodes planos compilados UNA vez por barrido (no walk por muestra).
+    // `None` si el AST usa nodos sin opcode → walk de siempre (paridad en
+    // `flat_matches_walk_en_muestreo_adversarial`, crate geometry).
+    let flat_ops = parsed_ast
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "", ""));
     let compiled = parsed_ast
         .is_none()
         .then(|| expr::CompiledExpr::new(&fun.expr, variables).ok())
@@ -410,6 +416,14 @@ fn evaluate_function_samples(
                             return None;
                         }
                     }
+                }
+                // Plano primero (mismo mapeo finito → `Some` que el walk).
+                if let Some(ops) = &flat_ops {
+                    if let Some(v) = expr::eval_opcodes_flat(ops, x, 0.0, 0.0) {
+                        return Some(v);
+                    }
+                    // No finito → cae al walk (igual que `CompiledExpr::eval`
+                    // cae al AST): el walk arbitra el resultado final.
                 }
                 if let Some(ast) = &parsed_ast {
                     let res = ast.eval_at("x", x);

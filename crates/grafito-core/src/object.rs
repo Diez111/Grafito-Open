@@ -8,8 +8,8 @@ use grafito_geometry::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Arc, RwLock};
 
 /// A geometric object in the document (2D and 3D).
@@ -2152,22 +2152,28 @@ impl ImplicitSurface3DObj {
 
     /// Clave del cómputo: expresión + cotas + resolución + variables ordenadas.
     fn cache_key(&self, variables: &BTreeMap<String, f64>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        self.expr.hash(&mut hasher);
-        self.x_min.to_bits().hash(&mut hasher);
-        self.x_max.to_bits().hash(&mut hasher);
-        self.y_min.to_bits().hash(&mut hasher);
-        self.y_max.to_bits().hash(&mut hasher);
-        self.z_min.to_bits().hash(&mut hasher);
-        self.z_max.to_bits().hash(&mut hasher);
-        self.cells.hash(&mut hasher);
-        let mut sorted: Vec<(&String, &f64)> = variables.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
-        for (key, value) in sorted {
-            key.hash(&mut hasher);
-            value.to_bits().hash(&mut hasher);
+        let mut state = 0xcbf29ce484222325u64;
+        fnv1a_str(&mut state, &self.expr);
+        for bits in [
+            self.x_min.to_bits(),
+            self.x_max.to_bits(),
+            self.y_min.to_bits(),
+            self.y_max.to_bits(),
+            self.z_min.to_bits(),
+            self.z_max.to_bits(),
+        ] {
+            state ^= bits;
+            state = state.wrapping_mul(0x1000_0000_01b3);
         }
-        hasher.finish()
+        state ^= self.cells as u64;
+        state = state.wrapping_mul(0x1000_0000_01b3);
+        // Sin colectar: el `BTreeMap` ya itera en orden determinista.
+        for (key, value) in variables.iter() {
+            fnv1a_str(&mut state, key);
+            state ^= value.to_bits();
+            state = state.wrapping_mul(0x1000_0000_01b3);
+        }
+        state
     }
 
     /// Deriva la malla en fresco (sin tocar la caché) con el evaluador
@@ -2180,9 +2186,21 @@ impl ImplicitSurface3DObj {
         let parsed =
             grafito_geometry::expr::prepare_function_ast(&self.expr, variables, &["x", "y", "z"])
                 .ok();
+        // Opcodes planos una vez por malla (no walk por vértice).
+        let flat = parsed
+            .as_ref()
+            .and_then(|ast| grafito_geometry::expr::compile_flat_ops(ast, "x", "y", "z"));
         let fallback_vars: Vec<(String, f64)> =
             variables.iter().map(|(k, v)| (k.clone(), *v)).collect();
         let field = |x: f64, y: f64, z: f64| -> Option<f64> {
+            if let Some(ops) = &flat {
+                if let Some(v) = grafito_geometry::expr::eval_opcodes_flat(ops, x, y, z) {
+                    let clamped = implicit_surface_finite_clamp(v);
+                    if clamped.is_finite() {
+                        return Some(clamped);
+                    }
+                }
+            }
             if let Some(ast) = &parsed {
                 let v = ast.eval_3d("x", x, "y", y, "z", z);
                 let clamped = implicit_surface_finite_clamp(v);
@@ -3702,6 +3720,12 @@ pub struct ImplicitCurveObj {
     #[serde(skip)]
     #[allow(private_interfaces)]
     pub cached_asts: Arc<RwLock<Option<CachedAsts>>>,
+    /// Variables referenciadas por lhs/rhs, cacheadas por hash de ambos
+    /// textos. `cache_key` se llama 3+ veces por frame por curva y antes
+    /// re-parseaba las dos expresiones en cada llamada.
+    #[serde(skip)]
+    #[allow(private_interfaces)]
+    pub referenced_vars: Arc<RwLock<Option<CachedReferencedVars>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -3710,6 +3734,33 @@ struct CachedAsts {
     rhs: grafito_geometry::ast::Expr,
     /// Hash de lhs + rhs + variables combinadas.
     hash: u64,
+}
+
+/// FNV-1a 64: hasher no criptográfico para claves de caché calientes.
+///
+/// `DefaultHasher` (SipHash) es notoriamente más lento para strings cortos;
+/// en `cache_key` (llamado varias veces por frame por curva) el hash era
+/// parte medible del costo. FNV-1a es determinista entre plataformas.
+fn fnv1a_str(state: &mut u64, text: &str) {
+    for byte in text.bytes() {
+        *state ^= u64::from(byte);
+        *state = state.wrapping_mul(0x1000_0000_01b3);
+    }
+}
+
+/// Mezcla un byte separador (evita ambigüedad `"ab"+"c"` vs `"a"+"bc"`).
+fn fnv1a_sep(state: &mut u64) {
+    *state ^= 0xFFu64;
+    *state = state.wrapping_mul(0x1000_0000_01b3);
+}
+
+/// Variables referenciadas por `(expr_lhs, expr_rhs)`, cacheadas para no
+/// re-parsear en cada frame. La clave es el hash FNV de ambos textos, así
+/// que una edición de la expresión se auto-invalida sin intervención.
+#[derive(Clone, Debug)]
+struct CachedReferencedVars {
+    expr_hash: u64,
+    vars: HashSet<String>,
 }
 
 impl Clone for ImplicitCurveObj {
@@ -3731,6 +3782,7 @@ impl Clone for ImplicitCurveObj {
             cached_key: self.cached_key.clone(),
             cached_region: self.cached_region.clone(),
             cached_asts: self.cached_asts.clone(),
+            referenced_vars: self.referenced_vars.clone(),
         }
     }
 }
@@ -3749,6 +3801,36 @@ impl PartialEq for ImplicitCurveObj {
             && self.contour_levels == other.contour_levels
             && self.contour_colors == other.contour_colors
     }
+}
+
+/// Hash FNV-1a de los valores de `variables` restringidos a `referenced`.
+///
+/// Determinista sin colectar ni ordenar: el `BTreeMap` ya itera en orden.
+fn hash_referenced_values(referenced: &HashSet<String>, variables: &BTreeMap<String, f64>) -> u64 {
+    // Sin alocación: el `BTreeMap` ya itera en orden y el filtro lo
+    // preserva, así que el hash es determinista sin colectar ni ordenar.
+    let mut state = 0xcbf29ce484222325u64;
+    for (k, v) in variables.iter() {
+        if referenced.contains(k) {
+            fnv1a_str(&mut state, k);
+            state ^= v.to_bits();
+            state = state.wrapping_mul(0x1000_0000_01b3);
+        }
+    }
+    state
+}
+
+/// Hash FNV-1a de TODAS las variables (orden del `BTreeMap`, determinista).
+/// Fallback conservador cuando el conjunto de referenciadas no está
+/// disponible: cubre más estado, jamás colisiona por omisión.
+fn hash_all_values(variables: &BTreeMap<String, f64>) -> u64 {
+    let mut state = 0xcbf29ce484222325u64;
+    for (k, v) in variables.iter() {
+        fnv1a_str(&mut state, k);
+        state ^= v.to_bits();
+        state = state.wrapping_mul(0x1000_0000_01b3);
+    }
+    state
 }
 
 impl ImplicitCurveObj {
@@ -3773,6 +3855,7 @@ impl ImplicitCurveObj {
             cached_key: Arc::new(RwLock::new(None)),
             cached_region: Arc::new(RwLock::new(None)),
             cached_asts: Arc::new(RwLock::new(None)),
+            referenced_vars: Arc::new(RwLock::new(None)),
         }
     }
     pub fn with_label(mut self, l: impl Into<String>) -> Self {
@@ -3799,17 +3882,26 @@ impl ImplicitCurveObj {
         variables: &BTreeMap<String, f64>,
         var_names: &[&str],
     ) -> Option<(grafito_geometry::ast::Expr, grafito_geometry::ast::Expr)> {
-        // Hash combinado de lhs + rhs + variables (orden determinista).
-        let mut hasher = DefaultHasher::new();
-        self.expr_lhs.hash(&mut hasher);
-        self.expr_rhs.hash(&mut hasher);
-        let mut sorted_vars: Vec<_> = variables.iter().collect();
-        sorted_vars.sort_by(|a, b| a.0.cmp(b.0));
-        for (key, value) in sorted_vars {
-            key.hash(&mut hasher);
-            value.to_bits().hash(&mut hasher);
-        }
-        let combined_hash = hasher.finish();
+        // Hash combinado de lhs + rhs + variables referenciadas (orden
+        // determinista). Restringir a referenciadas evita re-parsear cuando
+        // cambia un slider ajeno a la curva; si el conjunto aún no se
+        // conoce, se usa el hash conservador sobre todas.
+        let combined_hash = match self.referenced_guarded(variables).as_ref() {
+            Some(cached) => {
+                let mut state = cached.expr_hash;
+                fnv1a_sep(&mut state);
+                state ^= hash_referenced_values(&cached.vars, variables);
+                state = state.wrapping_mul(0x1000_0000_01b3);
+                state
+            }
+            None => {
+                let mut state = self.referenced_expr_hash();
+                fnv1a_sep(&mut state);
+                state ^= hash_all_values(variables);
+                state = state.wrapping_mul(0x1000_0000_01b3);
+                state
+            }
+        };
 
         // Verificar cache.
         if let Some(cached) = self
@@ -3879,59 +3971,27 @@ impl ImplicitCurveObj {
         grid_size: usize,
         variables: &BTreeMap<String, f64>,
     ) -> ImplicitCurveCacheKey {
-        let mut hasher = DefaultHasher::new();
+        let mut state = 0xcbf29ce484222325u64;
         if let Some(levels) = &self.contour_levels {
             for v in levels {
-                v.to_bits().hash(&mut hasher);
+                state ^= v.to_bits();
+                state = state.wrapping_mul(0x1000_0000_01b3);
             }
         }
-        let contour_levels_hash = hasher.finish();
+        let contour_levels_hash = state;
 
-        let mut hasher = DefaultHasher::new();
+        let mut state = 0xcbf29ce484222325u64;
         if let Some(colors) = &self.contour_colors {
             for c in colors {
-                c.r.to_bits().hash(&mut hasher);
-                c.g.to_bits().hash(&mut hasher);
-                c.b.to_bits().hash(&mut hasher);
-                c.a.to_bits().hash(&mut hasher);
-            }
-        }
-        let contour_colors_hash = hasher.finish();
-
-        let mut referenced = std::collections::HashSet::new();
-        let lhs_clean = grafito_geometry::expr::preprocess_expr(&self.expr_lhs);
-        if let Ok(ast_lhs) = grafito_geometry::ast::parse_ast(&lhs_clean) {
-            ast_lhs.get_variables(&mut referenced);
-        } else {
-            for k in variables.keys() {
-                if is_variable_in_expr(k, &self.expr_lhs) {
-                    referenced.insert(k.clone());
+                for bits in [c.r.to_bits(), c.g.to_bits(), c.b.to_bits(), c.a.to_bits()] {
+                    state ^= u64::from(bits);
+                    state = state.wrapping_mul(0x1000_0000_01b3);
                 }
             }
         }
+        let contour_colors_hash = state;
 
-        let rhs_clean = grafito_geometry::expr::preprocess_expr(&self.expr_rhs);
-        if let Ok(ast_rhs) = grafito_geometry::ast::parse_ast(&rhs_clean) {
-            ast_rhs.get_variables(&mut referenced);
-        } else {
-            for k in variables.keys() {
-                if is_variable_in_expr(k, &self.expr_rhs) {
-                    referenced.insert(k.clone());
-                }
-            }
-        }
-
-        let mut hasher = DefaultHasher::new();
-        let mut sorted_vars: Vec<(&String, &f64)> = variables
-            .iter()
-            .filter(|(k, _)| referenced.contains(*k))
-            .collect();
-        sorted_vars.sort_by(|a, b| a.0.cmp(b.0));
-        for (k, v) in sorted_vars {
-            k.hash(&mut hasher);
-            v.to_bits().hash(&mut hasher);
-        }
-        let variables_hash = hasher.finish();
+        let variables_hash = self.variables_hash(variables);
 
         ImplicitCurveCacheKey {
             expr_lhs: self.expr_lhs.clone(),
@@ -3943,6 +4003,99 @@ impl ImplicitCurveObj {
             grid_size,
             variables_hash,
         }
+    }
+
+    /// Hash FNV-1a de los valores de las variables referenciadas por
+    /// `(expr_lhs, expr_rhs)`.
+    ///
+    /// El conjunto de variables referenciadas solo depende de los textos de
+    /// las expresiones, así que se cachea por hash de ambos (auto-invalida
+    /// ante ediciones). Antes se re-parseaba en cada llamada, y `cache_key`
+    /// se llama 3+ veces por frame por curva.
+    fn variables_hash(&self, variables: &BTreeMap<String, f64>) -> u64 {
+        let guard = self.referenced_guarded(variables);
+        match guard.as_ref() {
+            Some(cached) => hash_referenced_values(&cached.vars, variables),
+            // Inalcanzable en la práctica (siempre se escribe arriba); hash
+            // conservador sobre TODAS las variables para no colisionar.
+            None => hash_all_values(variables),
+        }
+    }
+
+    /// Conjunto de variables referenciadas por `(expr_lhs, expr_rhs)`,
+    /// cacheado por hash de ambos textos. En hit no parsea: el guard de
+    /// lectura se sostiene durante el uso (sección corta, el lock solo se
+    /// escribe ante cambio de expresión). Patrón de poison-recovery igual
+    /// que el resto de cachés del objeto.
+    fn referenced_guarded(
+        &self,
+        variables: &BTreeMap<String, f64>,
+    ) -> std::sync::RwLockReadGuard<'_, Option<CachedReferencedVars>> {
+        let expr_hash = self.referenced_expr_hash();
+        let needs_compute = self
+            .referenced_vars
+            .read()
+            .map(|guard| {
+                guard
+                    .as_ref()
+                    .map(|cached| cached.expr_hash != expr_hash)
+                    .unwrap_or(true)
+            })
+            .unwrap_or(true);
+        if needs_compute {
+            let referenced = Self::scan_referenced(&self.expr_lhs, &self.expr_rhs, variables);
+            *self.referenced_vars.write().unwrap_or_else(|p| {
+                log::warn!("cache lock envenenado; recuperando estado parcial");
+                p.into_inner()
+            }) = Some(CachedReferencedVars {
+                expr_hash,
+                vars: referenced,
+            });
+        }
+        self.referenced_vars.read().unwrap_or_else(|p| {
+            log::warn!("cache lock envenenado; recuperando estado parcial");
+            p.into_inner()
+        })
+    }
+
+    /// Hash FNV-1a de `(expr_lhs, expr_rhs)` como textos.
+    fn referenced_expr_hash(&self) -> u64 {
+        let mut expr_state = 0xcbf29ce484222325u64;
+        fnv1a_str(&mut expr_state, &self.expr_lhs);
+        fnv1a_sep(&mut expr_state);
+        fnv1a_str(&mut expr_state, &self.expr_rhs);
+        expr_state
+    }
+
+    /// Escanea lhs/rhs (parse + fallback por substring) una sola vez.
+    fn scan_referenced(
+        expr_lhs: &str,
+        expr_rhs: &str,
+        variables: &BTreeMap<String, f64>,
+    ) -> HashSet<String> {
+        let mut referenced = HashSet::new();
+        let lhs_clean = grafito_geometry::expr::preprocess_expr(expr_lhs);
+        if let Ok(ast_lhs) = grafito_geometry::ast::parse_ast(&lhs_clean) {
+            ast_lhs.get_variables(&mut referenced);
+        } else {
+            for k in variables.keys() {
+                if is_variable_in_expr(k, expr_lhs) {
+                    referenced.insert(k.clone());
+                }
+            }
+        }
+
+        let rhs_clean = grafito_geometry::expr::preprocess_expr(expr_rhs);
+        if let Ok(ast_rhs) = grafito_geometry::ast::parse_ast(&rhs_clean) {
+            ast_rhs.get_variables(&mut referenced);
+        } else {
+            for k in variables.keys() {
+                if is_variable_in_expr(k, expr_rhs) {
+                    referenced.insert(k.clone());
+                }
+            }
+        }
+        referenced
     }
 
     /// Invalidate any cached geometry for this curve.
@@ -5490,6 +5643,29 @@ mod tests {
         let (lhs_new, _) = ic.get_cached_asts(&vars, &["x", "y"]).unwrap();
         // El nuevo lhs debe evaluar como x²+y²+1 (en (0,0) es 1, no 0).
         assert_eq!(lhs_new.eval_2d("x", 0.0, "y", 0.0), 1.0);
+    }
+
+    #[test]
+    fn cache_key_reutiliza_vars_sin_reparsear_y_es_sensible_a_cambios() {
+        // Pinea la optimización A1: llamadas repetidas devuelven la misma
+        // clave; una variable NO referenciada no la altera; una referenciada
+        // sí; editar el texto también.
+        let ic = ImplicitCurveObj::new("x^2 + a", "1", RelationOperator::Eq);
+        let bounds = (-2.0, 2.0, -2.0, 2.0);
+        let mut vars = BTreeMap::new();
+        vars.insert("a".to_string(), 1.0);
+        vars.insert("z_no_usada".to_string(), 5.0);
+        let k1 = ic.cache_key(bounds, 64, &vars);
+        let k2 = ic.cache_key(bounds, 64, &vars);
+        assert_eq!(k1, k2);
+        // El slot de referenced_vars quedó poblado tras la primera llamada.
+        assert!(ic.referenced_vars.read().unwrap().is_some());
+        // Variable no referenciada: la clave no cambia.
+        vars.insert("z_no_usada".to_string(), 6.0);
+        assert_eq!(ic.cache_key(bounds, 64, &vars), k1);
+        // Variable referenciada: la clave cambia.
+        vars.insert("a".to_string(), 2.0);
+        assert_ne!(ic.cache_key(bounds, 64, &vars), k1);
     }
 
     #[test]

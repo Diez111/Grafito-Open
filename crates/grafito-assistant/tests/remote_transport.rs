@@ -19,6 +19,20 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// Candado de serialización para tests que comparten el `static` de pausa por
+/// cuota (`RATE_LIMIT_NOT_BEFORE`): los stubs 429 dejan una pausa real de 60s
+/// y, si otro test corre en paralelo, puede fallar rápido por la pausa ANTES
+/// de conectar a su server stub → el `server.join()` queda esperando un
+/// `accept()` que nunca llega (hang de suite, visto 2026-09-17). Un lock por
+/// proceso + clear al entrar elimina la carrera; el guard vive hasta el final
+/// del test (no usar `let _ =`).
+fn rate_limit_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let guard = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    grafito_assistant::clear_rate_limit_for_tests();
+    guard
+}
+
 fn png_bytes(width: u32, height: u32) -> Vec<u8> {
     let image = RgbaImage::from_pixel(width, height, Rgba([1, 2, 3, 255]));
     let mut bytes = Cursor::new(Vec::new());
@@ -175,7 +189,7 @@ fn vision_settings() -> ProviderSettings {
 
 #[test]
 fn endpoint_validation_accepts_https_and_loopback_http_only() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     assert!(validate_endpoint("https://api.deepseek.com/v1").is_ok());
     assert!(validate_endpoint("http://127.0.0.1:11434/v1").is_ok());
     assert!(validate_endpoint("http://example.com/v1").is_err());
@@ -184,7 +198,7 @@ fn endpoint_validation_accepts_https_and_loopback_http_only() {
 
 #[test]
 fn openai_payload_contains_budgeted_messages_without_a_secret() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("2 + 2");
     request.budget.max_output_chars = 32;
     let settings = ProviderSettings::for_profile(ProviderProfile::DeepSeek, "deepseek-chat");
@@ -203,7 +217,7 @@ fn openai_payload_contains_budgeted_messages_without_a_secret() {
 
 #[test]
 fn opencode_go_uses_the_official_base_and_chat_completion_path() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "deepseek-v4-flash");
 
     assert_eq!(settings.endpoint, "https://opencode.ai/zen/go/v1");
@@ -215,7 +229,7 @@ fn opencode_go_uses_the_official_base_and_chat_completion_path() {
 
 #[test]
 fn opencode_go_derives_the_official_anthropic_messages_path_for_minimax() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl");
 
     assert_eq!(
@@ -226,7 +240,7 @@ fn opencode_go_derives_the_official_anthropic_messages_path_for_minimax() {
 
 #[test]
 fn minimax_payload_uses_anthropic_messages_without_a_secret() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let request = remote_request("2 + 2");
     let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "mimo-2.5-vl");
 
@@ -250,7 +264,7 @@ fn minimax_payload_uses_anthropic_messages_without_a_secret() {
 
 #[test]
 fn repair_requests_reject_images_in_openai_and_anthropic_payloads() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("construí un tetraedro");
     request.repair_feedback = Some(tetrahedron_repair_feedback());
     request.image_upload_consent = true;
@@ -275,7 +289,7 @@ fn repair_requests_reject_images_in_openai_and_anthropic_payloads() {
 
 #[test]
 fn minimax_payload_transmits_validated_images_as_anthropic_base64_blocks() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("interpretá ambas imágenes");
     request.image_upload_consent = true;
     request
@@ -308,7 +322,7 @@ fn minimax_payload_transmits_validated_images_as_anthropic_base64_blocks() {
 
 #[test]
 fn image_payload_reencodes_pixels_without_png_text_or_jpeg_exif_metadata() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     const PNG_MARKER: &[u8] = b"PRIVATE_PNG_TEXT_GPS";
     const JPEG_MARKER: &[u8] = b"PRIVATE_JPEG_EXIF_GPS";
     let png = png_bytes_with_text_marker(PNG_MARKER);
@@ -373,7 +387,7 @@ fn image_payload_reencodes_pixels_without_png_text_or_jpeg_exif_metadata() {
 
 #[test]
 fn remote_payload_keeps_document_binding_metadata_local() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let request = remote_request("2 + 2");
     let document_digest = request.context.digest.clone();
     let chat = build_chat_completion_payload(
@@ -396,7 +410,7 @@ fn remote_payload_keeps_document_binding_metadata_local() {
 
 #[test]
 fn minimax_image_payload_requires_capability_and_consent_and_fusion_stays_text_only() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("read this image");
     request
         .attachments
@@ -423,7 +437,7 @@ fn minimax_image_payload_requires_capability_and_consent_and_fusion_stays_text_o
 
 #[test]
 fn fusion_audit_uses_deepseek_pro_and_includes_only_reviewed_text() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let request = remote_request("Explicá 2 + 2");
     let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "fusion");
 
@@ -439,7 +453,7 @@ fn fusion_audit_uses_deepseek_pro_and_includes_only_reviewed_text() {
 
 #[test]
 fn fusion_audit_requires_explicit_remote_privacy_consent() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let request = AssistantRequest::local("Explicá 2 + 2", ImmutableDocumentContext::empty(0));
     let settings = ProviderSettings::for_profile(ProviderProfile::OpenCodeGo, "fusion");
 
@@ -448,7 +462,7 @@ fn fusion_audit_requires_explicit_remote_privacy_consent() {
 
 #[test]
 fn remote_payload_includes_only_bounded_focus_and_conversation_text() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("analyze the selected function");
     request.focus = Some(AssistantFocus::function(
         "f",
@@ -477,7 +491,7 @@ fn remote_payload_includes_only_bounded_focus_and_conversation_text() {
 
 #[test]
 fn worker_appends_chat_completions_and_accepts_an_explicit_key() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -511,7 +525,7 @@ fn worker_appends_chat_completions_and_accepts_an_explicit_key() {
 
 #[test]
 fn chat_completions_accepts_a_final_assistant_content_array_of_text_blocks() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let text = chat_completion_result(
         r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":[{"type":"text","text":"final "},{"type":"text","text":"answer"}]}}]}"#,
     )
@@ -522,7 +536,7 @@ fn chat_completions_accepts_a_final_assistant_content_array_of_text_blocks() {
 
 #[test]
 fn chat_completions_rejects_non_final_or_non_displayable_content_without_echoing_provider_data() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let incomplete = chat_completion_result(
         r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"provider-private-partial"}}]}"#,
     )
@@ -546,7 +560,7 @@ fn chat_completions_rejects_non_final_or_non_displayable_content_without_echoing
 
 #[test]
 fn chat_completions_classifies_invalid_json_and_schema_without_leaking_credentials_or_bodies() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let invalid_json = chat_completion_result("{\"choices\":[").unwrap_err();
     assert_eq!(invalid_json, "remote assistant response JSON is invalid");
     assert!(!invalid_json.contains("test-key"));
@@ -564,7 +578,7 @@ fn chat_completions_classifies_invalid_json_and_schema_without_leaking_credentia
 #[test]
 fn model_worker_uses_the_models_path_and_reduces_metadata_to_identifiers() {
     grafito_assistant::clear_models_cache_for_tests();
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -599,7 +613,7 @@ fn model_worker_uses_the_models_path_and_reduces_metadata_to_identifiers() {
 
 #[test]
 fn payload_rejects_images_when_the_selected_model_has_no_vision_capability() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut request = remote_request("read the image");
     request
         .attachments
@@ -616,7 +630,7 @@ fn payload_rejects_images_when_the_selected_model_has_no_vision_capability() {
 
 #[test]
 fn named_provider_profiles_reject_attacker_hosts_and_nonstandard_ports() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let attacker = ProviderSettings::for_profile(ProviderProfile::DeepSeek, "deepseek-chat")
         .with_endpoint("https://api.deepseek.com.attacker.invalid/v1");
     let alternate_port = ProviderSettings::for_profile(ProviderProfile::DeepSeek, "deepseek-chat")
@@ -646,7 +660,7 @@ fn named_provider_profiles_reject_attacker_hosts_and_nonstandard_ports() {
 
 #[test]
 fn custom_endpoints_accept_only_scoped_assistant_api_key_references() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     for reference in [
         "AWS_SECRET_ACCESS_KEY",
         "GH_TOKEN",
@@ -675,7 +689,7 @@ fn custom_endpoints_accept_only_scoped_assistant_api_key_references() {
 
 #[test]
 fn payload_validation_rejects_unscoped_custom_credentials_before_a_request() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let request = remote_request("2 + 2");
     for api_key_env in [
         "AWS_SECRET_ACCESS_KEY",
@@ -699,7 +713,7 @@ fn payload_validation_rejects_unscoped_custom_credentials_before_a_request() {
 
 #[test]
 fn remote_payload_does_not_transmit_legacy_transcription_and_requires_image_consent() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut transcription = remote_request("solve the problem");
     transcription.transcription.text = "x + 1 = 2".into();
     let payload = build_chat_completion_payload(
@@ -724,7 +738,7 @@ fn remote_payload_does_not_transmit_legacy_transcription_and_requires_image_cons
 
 #[test]
 fn payload_rejects_malformed_images_and_mismatched_real_dimensions() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut malformed = remote_request("read this image");
     malformed
         .attachments
@@ -762,7 +776,7 @@ fn payload_rejects_malformed_images_and_mismatched_real_dimensions() {
 
 #[test]
 fn image_payload_strips_unknown_source_path_metadata() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let mut attachment =
         serde_json::to_value(ImageAttachment::new("image/png", png_bytes(1, 1), 1, 1)).unwrap();
     attachment.as_object_mut().unwrap().insert(
@@ -784,7 +798,7 @@ fn image_payload_strips_unknown_source_path_metadata() {
 
 #[test]
 fn remote_worker_rejects_an_oversized_completion_before_deserializing_it() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -821,7 +835,7 @@ fn remote_worker_rejects_an_oversized_completion_before_deserializing_it() {
 
 #[test]
 fn remote_worker_rejects_malformed_provider_json() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -853,7 +867,7 @@ fn remote_worker_rejects_malformed_provider_json() {
 
 #[test]
 fn remote_worker_does_not_follow_redirects() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let target = TcpListener::bind("127.0.0.1:0").unwrap();
     let target_address = target.local_addr().unwrap();
     let target_hits = Arc::new(AtomicUsize::new(0));
@@ -908,7 +922,7 @@ fn remote_worker_does_not_follow_redirects() {
 
 #[test]
 fn chat_completions_429_includes_retry_after_seconds_without_sleeping() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -951,7 +965,7 @@ fn chat_completions_429_includes_retry_after_seconds_without_sleeping() {
 
 #[test]
 fn chat_completions_429_parses_http_date_retry_after_with_clamp() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = thread::spawn(move || {
@@ -989,7 +1003,7 @@ fn chat_completions_429_parses_http_date_retry_after_with_clamp() {
 
 #[test]
 fn chat_completions_500_truncates_long_body_without_secrets() {
-    grafito_assistant::clear_rate_limit_for_tests();
+    let _serial = rate_limit_test_guard();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     // Cuerpo largo del proveedor (2000 chars): debe truncarse a 500 sin eco de clave.

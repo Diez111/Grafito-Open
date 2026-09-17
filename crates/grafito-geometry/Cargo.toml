@@ -42,5 +42,14 @@ harness = false
 name = "morph_orbit"
 harness = false
 
+# Ola 2 B14: benches informativos ODE/CAS/matrices (sin gate).
+[[bench]]
+name = "ode_bench"
+harness = false
+
+[[bench]]
+name = "cas_matrices_bench"
+harness = false
+
 [lints]
 workspace = true

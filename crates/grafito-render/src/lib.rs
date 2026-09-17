@@ -3206,7 +3206,8 @@ impl Renderer {
 
         let resolution = fr.resolution;
         let fractal = Self::fractal_type(fr);
-        let Ok(pixels) = grafito_geometry::fractals::try_compute_fractal(
+        // Variante compartida: en hit de caché no se clona el buffer.
+        let Ok(pixels) = grafito_geometry::fractals::try_compute_fractal_shared(
             &fractal, fr.x_min, fr.x_max, fr.y_min, fr.y_max, resolution, resolution,
         ) else {
             return false;
@@ -3217,7 +3218,7 @@ impl Renderer {
 
         let dx = (fr.x_max - fr.x_min) / resolution as f64;
         let dy = (fr.y_max - fr.y_min) / resolution as f64;
-        for pixel in &pixels {
+        for pixel in pixels.iter() {
             let (r, g, b, a) = grafito_geometry::fractals::fractal_color_hsv(
                 pixel.iter,
                 pixel.max_iter,
@@ -4678,22 +4679,22 @@ impl Renderer {
                     return;
                 };
 
-                // Construir lista de puntos centrales de celdas
-                let mut points: Vec<(f64, f64)> = Vec::with_capacity(res * res);
-                for i in 0..res {
-                    for j in 0..res {
-                        let x = cg.x_min + (i as f64 + 0.5) * dx;
-                        let y = cg.y_min + (j as f64 + 0.5) * dy;
-                        points.push((x, y));
-                    }
-                }
+                // Malla regular: los centros los deriva el shader (sin Vec
+                // de puntos huésped ni subida de 2 MiB por dispatch).
+                let grid = crate::domain_coloring_compute::DomainGrid {
+                    x_min: cg.x_min,
+                    y_min: cg.y_min,
+                    dx,
+                    dy,
+                    res,
+                };
 
                 let vars = std::collections::BTreeMap::new();
                 if let Some(colors) = dc_pipeline.evaluate(
                     device,
                     queue,
                     &parsed,
-                    &points,
+                    &grid,
                     &vars,
                     cg.domain_coloring_mode as u32,
                 ) {
@@ -4765,6 +4766,20 @@ impl Renderer {
                     return;
                 };
                 let symbol = document.complex_base_symbol.clone();
+                // Bytecode una vez (Ola 2 B13): por celda el loop plano sin
+                // `HashMap`; el walk queda como fallback si no compila.
+                let flat: Option<grafito_complex::math::complex_opcode::ComplexBytecodeProgram> = {
+                    let mut prog =
+                        grafito_complex::math::complex_opcode::ComplexBytecodeProgram::default();
+                    grafito_complex::math::complex_opcode::compile_complex_expr(
+                        &parsed,
+                        &document.variables,
+                        &[(symbol.as_str(), 0)],
+                        &mut prog,
+                    )
+                    .ok()
+                    .map(|()| prog)
+                };
                 let mut vars = std::collections::HashMap::new();
                 for (k, v) in &document.variables {
                     vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
@@ -4775,63 +4790,72 @@ impl Renderer {
                     let x = cg.x_min + i as f64 * dx;
                     for j in 0..res {
                         let y = cg.y_min + j as f64 * dy;
+                        let z_cell = num_complex::Complex64::new(x, y);
                         if let Some(z_val) = vars.get_mut(&symbol) {
-                            *z_val = num_complex::Complex64::new(x, y);
+                            *z_val = z_cell;
                         }
-                        if let Ok(fz) = parsed.eval(&vars) {
-                            if fz.re.is_finite() && fz.im.is_finite() {
-                                let mag = (fz.re * fz.re + fz.im * fz.im).sqrt();
-                                let ang = fz.im.atan2(fz.re);
-                                let hue =
-                                    (ang + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
-                                let mut lightness = 0.5;
-                                if cg.domain_coloring_mode == 0
-                                    || cg.domain_coloring_mode == 2
-                                    || cg.domain_coloring_mode == 3
-                                {
-                                    lightness = (mag.max(1e-10).ln().atan()
-                                        / std::f64::consts::FRAC_PI_2)
-                                        * 0.5
-                                        + 0.5;
-                                }
-                                let sat = if cg.domain_coloring_mode == 1 {
-                                    1.0
-                                } else {
-                                    0.85
-                                };
-                                let mut color = hsl_to_rgb_f64(hue, sat, lightness.clamp(0.0, 1.0));
-
-                                if cg.domain_coloring_mode == 2 {
-                                    let log_mag = mag.max(1e-5).ln();
-                                    let mag_grid =
-                                        (log_mag * std::f64::consts::PI * 2.0).sin().abs();
-                                    let arg_grid = (ang * 10.0).sin().abs();
-                                    let grid_shading =
-                                        0.5 + 0.5 * (mag_grid * arg_grid).max(0.0).powf(0.15);
-                                    color.r *= grid_shading as f32;
-                                    color.g *= grid_shading as f32;
-                                    color.b *= grid_shading as f32;
-                                } else if cg.domain_coloring_mode == 3 {
-                                    let grid_re = (fz.re * std::f64::consts::PI * 2.0).sin().abs();
-                                    let grid_im = (fz.im * std::f64::consts::PI * 2.0).sin().abs();
-                                    let grid_shading =
-                                        0.5 + 0.5 * (grid_re * grid_im).max(0.0).powf(0.15);
-                                    color.r *= grid_shading as f32;
-                                    color.g *= grid_shading as f32;
-                                    color.b *= grid_shading as f32;
-                                }
-
-                                let center =
-                                    view.world_to_screen(Point2::new(x + dx * 0.5, y + dy * 0.5));
-                                Self::add_rect(
-                                    vertices,
-                                    indices,
-                                    center,
-                                    (dx * view.scale).abs().max(1.0) as f32,
-                                    (dy * view.scale).abs().max(1.0) as f32,
-                                    color,
-                                );
+                        let fz = flat
+                            .as_ref()
+                            .and_then(|prog| {
+                                grafito_complex::math::complex_opcode::exec_cpu(prog, &[z_cell])
+                            })
+                            .filter(|fz| fz.re.is_finite() && fz.im.is_finite())
+                            .or_else(|| {
+                                parsed
+                                    .eval(&vars)
+                                    .ok()
+                                    .filter(|fz| fz.re.is_finite() && fz.im.is_finite())
+                            });
+                        if let Some(fz) = fz {
+                            let mag = (fz.re * fz.re + fz.im * fz.im).sqrt();
+                            let ang = fz.im.atan2(fz.re);
+                            let hue = (ang + std::f64::consts::PI) / (2.0 * std::f64::consts::PI);
+                            let mut lightness = 0.5;
+                            if cg.domain_coloring_mode == 0
+                                || cg.domain_coloring_mode == 2
+                                || cg.domain_coloring_mode == 3
+                            {
+                                lightness = (mag.max(1e-10).ln().atan()
+                                    / std::f64::consts::FRAC_PI_2)
+                                    * 0.5
+                                    + 0.5;
                             }
+                            let sat = if cg.domain_coloring_mode == 1 {
+                                1.0
+                            } else {
+                                0.85
+                            };
+                            let mut color = hsl_to_rgb_f64(hue, sat, lightness.clamp(0.0, 1.0));
+
+                            if cg.domain_coloring_mode == 2 {
+                                let log_mag = mag.max(1e-5).ln();
+                                let mag_grid = (log_mag * std::f64::consts::PI * 2.0).sin().abs();
+                                let arg_grid = (ang * 10.0).sin().abs();
+                                let grid_shading =
+                                    0.5 + 0.5 * (mag_grid * arg_grid).max(0.0).powf(0.15);
+                                color.r *= grid_shading as f32;
+                                color.g *= grid_shading as f32;
+                                color.b *= grid_shading as f32;
+                            } else if cg.domain_coloring_mode == 3 {
+                                let grid_re = (fz.re * std::f64::consts::PI * 2.0).sin().abs();
+                                let grid_im = (fz.im * std::f64::consts::PI * 2.0).sin().abs();
+                                let grid_shading =
+                                    0.5 + 0.5 * (grid_re * grid_im).max(0.0).powf(0.15);
+                                color.r *= grid_shading as f32;
+                                color.g *= grid_shading as f32;
+                                color.b *= grid_shading as f32;
+                            }
+
+                            let center =
+                                view.world_to_screen(Point2::new(x + dx * 0.5, y + dy * 0.5));
+                            Self::add_rect(
+                                vertices,
+                                indices,
+                                center,
+                                (dx * view.scale).abs().max(1.0) as f32,
+                                (dy * view.scale).abs().max(1.0) as f32,
+                                color,
+                            );
                         }
                     }
                 }

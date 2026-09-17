@@ -1370,12 +1370,24 @@ pub fn define_tool_from_history(name: &str, history: &[String]) -> Result<String
 #[derive(Debug, Clone, Default)]
 pub struct CustomToolStore {
     tools: Vec<CustomToolDef>,
+    /// Época que crece en cada mutación (`upsert`). La piel la usa para
+    /// reconstruir las entradas de paleta solo cuando el store cambia, en
+    /// vez de clonar `name`/`steps`/`keywords` en cada frame.
+    revision: u64,
 }
 
 impl CustomToolStore {
     /// Store vacío.
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            revision: 0,
+        }
+    }
+
+    /// Época de mutación (ver campo `revision`).
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Cantidad de herramientas guardadas.
@@ -1460,6 +1472,7 @@ impl CustomToolStore {
     fn upsert(&mut self, def: CustomToolDef) -> Result<(), String> {
         if let Some(slot) = self.tools.iter_mut().find(|tool| tool.name == def.name) {
             *slot = def;
+            self.revision = self.revision.wrapping_add(1);
             return Ok(());
         }
         if self.tools.len() >= MAX_CUSTOM_TOOLS {
@@ -1468,6 +1481,7 @@ impl CustomToolStore {
             ));
         }
         self.tools.push(def);
+        self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 }

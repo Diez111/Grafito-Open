@@ -1727,22 +1727,46 @@ pub fn assistant_tool_catalog(problem: &str, max_bytes: usize) -> String {
 }
 
 /// Extrae únicamente variables y metadatos visibles, sin rutas, archivos ni caches.
+///
+/// Memoizado por `document.version` en el propio `Document`: el primer envío
+/// tras un commit serializa cada objeto visible una vez; los siguientes
+/// (reintentos, correcciones, pasos del agente) reutilizan las huellas y
+/// solo re-ensamblan (`from_parts`: sort + FNV, sin serde).
 pub fn document_context(document: &Document) -> ImmutableDocumentContext {
+    if let Some((parts, variables)) = document.cached_context_parts() {
+        let objects = parts
+            .into_iter()
+            .map(|(label, kind, fingerprint)| DocumentContextObject {
+                label,
+                kind,
+                fingerprint,
+            })
+            .collect();
+        return ImmutableDocumentContext::from_parts(document.version, variables, objects);
+    }
     let variables = document
         .variables()
         .iter()
         .map(|(name, value)| (name.clone(), *value))
         .collect::<BTreeMap<_, _>>();
+    let mut parts = Vec::new();
     let objects = document
         .objects_iter()
         .filter(|(_, object)| object.is_visible() && !object.contains_private_data())
-        .map(|(_, object)| DocumentContextObject {
-            label: object.label().to_string(),
-            kind: object.name().to_string(),
-            fingerprint: serde_json::to_string(object)
-                .unwrap_or_else(|_| format!("{}:{}", object.name(), object.label())),
+        .map(|(_, object)| {
+            let label = object.label().to_string();
+            let kind = object.name().to_string();
+            let fingerprint = serde_json::to_string(object)
+                .unwrap_or_else(|_| format!("{}:{}", object.name(), object.label()));
+            parts.push((label.clone(), kind.clone(), fingerprint.clone()));
+            DocumentContextObject {
+                label,
+                kind,
+                fingerprint,
+            }
         })
         .collect();
+    document.store_context_parts((parts, variables.clone()));
     ImmutableDocumentContext::from_parts(document.version, variables, objects)
 }
 
@@ -1784,6 +1808,22 @@ mod tests {
 
         assert_ne!(before.digest, after.digest);
         assert_ne!(before.revision, after.revision);
+    }
+
+    #[test]
+    fn context_memo_reuses_fingerprints_within_version() {
+        // Ola 4: sin cambios, el segundo envío reutiliza el memo (mismo
+        // digest y objetos); al mutar, se recalcula.
+        let mut document = Document::new();
+        document.add_object(GeoObject::Point(PointObj::new(Point2::new(1.0, 2.0))));
+        let first = document_context(&document);
+        let second = document_context(&document);
+        assert_eq!(first.digest, second.digest);
+        assert_eq!(first.objects, second.objects);
+        assert!(document.cached_context_parts().is_some());
+        document.set_variable("b".into(), 3.0);
+        let third = document_context(&document);
+        assert_ne!(first.digest, third.digest);
     }
 
     #[test]

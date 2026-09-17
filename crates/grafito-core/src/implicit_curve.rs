@@ -196,6 +196,13 @@ pub fn evaluate_implicit_curve(
     // evaluation so that an error on one side does not silently drop the curve.
     let parsed_lhs = expr::prepare_function_ast(&ic.expr_lhs, variables, &["x", "y"]).ok();
     let parsed_rhs = expr::prepare_function_ast(&ic.expr_rhs, variables, &["x", "y"]).ok();
+    // Opcodes planos una vez por malla (no walk por celda).
+    let flat_lhs = parsed_lhs
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "y", ""));
+    let flat_rhs = parsed_rhs
+        .as_ref()
+        .and_then(|ast| expr::compile_flat_ops(ast, "x", "y", ""));
 
     let dx = (x_max - x_min) / grid_size as f64;
     let dy = (y_max - y_min) / grid_size as f64;
@@ -207,18 +214,28 @@ pub fn evaluate_implicit_curve(
     // filled side as the positive one. Less/LessEq => lhs - rhs <= 0, so the
     // boundary is still at zero and we render the zero contour as usual.
     let eval_cell = |x: f64, y: f64| -> f64 {
-        let lhs = if let Some(ast) = &parsed_lhs {
-            ast.eval_2d("x", x, "y", y)
-        } else {
-            expr::evaluate(&ic.expr_lhs, &[("x".to_string(), x), ("y".to_string(), y)])
-                .unwrap_or(f64::NAN)
-        };
-        let rhs = if let Some(ast) = &parsed_rhs {
-            ast.eval_2d("x", x, "y", y)
-        } else {
-            expr::evaluate(&ic.expr_rhs, &[("x".to_string(), x), ("y".to_string(), y)])
-                .unwrap_or(f64::NAN)
-        };
+        let lhs = flat_lhs
+            .as_ref()
+            .and_then(|ops| expr::eval_opcodes_flat(ops, x, y, 0.0))
+            .or_else(|| {
+                if let Some(ast) = &parsed_lhs {
+                    Some(ast.eval_2d("x", x, "y", y))
+                } else {
+                    expr::evaluate(&ic.expr_lhs, &[("x".to_string(), x), ("y".to_string(), y)]).ok()
+                }
+            })
+            .unwrap_or(f64::NAN);
+        let rhs = flat_rhs
+            .as_ref()
+            .and_then(|ops| expr::eval_opcodes_flat(ops, x, y, 0.0))
+            .or_else(|| {
+                if let Some(ast) = &parsed_rhs {
+                    Some(ast.eval_2d("x", x, "y", y))
+                } else {
+                    expr::evaluate(&ic.expr_rhs, &[("x".to_string(), x), ("y".to_string(), y)]).ok()
+                }
+            })
+            .unwrap_or(f64::NAN);
         if !lhs.is_finite() || !rhs.is_finite() {
             return f64::NAN;
         }

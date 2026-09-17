@@ -928,26 +928,34 @@ pub fn limit_typed(expr: &str, var: &str, at: f64) -> MathResult<f64> {
         Ok(ast) => ast,
         Err(error) => return math_failure(error),
     };
-    if has_proven_squeezed_zero_limit(&ast, var, at) {
+    limit_typed_ast(&ast, var, at, expr)
+}
+
+/// Variante de [`limit_typed`] sobre un AST ya construido (sin re-parsear).
+/// `expr_label` solo alimenta los mensajes de error (el valor no depende
+/// de él). La usa el loop L'Hôpital de Gruntz, que deriva cocientes como
+/// AST y antes los serializaba a texto por iteración para re-parsearlos.
+pub fn limit_typed_ast(ast: &Expr, var: &str, at: f64, expr_label: &str) -> MathResult<f64> {
+    if has_proven_squeezed_zero_limit(ast, var, at) {
         return MathResult::Approximate {
             value: 0.0,
             error_estimate: 0.0,
         };
     }
-    if has_unresolved_oscillatory_singularity(&ast, var, at) {
+    if has_unresolved_oscillatory_singularity(ast, var, at) {
         return MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         });
     }
-    match richardson_limit(&ast, var, at) {
+    match richardson_limit(ast, var, at) {
         Some(estimate) => MathResult::Approximate {
             value: estimate.value,
             error_estimate: estimate.error_estimate,
         },
         None => MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         }),
@@ -985,26 +993,32 @@ pub fn limit_above_typed(expr: &str, var: &str, at: f64) -> MathResult<f64> {
         Ok(ast) => ast,
         Err(error) => return math_failure(error),
     };
-    if has_proven_squeezed_zero_limit(&ast, var, at) {
+    limit_above_typed_ast(&ast, var, at, expr)
+}
+
+/// Variante de [`limit_above_typed`] sobre AST ya construido (ver
+/// [`limit_typed_ast`]).
+pub fn limit_above_typed_ast(ast: &Expr, var: &str, at: f64, expr_label: &str) -> MathResult<f64> {
+    if has_proven_squeezed_zero_limit(ast, var, at) {
         return MathResult::Approximate {
             value: 0.0,
             error_estimate: 0.0,
         };
     }
-    if has_unresolved_oscillatory_singularity(&ast, var, at) {
+    if has_unresolved_oscillatory_singularity(ast, var, at) {
         return MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         });
     }
-    match richardson_one_side_limit(&ast, var, at, 1.0) {
+    match richardson_one_side_limit(ast, var, at, 1.0) {
         Some(estimate) => MathResult::Approximate {
             value: estimate.value,
             error_estimate: estimate.error_estimate,
         },
         None => MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         }),
@@ -1024,26 +1038,32 @@ pub fn limit_below_typed(expr: &str, var: &str, at: f64) -> MathResult<f64> {
         Ok(ast) => ast,
         Err(error) => return math_failure(error),
     };
-    if has_proven_squeezed_zero_limit(&ast, var, at) {
+    limit_below_typed_ast(&ast, var, at, expr)
+}
+
+/// Variante de [`limit_below_typed`] sobre AST ya construido (ver
+/// [`limit_typed_ast`]).
+pub fn limit_below_typed_ast(ast: &Expr, var: &str, at: f64, expr_label: &str) -> MathResult<f64> {
+    if has_proven_squeezed_zero_limit(ast, var, at) {
         return MathResult::Approximate {
             value: 0.0,
             error_estimate: 0.0,
         };
     }
-    if has_unresolved_oscillatory_singularity(&ast, var, at) {
+    if has_unresolved_oscillatory_singularity(ast, var, at) {
         return MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         });
     }
-    match richardson_one_side_limit(&ast, var, at, -1.0) {
+    match richardson_one_side_limit(ast, var, at, -1.0) {
         Some(estimate) => MathResult::Approximate {
             value: estimate.value,
             error_estimate: estimate.error_estimate,
         },
         None => MathResult::DomainError(MathError::LimitDoesNotExist {
-            expression: expr.into(),
+            expression: expr_label.into(),
             variable: var.into(),
             at,
         }),
