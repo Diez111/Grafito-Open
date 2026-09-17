@@ -198,6 +198,12 @@ adversarial ya existente.
   e imprime números base. No es gate de PR por diseño (flaky entre runners,
   sin `critcmp`; ver `docs/architecture.md` §9).
 - `gpu-compute` (gate real): `WGPU_BACKEND=vulkan GRAFITO_REQUIRE_GPU_TESTS=1`.
+- Tests del asistente **serializados** por un candado estático
+  (`rate_limit_test_guard` en `src/lib.rs`, `src/agent.rs` y
+  `tests/remote_transport.rs`): los stubs 429 dejan pausa real y, en
+  paralelo, otro test podía fallar rápido antes de conectar su stub y
+  colgarse en `join` (visto 2026-09-17). Un guard por test, helpers sin
+  candado; 3 corridas 272/272 sin hang.
 
 ## 5. PGO (`scripts/pgo.sh`)
 
