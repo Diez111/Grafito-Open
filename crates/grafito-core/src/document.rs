@@ -238,6 +238,15 @@ pub struct OperationBatch {
     operations: Vec<DocumentOperation>,
 }
 
+/// Contador global de nonces de identidad de documento (ver `cache_nonce`).
+/// `Relaxed` alcanza: solo necesita unicidad por proceso, no orden.
+static CACHE_NONCE_NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Nonce fresco de identidad de documento (serde-default al deserializar).
+fn fresh_cache_nonce() -> u64 {
+    CACHE_NONCE_NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl OperationBatch {
     /// Creates an empty batch.
     pub fn new() -> Self {
@@ -927,6 +936,14 @@ pub struct Document {
     pub last_solution: HashMap<(ObjectId, ObjField), f64>,
     #[serde(skip)]
     pub version: u64,
+    /// Nonce de identidad para caches thread-local keyeados por versión
+    /// (`ORDERED_VISIBLE_CACHE`, `DISPLAY_OVERRIDE_CACHE` en render): dos
+    /// documentos distintos pueden compartir versión (nuevo archivo tras
+    /// cerrar otro) y sin esto el segundo dibuja los ids del primero.
+    /// Fresco en `new`/deserialize, preservado en `clone` (los snapshots
+    /// de undo son el mismo documento lógico y comparten caché).
+    #[serde(skip_serializing, default = "fresh_cache_nonce")]
+    pub cache_nonce: u64,
     #[serde(skip)]
     pub cached_vars_list: CachedVarsList,
     /// Memo de `estimated_bytes` por `version` (Ola 2 B3): el peso solo se
@@ -1076,6 +1093,7 @@ impl Default for Document {
             render_quality: crate::RenderQuality::default(),
             last_solution: HashMap::new(),
             version: 0,
+            cache_nonce: fresh_cache_nonce(),
             cached_vars_list: std::sync::Arc::new(std::sync::Mutex::new(None)),
             estimated_bytes_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             context_parts_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),

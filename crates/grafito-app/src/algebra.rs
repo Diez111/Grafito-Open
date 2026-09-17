@@ -872,70 +872,116 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                             // document revision while an assistant request is pending.
                             if let Some(mut edited) = app.document.get_object(oid).cloned() {
                                 ui.add_space(SPACE_XS);
+                                // T6: respuesta del slider de estilo para
+                                // coalescing por gesto (1 undo por drag).
+                                let mut style_resp: Option<egui::Response> = None;
                                 ui.scope(|ui| {
                                     // Sin overrides de light mode: confiamos en
                                     // los tokens del theme LIGHT definidos en
                                     // grafito-ui/src/theme.rs.
                                     match &mut edited {
                                         GeoObject::Line(l) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut l.width, 0.5..=10.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Circle(c) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut c.width, 0.5..=10.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Function(f) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut f.width, 0.5..=10.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Point(p) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("pt").size(TYPE_XS).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Point3D(p) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("pt").size(TYPE_XS).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut p.size, 1.0..=20.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Polygon(poly) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut poly.width, 0.5..=10.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Polyline(line) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("w").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut line.width, 0.5..=10.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut line.width, 0.5..=10.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         GeoObject::Pencil(pencil) => {
-                                            ui.horizontal(|ui| {
+                                            style_resp = Some(
+                                                ui.horizontal(|ui| {
                                                 ui.add_space(SPACE_LG);
                                                 ui.label(egui::RichText::new("pen").size(TYPE_SM).color(theme.text_tertiary));
-                                                ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true));
-                                            });
+                                                    ui.add(egui::Slider::new(&mut pencil.width, 0.5..=20.0).trailing_fill(true))
+                                                })
+                                                .inner,
+                                            );
                                         }
                                         _ => {}
                                     }
                                 });
+                                // T6: gesto de estilo — captura una vez al
+                                // iniciar el arrastre, commitea al soltar.
+                                let style_key = egui::Id::new((
+                                    crate::app::PANEL_GESTURE_UNDO_KEY,
+                                    ("style", oid),
+                                ));
+                                if style_resp
+                                    .as_ref()
+                                    .is_some_and(|resp| resp.drag_started())
+                                {
+                                    crate::app::panel_gesture_begin(
+                                        ui.ctx(),
+                                        style_key,
+                                        &app.document,
+                                    );
+                                }
+                                let style_dragged = style_resp
+                                    .as_ref()
+                                    .is_some_and(|resp| resp.dragged());
                                 let changed = app
                                     .document
                                     .get_object(oid)
@@ -947,7 +993,11 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                     |object| *object = edited,
                                 ) {
                                     Ok(Some(before)) => {
-                                        snapshot.capture_successful_replacement(before);
+                                        if !style_dragged {
+                                            snapshot.capture_successful_replacement(before);
+                                        }
+                                        // else: el gesto commitea al soltar;
+                                        // se descarta el `before` del frame.
                                     }
                                     Ok(None) => {}
                                     Err(error) => {
@@ -955,6 +1005,18 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                         app.cas_result = message.clone();
                                         app.notify(message, grafito_ui::toast::ToastKind::Error);
                                     }
+                                }
+                                if style_resp
+                                    .as_ref()
+                                    .is_some_and(|resp| resp.drag_stopped())
+                                {
+                                    crate::app::panel_gesture_commit(
+                                        ui.ctx(),
+                                        style_key,
+                                        app.document.version,
+                                        &mut app.undo_stack,
+                                        &mut app.redo_stack,
+                                    );
                                 }
                             }
                         } else if is_sel {

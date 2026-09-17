@@ -43,7 +43,17 @@ grafito-classroom = { path = "crates/grafito-classroom" }
 grafito-tex = { path = "crates/grafito-tex" }
 
 # Window & GPU
-eframe = "0.29"
+# T5: sin `glow` (backend OpenGL no usado; solo wgpu): saca egui_glow +
+# glow + glutin del árbol y del binario. Verificado: ningún uso directo
+# de glow/glutin en `crates/`; el smoke E2E lo confirma.
+eframe = { version = "0.29", default-features = false, features = [
+    "wgpu",
+    "accesskit",
+    "default_fonts",
+    "wayland",
+    "web_screen_reader",
+    "x11",
+] }
 wgpu = "22.0"
 pollster = "0.3"
 

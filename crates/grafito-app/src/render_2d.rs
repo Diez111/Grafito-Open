@@ -27,6 +27,94 @@ type TrigSegments = (Arc<Vec<(Point2, Point2)>>, Arc<Vec<f64>>);
 const _: () = assert!(TEXTURE_GRACE_FRAMES >= 2);
 
 // ── F3-Render caches: fractal / phase / ordered_visible keyed por document.version ──
+/// Clave del caché de ids visibles: `(cache_nonce, version)`. El nonce
+/// distingue documentos con igual versión (ver `Document::cache_nonce`).
+type OrderedVisibleKey = (u64, u64);
+
+/// Cache LRU de texturas `managed` con **liberación diferida por gracia**.
+///
+/// Dropear un `egui::TextureHandle` en el frame de su evicción libera la
+/// textura GPU mientras un submit en vuelo todavía la referencia: wgpu
+/// panicaba con `Texture with 'egui_texid_Managed(N)' label has been
+/// destroyed` (visto al abrir una escena de 2000 rótulos con LRU de 64).
+/// Las evicciones se retiran a `RetentionQueue` y se dropean recién tras
+/// `TEXTURE_GRACE_FRAMES` ticks (mismo patrón que `FillTextureCacheStore`).
+///
+/// `try_insert` (sin evicción) es para cachés de claves no versionadas y
+/// alta cardinalidad (rótulos): al llenarse el llamador cae a un fallback
+/// (ASCII) en vez de churn-ear texturas a 60 Hz.
+struct GracefulTextureCache<K: std::hash::Hash + Eq> {
+    entries: lru::LruCache<K, egui::TextureHandle>,
+    retired: crate::anim_ui::RetentionQueue<egui::TextureHandle>,
+}
+
+impl<K: std::hash::Hash + Eq + Clone> GracefulTextureCache<K> {
+    fn new(cap: std::num::NonZeroUsize) -> Self {
+        Self {
+            entries: lru::LruCache::new(cap),
+            retired: crate::anim_ui::RetentionQueue::new(),
+        }
+    }
+
+    /// Hit con bump O(1); `None` = no está (subir con `insert`/`try_insert`).
+    fn get<Q: ?Sized + std::hash::Hash + Eq>(&mut self, key: &Q) -> Option<egui::TextureHandle>
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        self.entries.get(key).cloned()
+    }
+
+    /// Inserta evictando la LRU (retirada con gracia). Para claves
+    /// versionadas con cardinalidad baja (fractal, domain coloring): el
+    /// churn es bajo y la gracia alcanza.
+    fn insert(&mut self, key: K, handle: egui::TextureHandle) {
+        if let Some(old) = self.entries.put(key, handle) {
+            self.retired.retire(old);
+        }
+    }
+
+    /// Inserta solo si hay lugar (sin evictar). `false` = lleno: el
+    /// llamador debe usar su fallback, no subir más texturas (sin churn
+    /// no hay drops bajo presión y el crash de wgpu queda imposible).
+    fn try_insert(&mut self, key: K, handle: egui::TextureHandle) -> bool {
+        if self.entries.len() >= self.entries.cap().get() {
+            return false;
+        }
+        self.insert(key, handle);
+        true
+    }
+
+    /// Avanza un frame de gracia y dropea las expiradas. Se llama una vez
+    /// por frame dibujado (desde `draw_objects`).
+    fn tick(&mut self) {
+        let _ = self.retired.tick();
+    }
+
+    /// ¿Queda lugar sin evictar? (evita subir una textura que se
+    /// descartaría: el llamador cae a su fallback antes de alocar).
+    fn has_room(&self) -> bool {
+        self.entries.len() < self.entries.cap().get()
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    fn contains<Q: ?Sized + std::hash::Hash + Eq>(&mut self, key: &Q) -> bool
+    where
+        K: std::borrow::Borrow<Q>,
+    {
+        self.entries.get(key).is_some()
+    }
+
+    #[cfg(test)]
+    fn retired_pending(&self) -> usize {
+        self.retired.pending()
+    }
+}
+
 thread_local! {
     // Los valores se guardan como `Arc` para que el cache hit clone solo el
     // puntero (refcount) y no el payload completo (density² segmentos de
@@ -35,7 +123,7 @@ thread_local! {
     // la menos usada (antes `HashMap + keys().next()`, evicción arbitraria).
     static PHASE_PORTRAIT_CACHE: RefCell<lru::LruCache<u64, PhasePortraitSegments>> =
         RefCell::new(lru::LruCache::new(PHASE_RENDER_CACHE_SIZE));
-    static ORDERED_VISIBLE_CACHE: RefCell<Option<(u64, Arc<Vec<ObjectId>>)>> =
+    static ORDERED_VISIBLE_CACHE: RefCell<Option<(OrderedVisibleKey, Arc<Vec<ObjectId>>)>> =
         const { RefCell::new(None) };
     /// Cache de ASTs complejos parseados (ComplexGrid/ComplexMapping) keyed por
     /// la expresión. Evita re-parsear `complex_expr` en cada frame (H10).
@@ -46,8 +134,8 @@ thread_local! {
     /// (version, objeto, expr, bounds, res, modo). Antes cada frame emitía
     /// 40k-90k `rect_filled` (4k-90k shapes); ahora una rasterización por
     /// cambio y un solo `painter.image`.
-    static COMPLEX_GRID_TEXTURES: RefCell<lru::LruCache<u64, egui::TextureHandle>> =
-        RefCell::new(lru::LruCache::new(COMPLEX_GRID_TEXTURE_SIZE));
+    static COMPLEX_GRID_TEXTURES: RefCell<GracefulTextureCache<u64>> =
+        RefCell::new(GracefulTextureCache::new(COMPLEX_GRID_TEXTURE_SIZE));
     /// Streamlines RK4 de VectorField2D en world-space, keyed por
     /// (version, campo, viewport): antes se re-trazaban 25×200×4 evaluaciones
     /// por frame; ahora solo se proyectan a pantalla.
@@ -56,15 +144,15 @@ thread_local! {
     /// Texturas de rótulos TeX keyed por texto: antes cada rótulo teselaba
     /// cientos de `rect_filled` (uno por píxel de tinta) POR FRAME; ahora una
     /// subida por texto y un solo `painter.image` (tinte = color del rótulo).
-    static TEX_LABEL_TEXTURES: RefCell<lru::LruCache<String, egui::TextureHandle>> =
-        RefCell::new(lru::LruCache::new(TEX_LABEL_TEXTURE_CACHE_SIZE));
+    static TEX_LABEL_TEXTURES: RefCell<GracefulTextureCache<String>> =
+        RefCell::new(GracefulTextureCache::new(TEX_LABEL_TEXTURE_CACHE_SIZE));
     /// Texturas de fractales keyed por la misma clave que los píxeles
     /// (`fractal_render_cache_key`): antes cada frame emitía `res²`
     /// `rect_filled` (hasta 160k shapes con `resolution: 400`); ahora una
     /// rasterización por cambio y un solo `painter.image` con `NEAREST`
     /// (misma estética de píxel nítido que los rects en world-space).
-    static FRACTAL_TEXTURES: RefCell<lru::LruCache<u64, egui::TextureHandle>> =
-        RefCell::new(lru::LruCache::new(FRACTAL_TEXTURE_CACHE_SIZE));
+    static FRACTAL_TEXTURES: RefCell<GracefulTextureCache<u64>> =
+        RefCell::new(GracefulTextureCache::new(FRACTAL_TEXTURE_CACHE_SIZE));
     /// Última `document.version` en la que se ejecutó `prune_fill_texture_cache`.
     /// Permite saltar el write lock + barrido LRU cuando el documento no cambió.
     static LAST_FILL_PRUNE_DOC_VERSION: RefCell<Option<u64>> = const { RefCell::new(None) };
@@ -73,7 +161,7 @@ const PHASE_RENDER_CACHE_CAP: usize = 32;
 const COMPLEX_EXPR_CACHE_CAP: usize = 16;
 const COMPLEX_GRID_TEXTURE_CAP: usize = 16;
 const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
-const TEX_LABEL_TEXTURE_CACHE_CAP: usize = 64;
+const TEX_LABEL_TEXTURE_CACHE_CAP: usize = 256;
 const FRACTAL_TEXTURE_CACHE_CAP: usize = 8;
 const DISPLAY_OVERRIDE_CACHE_CAP: usize = 64;
 const TEXT_GALLEY_CACHE_CAP: usize = 64;
@@ -314,7 +402,7 @@ fn cached_fractal_texture(
     pixels: &Arc<Vec<grafito_geometry::fractals::FractalPixel>>,
 ) -> Option<egui::TextureHandle> {
     let key = fractal_render_cache_key(document_version, fr);
-    if let Some(handle) = FRACTAL_TEXTURES.with(|c| c.borrow_mut().get(&key).cloned()) {
+    if let Some(handle) = FRACTAL_TEXTURES.with(|c| c.borrow_mut().get(&key)) {
         return Some(handle);
     }
     let image = fractal_texture_image(pixels, fr.resolution)?;
@@ -324,7 +412,7 @@ fn cached_fractal_texture(
         egui::TextureOptions::NEAREST,
     );
     FRACTAL_TEXTURES.with(|c| {
-        c.borrow_mut().put(key, handle.clone());
+        c.borrow_mut().insert(key, handle.clone());
     });
     Some(handle)
 }
@@ -347,19 +435,95 @@ fn cached_sample_phase_portrait(
     segments
 }
 
-/// Refina discontinuidades (transiciones finito/no-finito) en muestras de
-/// función mediante bisección. Consume un iterador de muestras para no copiar
-/// el guard del RwLock de `samples_or_compute` (hasta 10k muestras por frame
-/// en cache caliente).
-fn refine_function_samples(
-    samples: impl IntoIterator<Item = (f64, Option<f64>)>,
+// Buffers reutilizados por frame para el pipeline de funciones (T1):
+// refine escribe `(x, y)` acá y la proyección lee de acá. Evita ~400
+// allocs de ~10k elementos por frame con 200 funciones (el delta medido
+// es chico, ~0-5%, pero el churn del allocator bajo carga sí importa; la
+// fusión en una sola pasada se probó y PIERDE ~35%, ver test A/B abajo —
+// no fusionar). Se toman con `take_*` y se devuelven con `return_*`
+// (conservan capacidad); no son reentrantes (el draw es single-thread y
+// ningún paso llama a otro draw).
+thread_local! {
+    static SCRATCH_REFINED: std::cell::RefCell<Vec<(f64, Option<f64>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    static SCRATCH_PROJECTED: std::cell::RefCell<Vec<Option<Pos2>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_scratch_refined() -> Vec<(f64, Option<f64>)> {
+    SCRATCH_REFINED.with(|c| {
+        let mut buf = c.borrow_mut();
+        buf.clear();
+        std::mem::take(&mut *buf)
+    })
+}
+
+fn return_scratch_refined(mut buf: Vec<(f64, Option<f64>)>) {
+    buf.clear();
+    SCRATCH_REFINED.with(|c| {
+        let slot = &mut *c.borrow_mut();
+        if slot.capacity() < buf.capacity() {
+            *slot = buf;
+        }
+    });
+}
+
+fn take_scratch_projected() -> Vec<Option<Pos2>> {
+    SCRATCH_PROJECTED.with(|c| {
+        let mut buf = c.borrow_mut();
+        buf.clear();
+        std::mem::take(&mut *buf)
+    })
+}
+
+fn return_scratch_projected(mut buf: Vec<Option<Pos2>>) {
+    buf.clear();
+    SCRATCH_PROJECTED.with(|c| {
+        let slot = &mut *c.borrow_mut();
+        if slot.capacity() < buf.capacity() {
+            *slot = buf;
+        }
+    });
+}
+
+thread_local! {
+    static SCRATCH_PTS_OPT: std::cell::RefCell<Vec<Option<Pos2>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn take_scratch_pts_opt() -> Vec<Option<Pos2>> {
+    SCRATCH_PTS_OPT.with(|c| {
+        let mut buf = c.borrow_mut();
+        buf.clear();
+        std::mem::take(&mut *buf)
+    })
+}
+
+fn return_scratch_pts_opt(mut buf: Vec<Option<Pos2>>) {
+    buf.clear();
+    SCRATCH_PTS_OPT.with(|c| {
+        let slot = &mut *c.borrow_mut();
+        if slot.capacity() < buf.capacity() {
+            *slot = buf;
+        }
+    });
+}
+
+/// Refina discontinuidades (bisección en transiciones finito/no-finito)
+/// sobre `samples`, escribiendo en `out` (buffer reutilizado del llamador).
+/// `samples` suele ser el guard de `samples_or_compute` (sin copiar) o el
+/// `Vec` local del camino integral.
+fn refine_function_samples_into(
+    samples: &[(f64, Option<f64>)],
     expr: &str,
     variables: &BTreeMap<String, f64>,
-) -> Vec<(f64, Option<f64>)> {
-    let mut iter = samples.into_iter().peekable();
-    let mut refined = Vec::new();
+    out: &mut Vec<(f64, Option<f64>)>,
+) {
+    out.clear();
+    out.reserve(samples.len() + 8);
+    let mut iter = samples.iter().copied().peekable();
     while let Some(current) = iter.next() {
-        refined.push(current);
+        out.push(current);
         if let Some(&next) = iter.peek() {
             let (x1, y1_opt) = current;
             let (x2, y2_opt) = next;
@@ -384,13 +548,11 @@ fn refine_function_samples(
                         bad_x = mid;
                     }
                 }
-                refined.push((good_x, Some(best_y)));
+                out.push((good_x, Some(best_y)));
             }
         }
     }
-    refined
 }
-
 /// Devuelve el AST complejo parseado de `expr`, cacheado por string de
 /// expresión (LRU acotado). Evita re-parsear `complex_expr` en cada frame
 /// (H10): el parseo solo ocurre en cache miss.
@@ -409,12 +571,16 @@ fn cached_complex_expr(expr: &str) -> Option<Arc<grafito_complex::ComplexExpr>> 
 /// Evita re-ordenar (layer+ObjectId) y re-filtrar cada vez que se pintan
 /// múltiples pasadas (grid, fills, mappings) en el mismo frame.
 fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Arc<Vec<ObjectId>> {
-    let version = document.version;
+    // Clave (nonce, versión): dos documentos distintos pueden compartir
+    // versión (nuevo archivo tras cerrar otro); sin el nonce el segundo
+    // dibujaría los ids del primero. El nonce se preserva en `clone`
+    // (mismo documento lógico → comparte caché).
+    let key = (document.cache_nonce, document.version);
     // El cache hit clona el `Arc` (refcount), no el `Vec<ObjectId>` completo.
     // Este helper se invoca varias veces por frame (paint plan, cache plan,
     // fills, mappings), así que clonar el payload era un hotspot medible.
-    if let Some((cached_version, ids)) = ORDERED_VISIBLE_CACHE.with(|c| c.borrow().clone()) {
-        if cached_version == version {
+    if let Some((cached_key, ids)) = ORDERED_VISIBLE_CACHE.with(|c| c.borrow().clone()) {
+        if cached_key == key {
             return ids;
         }
     }
@@ -424,7 +590,7 @@ fn cached_ordered_visible_ids(document: &grafito_core::Document) -> Arc<Vec<Obje
             .map(|(id, _)| id)
             .collect(),
     );
-    ORDERED_VISIBLE_CACHE.with(|c| *c.borrow_mut() = Some((version, ids.clone())));
+    ORDERED_VISIBLE_CACHE.with(|c| *c.borrow_mut() = Some((key, ids.clone())));
     ids
 }
 
@@ -746,6 +912,123 @@ fn paint_render_geometry(
 
 fn is_gpu_base_geometry(document: &grafito_core::Document, obj: &GeoObject) -> bool {
     grafito_render::gpu_2d_base_owns(document, obj)
+}
+
+/// Presupuesto de vértices teselados por frame (T1-crash): una escena de
+/// 2000 objetos pedía 329 MB de `egui_vertex_buffer` > tope wgpu de 256 MB
+/// y la app moría con panic. Calibrado con t1f (2000 funciones ≈ 13M
+/// vértices ≈ 260 MB): 6M deja ~2× de margen para chrome UI + atlas +
+/// pasadas GPU. Al excederse se truncan los últimos objetos del plan (los
+/// primeros, normalmente los más importantes, siempre se dibujan) y se
+/// muestra insignia honesta en vez de crashear.
+pub(crate) const FRAME_VERTEX_BUDGET: usize = 6_000_000;
+
+/// Estima vértices teselados de un objeto SIN muestrear (barato): grids y
+/// conteos ya conocidos en el draw. Conservador ~1.5-2.5× sobre lo medido
+/// en t1f (la dirección segura: subestimar crashea, sobrestimar trunca).
+/// Los tipos que el canvas 2D no dibuja (3D, tablas) estiman 0.
+fn estimate_object_vertices(
+    document: &grafito_core::Document,
+    obj: &GeoObject,
+    canvas_rect: Rect,
+) -> usize {
+    use grafito_core::GeoObject as GO;
+    let quality = document.render_quality;
+    let w = canvas_rect.width();
+    let label_extra = if obj.label().is_empty() { 0 } else { 300 };
+    let base = match obj {
+        GO::Function(_) => {
+            // Medido t1f: 3.3-5.5 vértices/muestra; ×6 deja margen sin
+            // disparar el presupuesto en escenas normales (ver test T1h).
+            grafito_core::function_sampling::recommended_grid_size_for_quality(w, quality)
+                .saturating_mul(6)
+        }
+        GO::ParametricCurve2D(_) | GO::PolarCurve(_) | GO::ParametricCurve3D(_) => {
+            grafito_core::function_sampling::recommended_grid_size_for_quality(w, quality)
+                .min(4000)
+                .saturating_mul(6)
+        }
+        GO::VectorField2D(vf) => {
+            let d = vf.density.clamp(5, 128);
+            d.saturating_mul(d).saturating_mul(8)
+        }
+        GO::VectorField3D(_) => 8192,
+        GO::ImplicitCurve(_) => {
+            let g = grafito_core::implicit_curve::recommended_grid_size_for_quality(
+                w,
+                canvas_rect.height(),
+                quality,
+            );
+            // Curvas típicas cubren O(grid) celdas; margen 64×.
+            g.saturating_mul(64).max(4000)
+        }
+        GO::ComplexGrid(cg) => {
+            let res = complex_grid_cpu_resolution(cg.density, quality);
+            res.saturating_mul(res) / 8 + 1000
+        }
+        GO::ComplexMapping(_) | GO::ComplexIntegral(_) => 16384,
+        GO::PhasePortrait(pp) => pp.density.clamp(8, 256).saturating_mul(64),
+        GO::Fractal2D(_) => 64,
+        GO::Histogram(h) => h.data.len().saturating_mul(64).saturating_add(512),
+        GO::BarChart(_) => 2048,
+        GO::PieChart(p) => p.data.len().saturating_mul(64).saturating_add(512),
+        GO::ScatterPlot(s) => s.xs.len().saturating_mul(16).saturating_add(256),
+        GO::BoxPlot(b) => b.data.len().saturating_mul(16).saturating_add(512),
+        GO::RegressionLine(_) => 256,
+        GO::Text(t) => t
+            .content
+            .chars()
+            .count()
+            .saturating_mul(16)
+            .saturating_add(512),
+        GO::Polygon(p) => p.vertices.len().saturating_mul(16).saturating_add(256),
+        GO::Polyline(l) => l.points.len().saturating_mul(16).saturating_add(256),
+        GO::Pencil(p) => p.points.len().saturating_mul(8).saturating_add(256),
+        GO::Point(_) | GO::Line(_) | GO::Segment3D(_) => 64,
+        GO::Circle(_)
+        | GO::Ellipse(_)
+        | GO::Arc(_)
+        | GO::Sector(_)
+        | GO::BezierCurve(_)
+        | GO::Spline(_)
+        | GO::Parabola(_)
+        | GO::Hyperbola(_) => 1024,
+        GO::Transformed(t) => {
+            estimate_object_vertices(document, &t.inner, canvas_rect).saturating_mul(2)
+        }
+        // El canvas 2D no dibuja el resto (catch-all `_ => {}` en el draw):
+        // estimar >0 truncaría escenas inocentes.
+        _ => 0,
+    };
+    base.saturating_add(label_extra)
+}
+
+/// Trunca el plan de pintado al presupuesto de vértices (puro, testeable).
+/// Devuelve (plan_recortado, omitidos). El orden del plan se respeta: lo
+/// primero (capas base) siempre se dibuja.
+fn truncate_paint_plan_by_vertices(
+    document: &grafito_core::Document,
+    plan: Vec<BasePaint2D>,
+    canvas_rect: Rect,
+    budget: usize,
+) -> (Vec<BasePaint2D>, usize) {
+    let mut usado = 0usize;
+    let mut corte = plan.len();
+    for (i, paint) in plan.iter().enumerate() {
+        let id = match paint {
+            BasePaint2D::Cpu(id) | BasePaint2D::Gpu(id) => id,
+        };
+        let costo = document.get_object(*id).map_or(0, |obj| {
+            estimate_object_vertices(document, obj, canvas_rect)
+        });
+        usado = usado.saturating_add(costo);
+        if usado > budget {
+            corte = i;
+            break;
+        }
+    }
+    let omitidos = plan.len().saturating_sub(corte);
+    (plan.into_iter().take(corte).collect(), omitidos)
 }
 
 fn gpu_overlay_keeps_cpu_decorations(obj: &GeoObject) -> bool {
@@ -2750,10 +3033,12 @@ fn p4_display_override(document: &grafito_core::Document, label: &str) -> Displa
     // variables) en cada frame.
     thread_local! {
         static DISPLAY_OVERRIDE_CACHE: RefCell<
-            lru::LruCache<(String, u64), DisplayOverrideEntry>,
+            lru::LruCache<(u64, String, u64), DisplayOverrideEntry>,
         > = RefCell::new(lru::LruCache::new(DISPLAY_OVERRIDE_CACHE_SIZE));
     }
-    let key = (label.to_owned(), document.version);
+    // Clave (nonce, label, versión): el label solo (`"F"` en cada documento
+    // nuevo) colisionaba entre documentos con igual versión.
+    let key = (document.cache_nonce, label.to_owned(), document.version);
     if let Some(hit) = DISPLAY_OVERRIDE_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
         return hit;
     }
@@ -2943,7 +3228,13 @@ pub(crate) fn draw_tex_label(
     let tex_id = TEX_LABEL_TEXTURES.with(|cache| {
         let mut cache = cache.borrow_mut();
         if let Some(handle) = cache.get(key) {
-            return handle.id();
+            return Some(handle.id());
+        }
+        // Caché lleno: NO subir más texturas (fallback ASCII del llamador).
+        // Sin churn no hay drops bajo presión y el panic de wgpu
+        // (`egui_texid_Managed destroyed`) queda imposible.
+        if !cache.has_room() {
+            return None;
         }
         let pixels: Vec<Color32> = bitmap
             .pixels
@@ -2959,9 +3250,22 @@ pub(crate) fn draw_tex_label(
                 .ctx()
                 .load_texture(key.to_owned(), image, egui::TextureOptions::NEAREST);
         let id = handle.id();
-        cache.put(key.to_owned(), handle);
-        id
+        let _ = cache.try_insert(key.to_owned(), handle);
+        Some(id)
     });
+    let Some(tex_id) = tex_id else {
+        // Fallback honesto: texto ASCII en la misma posición (el llamador
+        // ya decidió que el contenido cabe como rótulo).
+        current_theme(painter.ctx()).paint_canvas_text(
+            painter,
+            rect.min,
+            egui::Align2::LEFT_TOP,
+            key,
+            egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+            color,
+        );
+        return;
+    };
     painter.image(
         tex_id,
         rect,
@@ -3889,6 +4193,11 @@ impl GrafitoApp {
         puffin::profile_scope!("draw_objects");
         let painter = clipped_to_canvas(painter, canvas_rect);
         self.prune_fill_texture_cache();
+        // Gracias de texturas managed (un tick = un frame): evita el panic
+        // `egui_texid_Managed destroyed` al evictar con submit en vuelo.
+        TEX_LABEL_TEXTURES.with(|c| c.borrow_mut().tick());
+        FRACTAL_TEXTURES.with(|c| c.borrow_mut().tick());
+        COMPLEX_GRID_TEXTURES.with(|c| c.borrow_mut().tick());
 
         // Cache misses and fill rasterization are admitted in ObjectId order
         // under one frame budget. Deferred curves keep their old cache untouched.
@@ -3918,7 +4227,18 @@ impl GrafitoApp {
             }
         }
 
-        for paint in base_scene_paint_plan(&self.document, gpu_base_active) {
+        // T1-crash: presupuesto de vértices por frame (ver FRAME_VERTEX_BUDGET).
+        // Sin esto, una escena densa pedía >256 MB de vertex buffer y wgpu
+        // mataba el proceso con panic. Se trunca el plan (los primeros
+        // objetos siempre se dibujan) y se avisa con insignia honesta.
+        let (plan, omitidos) = truncate_paint_plan_by_vertices(
+            &self.document,
+            base_scene_paint_plan(&self.document, gpu_base_active),
+            canvas_rect,
+            FRAME_VERTEX_BUDGET,
+        );
+        self.frame_budget_skipped = omitidos;
+        for paint in plan {
             let id = match paint {
                 BasePaint2D::Cpu(id) | BasePaint2D::Gpu(id) => id,
             };
@@ -4018,6 +4338,21 @@ impl GrafitoApp {
                 &hover.label,
                 font,
                 color,
+            );
+        }
+
+        // T1-crash: insignia honesta cuando el presupuesto truncó el plan.
+        // Un solo texto por frame, solo en escenas que exceden el tope GPU.
+        if self.frame_budget_skipped > 0 {
+            painter.text(
+                canvas_rect.left_top() + egui::Vec2::new(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                format!(
+                    "Escena densa: {} objetos omitidos (tope GPU)",
+                    self.frame_budget_skipped
+                ),
+                egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                egui::Color32::from_rgb(255, 190, 90),
             );
         }
     }
@@ -5005,7 +5340,13 @@ impl GrafitoApp {
                     .resolve_expr(&fun.domain_max_expr, fun.domain_max.unwrap_or(world_br.x));
 
                 let variables = &self.document.variables;
-                let samples: Vec<(f64, Option<f64>)> = if fun.is_integral {
+                // T1: `samples` y `projected` son scratch reutilizados por
+                // frame (dos pasadas, 0 allocs en hit); se devuelven al
+                // final del brazo. (La fusión en una pasada pierde ~35%:
+                // ver A/B en tests. No fusionar.)
+                let mut samples = take_scratch_refined();
+                let mut projected = take_scratch_projected();
+                if fun.is_integral {
                     let screen_width = canvas_rect.width() as f64;
                     let world_width = max_x - min_x;
 
@@ -5056,7 +5397,10 @@ impl GrafitoApp {
                         }
                         s.push((x, None));
                     }
-                    refine_function_samples(s, &fun.expr, variables)
+                    refine_function_samples_into(&s, &fun.expr, variables, &mut samples);
+                    projected.extend(samples.iter().map(|&(x, y)| {
+                        y.and_then(|y| function_screen_point(view, canvas_rect, x, y))
+                    }));
                 } else {
                     let domain = (min_x, max_x);
                     let grid_size =
@@ -5071,13 +5415,11 @@ impl GrafitoApp {
                     let guard = grafito_core::function_sampling::samples_or_compute(
                         fun, domain, grid_size, variables,
                     );
-                    refine_function_samples(guard.iter().copied(), &fun.expr, variables)
-                };
-
-                let projected_samples: Vec<Option<Pos2>> = samples
-                    .iter()
-                    .map(|&(x, y)| y.and_then(|y| function_screen_point(view, canvas_rect, x, y)))
-                    .collect();
+                    refine_function_samples_into(&guard, &fun.expr, variables, &mut samples);
+                    projected.extend(samples.iter().map(|&(x, y)| {
+                        y.and_then(|y| function_screen_point(view, canvas_rect, x, y))
+                    }));
+                }
                 let draw_bounds = canvas_rect.expand(1.0);
 
                 // Fill area under curve if fill_color is set
@@ -5112,7 +5454,7 @@ impl GrafitoApp {
                             run.clear();
                         };
 
-                        for ((x, _), curve) in samples.iter().zip(&projected_samples) {
+                        for ((x, _), curve) in samples.iter().zip(&projected) {
                             let baseline = if log_scale {
                                 function_screen_point(view, canvas_rect, *x, 0.0)
                             } else {
@@ -5140,8 +5482,8 @@ impl GrafitoApp {
                     let line_style = fun.line_style;
                     let mut optimized_points = Vec::new();
                     let mut i = 0;
-                    while i < projected_samples.len() {
-                        if let Some(p) = projected_samples[i] {
+                    while i < projected.len() {
+                        if let Some(p) = projected[i] {
                             let px = p.x.round().clamp(draw_bounds.min.x, draw_bounds.max.x);
                             let first_y = p.y;
                             let mut min_y = p.y;
@@ -5151,8 +5493,8 @@ impl GrafitoApp {
                             let mut last_y = p.y;
 
                             let mut j = i + 1;
-                            while j < projected_samples.len() {
-                                if let Some(p2) = projected_samples[j] {
+                            while j < projected.len() {
+                                if let Some(p2) = projected[j] {
                                     if p2.x.round().clamp(draw_bounds.min.x, draw_bounds.max.x)
                                         == px
                                     {
@@ -5254,6 +5596,10 @@ impl GrafitoApp {
                         }
                     }
                 }
+                // T1: devolver los scratch al pool (conservan capacidad para
+                // la próxima función del frame).
+                return_scratch_refined(samples);
+                return_scratch_projected(projected);
             }
             GeoObject::Ellipse(el) => {
                 let stroke = Stroke::new(el.width, to_color32(el.color));
@@ -5749,64 +6095,95 @@ impl GrafitoApp {
                 );
             }
             GeoObject::ParametricCurve2D(pc) => {
-                let steps = 4000;
+                // T1: pasos adaptados al viewport como las funciones (antes
+                // 4000 fijos: una circunferencia a 800px se sobremuestreaba
+                // ~10× y cada curva pesaba ~32k vértices teselados). El
+                // sampler cachea por steps, igual que el grid de funciones.
+                let steps = grafito_core::function_sampling::recommended_grid_size_for_quality(
+                    canvas_rect.width(),
+                    self.document.render_quality,
+                )
+                .min(4000);
                 let samples = parametric_sampling::samples_or_compute_curve_2d(
                     pc,
                     steps,
                     &self.document.variables,
                 );
-                let mut prev: Option<Pos2> = None;
-                for &(x, y) in samples.iter() {
-                    if x.is_finite() && y.is_finite() {
+                // T1: proyectar a scratch y partir en runs (misma regla de
+                // conectividad que el loop anterior) para emitir un PathShape
+                // por run en sólido en vez de un shape por segmento.
+                let mut projected = take_scratch_pts_opt();
+                projected.extend(samples.iter().map(|&(x, y)| {
+                    (x.is_finite() && y.is_finite()).then(|| {
                         let screen = view.world_to_screen(Point2::new(x, y));
-                        let pos = canvas_rect.min + Vec2::new(screen.x, screen.y);
-                        if let Some(prev_pos) = prev {
-                            if !overlay_only
-                                && !style.is_some_and(|style| style.skip_stroke)
-                                && should_connect_screen_points(prev_pos, pos, canvas_rect)
-                            {
+                        canvas_rect.min + Vec2::new(screen.x, screen.y)
+                    })
+                }));
+                let runs = split_continuous_screen_runs(&projected, canvas_rect);
+                return_scratch_pts_opt(projected);
+                if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    let stroke = Stroke::new(pc.width, to_color32(pc.color));
+                    for run in &runs {
+                        if run.len() < 2 {
+                            continue;
+                        }
+                        if matches!(pc.line_style, LineStyle::Solid) {
+                            painter.add(Shape::line(run.clone(), stroke));
+                        } else {
+                            for points in run.windows(2) {
                                 stroke_segment(
                                     &painter,
-                                    prev_pos,
-                                    pos,
-                                    Stroke::new(pc.width, to_color32(pc.color)),
+                                    points[0],
+                                    points[1],
+                                    stroke,
                                     pc.line_style,
                                 );
                             }
                         }
-                        prev = Some(pos);
-                    } else {
-                        prev = None;
                     }
                 }
             }
             GeoObject::PolarCurve(pol) => {
-                let steps = 4000;
+                // T1: idem paramétricas (4000 fijos → adaptativo).
+                let steps = grafito_core::function_sampling::recommended_grid_size_for_quality(
+                    canvas_rect.width(),
+                    self.document.render_quality,
+                )
+                .min(4000);
                 let samples = parametric_sampling::samples_or_compute_polar(
                     pol,
                     steps,
                     &self.document.variables,
                 );
-                let projected: Vec<_> = samples
-                    .iter()
-                    .map(|&(x, y)| {
-                        (x.is_finite() && y.is_finite()).then(|| {
-                            let screen = view.world_to_screen(Point2::new(x, y));
-                            canvas_rect.min + Vec2::new(screen.x, screen.y)
-                        })
+                let mut projected = take_scratch_pts_opt();
+                projected.extend(samples.iter().map(|&(x, y)| {
+                    (x.is_finite() && y.is_finite()).then(|| {
+                        let screen = view.world_to_screen(Point2::new(x, y));
+                        canvas_rect.min + Vec2::new(screen.x, screen.y)
                     })
-                    .collect();
+                }));
                 let runs = split_continuous_screen_runs(&projected, canvas_rect);
+                return_scratch_pts_opt(projected);
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    // T1: un PathShape por run en estilo sólido (antes un
+                    // shape por segmento: ~1600 shapes por curva).
+                    let stroke = Stroke::new(pol.width, to_color32(pol.color));
                     for run in &runs {
-                        for points in run.windows(2) {
-                            stroke_segment(
-                                &painter,
-                                points[0],
-                                points[1],
-                                Stroke::new(pol.width, to_color32(pol.color)),
-                                pol.line_style,
-                            );
+                        if run.len() < 2 {
+                            continue;
+                        }
+                        if matches!(pol.line_style, LineStyle::Solid) {
+                            painter.add(Shape::line(run.clone(), stroke));
+                        } else {
+                            for points in run.windows(2) {
+                                stroke_segment(
+                                    &painter,
+                                    points[0],
+                                    points[1],
+                                    stroke,
+                                    pol.line_style,
+                                );
+                            }
                         }
                     }
                 }
@@ -6069,8 +6446,7 @@ impl GrafitoApp {
                     // emitían res² `rect_filled` por frame (hasta 90k shapes).
                     let res = complex_grid_cpu_resolution(cg.density, self.document.render_quality);
                     let key = complex_grid_texture_key(self.document.version, cg, res);
-                    let cached =
-                        COMPLEX_GRID_TEXTURES.with(|cache| cache.borrow_mut().get(&key).cloned());
+                    let cached = COMPLEX_GRID_TEXTURES.with(|cache| cache.borrow_mut().get(&key));
                     let texture = match cached {
                         Some(handle) => Some(handle),
                         None => {
@@ -6105,7 +6481,7 @@ impl GrafitoApp {
                                     egui::TextureOptions::LINEAR,
                                 );
                                 COMPLEX_GRID_TEXTURES.with(|cache| {
-                                    cache.borrow_mut().put(key, handle.clone());
+                                    cache.borrow_mut().insert(key, handle.clone());
                                 });
                                 handle
                             })
@@ -7270,7 +7646,7 @@ mod clipping_and_resize_tests {
         };
         let fkey = super::fractal_render_cache_key(version, fr);
         assert!(
-            super::FRACTAL_TEXTURES.with(|c| c.borrow_mut().get(&fkey).is_some()),
+            super::FRACTAL_TEXTURES.with(|c| c.borrow_mut().contains(&fkey)),
             "el draw debe poblar la textura del fractal"
         );
         // El memo de stats también quedó poblado (histograma de la escena).
@@ -7665,5 +8041,1106 @@ mod complex_expr_cache_ola4_tests {
             "el segundo acceso debe ser hit del LRU, sin re-parsear"
         );
         assert!(cached_complex_expr("esto no es una expresión válida ((((").is_none());
+    }
+}
+
+#[cfg(test)]
+mod t7_t1_mediciones {
+    use super::*;
+    use grafito_core::{
+        CircleObj, Document, FunctionObj, GeoObject, ImplicitCurveObj, ParametricCurve2DObj,
+        PointObj, PolygonObj, RelationOperator, VectorField2DObj,
+    };
+
+    /// T7: costo aislado de los `format!` de etiquetas (300 labels con los
+    /// patrones reales del draw). El número impreso decide si el scratch
+    /// buffer se justifica; el assert es generoso anti-flake.
+    #[test]
+    fn etiquetas_format_300x6_mide_costo() {
+        let t0 = std::time::Instant::now();
+        let mut acumulado = 0usize;
+        for i in 0..300 {
+            let label = format!("f{i}");
+            let expr = format!("sin({} * x)", i + 1);
+            let a = format!("{label} = {expr}");
+            let b = format!("t{i}({:.2})", i as f64 * 0.01);
+            let c = format!("cos θ = {:.3}   sin θ = {:.3}", 0.5, 0.8660254);
+            let d = format!("z(t) = {:.3} {:+.3}i", 1.0, -2.0);
+            let e = format!("Imagen activa: {expr}");
+            let f = format!("{:.2}", i as f64 * 1.5);
+            acumulado += a.len() + b.len() + c.len() + d.len() + e.len() + f.len();
+        }
+        let dt = t0.elapsed();
+        println!("etiquetas_format_300x6: {dt:?} ({acumulado} bytes)");
+        assert!(acumulado > 10_000, "el bench debe formatear de verdad");
+        assert!(
+            dt.as_millis() < 50,
+            "formateo de etiquetas fuera de órbita: {dt:?}"
+        );
+    }
+
+    /// T1: escena compleja (300 objetos etiquetados) miss/hit en CPU.
+    /// Corre en release para números reales:
+    /// `cargo test --release -p grafito-app --lib t7_t1_mediciones -- --nocapture`.
+    #[test]
+    fn frame_cpu_escena_compleja_300_mide_miss_y_hit() {
+        let mut app = crate::app::dummy_grafito_app();
+        app.document
+            .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        let doc: &mut Document = &mut app.document;
+        for i in 0..200 {
+            let expr = match i % 4 {
+                0 => format!("sin({} * x)", i + 1),
+                1 => format!("x^2 / {} - {i}", i + 2),
+                2 => format!("{i} * cos(x / {})", i + 1),
+                _ => format!("exp(-x^2 / {})", i + 1),
+            };
+            let mut fun = FunctionObj::new(expr);
+            fun.label = format!("f{i}");
+            doc.add_object(GeoObject::Function(fun));
+        }
+        for i in 0..30 {
+            let mut pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+            pc.label = format!("c{i}");
+            doc.add_object(GeoObject::ParametricCurve2D(pc));
+        }
+        for i in 0..20 {
+            doc.add_object(GeoObject::VectorField2D(VectorField2DObj::new("y", "-x")));
+            let _ = i;
+        }
+        for i in 0..10 {
+            doc.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                &format!("x^2 + y^2 - {}", (i + 1) * (i + 1)),
+                "0",
+                RelationOperator::Eq,
+            )));
+        }
+        for i in 0..20 {
+            let x = i as f64 * 0.5;
+            doc.add_object(GeoObject::Point(PointObj::new(Point2::new(x, x.sin()))));
+        }
+        for i in 0..10 {
+            doc.add_object(GeoObject::Circle(CircleObj::new(
+                Point2::new(i as f64, 0.0),
+                1.0,
+            )));
+        }
+        for _ in 0..10 {
+            doc.add_object(GeoObject::Polygon(PolygonObj::new(vec![
+                Point2::new(0.0, 0.0),
+                Point2::new(1.0, 0.0),
+                Point2::new(1.0, 1.0),
+            ])));
+        }
+        assert_eq!(doc.object_count(), 300);
+
+        let ctx = egui::Context::default();
+        let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let (mut miss, mut hit) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let t0 = std::time::Instant::now();
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+            miss = t0.elapsed();
+            let t1 = std::time::Instant::now();
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+            hit = t1.elapsed();
+        });
+        println!("frame_cpu_escena_compleja_300: miss={miss:?} hit={hit:?}");
+    }
+
+    /// T1d-sonda: qué camino de label toman las etiquetas del bench.
+    #[test]
+    fn sonda_camino_label() {
+        for (label, expr) in [("f12", "sin(12 * x)"), ("c3", "cos(t)"), ("t5", "x^2")] {
+            let camino = match super::decide_function_label(label, expr) {
+                super::FunctionLabelDraw::TexRaster { .. } => "bitmap",
+                super::FunctionLabelDraw::Ascii => "ascii",
+            };
+            println!("label {label}={expr}: {camino}");
+        }
+    }
+
+    /// T1b: atribución por categoría — la misma escena por etapas para ver
+    /// dónde van los ~20 ms del hit en release.
+    #[test]
+    fn frame_cpu_atribucion_por_categoria() {
+        let ctx = egui::Context::default();
+        let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let etapa = |nombre: &str, doc: &mut Document| {
+            let mut app = crate::app::dummy_grafito_app();
+            app.document
+                .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+            std::mem::swap(&mut app.document, doc);
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+                let t0 = std::time::Instant::now();
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+                println!("atribucion {nombre}: hit={:?}", t0.elapsed());
+            });
+        };
+        let mut doc = Document::new();
+        doc.set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        for i in 0..200 {
+            let expr = match i % 4 {
+                0 => format!("sin({} * x)", i + 1),
+                1 => format!("x^2 / {} - {i}", i + 2),
+                2 => format!("{i} * cos(x / {})", i + 1),
+                _ => format!("exp(-x^2 / {})", i + 1),
+            };
+            let mut fun = FunctionObj::new(expr);
+            fun.label = format!("f{i}");
+            doc.add_object(GeoObject::Function(fun));
+        }
+        etapa("200_funciones_etiquetadas", &mut doc);
+        for i in 0..30 {
+            let mut pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, std::f64::consts::TAU);
+            pc.label = format!("c{i}");
+            doc.add_object(GeoObject::ParametricCurve2D(pc));
+        }
+        etapa("+30_parametricas", &mut doc);
+        for _ in 0..20 {
+            doc.add_object(GeoObject::VectorField2D(VectorField2DObj::new("y", "-x")));
+        }
+        etapa("+20_vectores", &mut doc);
+        for i in 0..10 {
+            doc.add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                &format!("x^2 + y^2 - {}", (i + 1) * (i + 1)),
+                "0",
+                RelationOperator::Eq,
+            )));
+        }
+        etapa("+10_implicitas", &mut doc);
+        for i in 0..40 {
+            let x = i as f64 * 0.5;
+            if i % 2 == 0 {
+                doc.add_object(GeoObject::Point(PointObj::new(Point2::new(x, x.sin()))));
+            } else {
+                doc.add_object(GeoObject::Circle(CircleObj::new(Point2::new(x, 0.0), 1.0)));
+            }
+        }
+        etapa("+40_puntos_circulos", &mut doc);
+    }
+
+    /// Regresión T1e-bis: los caches thread-local keyeados por versión
+    /// (`ORDERED_VISIBLE_CACHE`, `DISPLAY_OVERRIDE_CACHE`) distinguen
+    /// documentos por `cache_nonce`. Sin nonce, dos documentos con igual
+    /// versión colisionaban y el segundo dibujaba los ids del primero
+    /// (canvas vacío/erróneo al abrir un archivo nuevo).
+    #[test]
+    fn caches_thread_local_distinguen_documentos_con_igual_version() {
+        let mut a = Document::new();
+        let mut b = Document::new();
+        assert_ne!(
+            a.cache_nonce, b.cache_nonce,
+            "cada documento nuevo tiene nonce fresco"
+        );
+        let ida = a
+            .try_add_object(GeoObject::Function(FunctionObj::new("sin(x)")))
+            .expect("agregar en a");
+        let idb = b
+            .try_add_object(GeoObject::Function(FunctionObj::new("cos(x)")))
+            .expect("agregar en b");
+        assert_eq!(a.version, b.version, "misma versión para forzar colisión");
+        let ids_a = super::cached_ordered_visible_ids(&a);
+        // El clon es el mismo documento lógico: comparte nonce y pega en la
+        // misma entrada (el caché guarda una sola; se verifica antes de que
+        // otro documento la desaloje).
+        let clon = a.clone();
+        assert_eq!(clon.cache_nonce, a.cache_nonce);
+        let ids_clon = super::cached_ordered_visible_ids(&clon);
+        assert!(std::sync::Arc::ptr_eq(&ids_a, &ids_clon));
+        let ids_b = super::cached_ordered_visible_ids(&b);
+        assert!(ids_a.contains(&ida) && !ids_a.contains(&idb));
+        assert!(ids_b.contains(&idb) && !ids_b.contains(&ida));
+        // Override con mismo label y versión pero flags distintos.
+        let flags_b = grafito_core::DisplayFlags {
+            show_label: false,
+            ..Default::default()
+        };
+        b.display_flags.insert("F".to_string(), flags_b);
+        let (over_a, vis_a) = super::p4_display_override(&a, "F");
+        let (over_b, vis_b) = super::p4_display_override(&b, "F");
+        assert!(vis_a && vis_b);
+        assert!(over_a.is_none(), "sin flags no hay override");
+        assert!(
+            over_b.as_ref().is_some_and(|estilo| estilo.hide_label),
+            "el flag del otro documento no debe contaminar"
+        );
+    }
+
+    /// T1g: overhead por shape — 1600 segmentos sueltos vs 1 path con
+    /// 1600 puntos (mismos vértices). Aísla el costo de setup por shape en
+    /// el teselador + draw calls.
+    #[test]
+    fn t1g_overhead_por_shape_vs_batcheado() {
+        let ctx = egui::Context::default();
+        let stroke = egui::Stroke::new(2.0, egui::Color32::WHITE);
+        let pts: Vec<Pos2> = (0..1600)
+            .map(|i| Pos2::new(i as f32, (i as f32 * 0.1).sin() * 100.0))
+            .collect();
+        let mut sueltos = Vec::new();
+        for w in pts.windows(2) {
+            sueltos.push(egui::epaint::ClippedShape {
+                clip_rect: Rect::EVERYTHING,
+                shape: egui::epaint::Shape::line_segment([w[0], w[1]], stroke),
+            });
+        }
+        let bacheado = vec![egui::epaint::ClippedShape {
+            clip_rect: Rect::EVERYTHING,
+            shape: egui::epaint::Shape::line(pts.clone(), stroke),
+        }];
+        // Warmup de fuentes/atlas (tessellate exige fuentes cargadas).
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.layer_painter(egui::LayerId::background()).text(
+                Pos2::ZERO,
+                egui::Align2::LEFT_TOP,
+                "w",
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        });
+        let mut t_sueltos = std::time::Duration::MAX;
+        let mut t_bache = std::time::Duration::MAX;
+        for _ in 0..7 {
+            let t0 = std::time::Instant::now();
+            let _ = ctx.tessellate(sueltos.clone(), 1.0);
+            t_sueltos = t_sueltos.min(t0.elapsed());
+            let t1 = std::time::Instant::now();
+            let _ = ctx.tessellate(bacheado.clone(), 1.0);
+            t_bache = t_bache.min(t1.elapsed());
+        }
+        println!("t1g 1600_sueltos: {t_sueltos:?} 1_path_1600: {t_bache:?}");
+    }
+
+    /// T1f-bis: vértices teselados por tipo (50 objetos c/u) para
+    /// calibrar el estimador del presupuesto por frame.
+    #[test]
+    fn t1f_vertices_teselados_por_tipo() {
+        use grafito_core::{ParametricCurve2DObj, VectorField2DObj};
+        fn mide(nombre: &str, montar: impl FnOnce(&mut Document)) {
+            let mut app = crate::app::dummy_grafito_app();
+            app.document
+                .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+            montar(&mut app.document);
+            let n = app.document.object_count();
+            let ctx = egui::Context::default();
+            let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let salida = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+            });
+            let prims = ctx.tessellate(salida.shapes, 1.0);
+            let mut verts = 0usize;
+            for prim in &prims {
+                if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                    verts += mesh.vertices.len();
+                }
+            }
+            let t0 = std::time::Instant::now();
+            let prims2 = ctx.tessellate(
+                {
+                    let salida = ctx.run(egui::RawInput::default(), |ctx| {
+                        let painter = ctx.layer_painter(egui::LayerId::background());
+                        app.draw_objects(&painter, canvas_rect, false, |_| {});
+                    });
+                    salida.shapes
+                },
+                1.0,
+            );
+            let t_tes = t0.elapsed();
+            let _ = prims2;
+            println!(
+                "t1f {nombre}: {n} objs, {verts} vértices ({:.0}/obj), teselado={t_tes:?}",
+                verts as f64 / n as f64
+            );
+        }
+        mide("50_funciones", |doc| {
+            for i in 0..50 {
+                doc.try_add_object(GeoObject::Function(FunctionObj::new(format!(
+                    "sin({} * x)",
+                    i + 1
+                ))))
+                .expect("agregar");
+            }
+        });
+        mide("50_parametricas", |doc| {
+            for _ in 0..50 {
+                doc.try_add_object(GeoObject::ParametricCurve2D(ParametricCurve2DObj::new(
+                    "cos(t)",
+                    "sin(t)",
+                    0.0,
+                    std::f64::consts::TAU,
+                )))
+                .expect("agregar");
+            }
+        });
+        mide("50_vectores", |doc| {
+            for _ in 0..50 {
+                doc.try_add_object(GeoObject::VectorField2D(VectorField2DObj::new("y", "-x")))
+                    .expect("agregar");
+            }
+        });
+        mide("10_implicitas", |doc| {
+            for i in 0..10 {
+                doc.try_add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                    &format!("x^2 + y^2 - {}", (i + 1) * (i + 1)),
+                    "0",
+                    RelationOperator::Eq,
+                )))
+                .expect("agregar");
+            }
+        });
+        mide("50_poligonos", |doc| {
+            for _ in 0..50 {
+                doc.try_add_object(GeoObject::Polygon(PolygonObj::new(vec![
+                    Point2::new(0.0, 0.0),
+                    Point2::new(1.0, 0.0),
+                    Point2::new(1.0, 1.0),
+                ])))
+                .expect("agregar");
+            }
+        });
+    }
+
+    /// T1f: vértices TESEADOS reales (los que van al `egui_vertex_buffer`
+    /// de la GPU) por tamaño de escena. El crash de 2000 objetos pedía
+    /// 329 MB > tope wgpu 256 MB: este test mide la ley de escala y el
+    /// umbral para calibrar `FRAME_VERTEX_BUDGET`.
+    #[test]
+    fn t1f_vertices_teselados_por_tamano_escena() {
+        for n in [50usize, 200, 500, 1000, 2000] {
+            let mut app = crate::app::dummy_grafito_app();
+            app.document
+                .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+            for i in 0..n {
+                let expr = match i % 4 {
+                    0 => format!("sin({} * x)", i + 1),
+                    1 => format!("x^2 / {} - {i}", i + 2),
+                    2 => format!("{i} * cos(x / {})", i + 1),
+                    _ => format!("exp(-x^2 / {})", i + 1),
+                };
+                app.document
+                    .try_add_object(GeoObject::Function(FunctionObj::new(expr)))
+                    .expect("agregar");
+            }
+            let ctx = egui::Context::default();
+            let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let salida = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+            });
+            let prims = ctx.tessellate(salida.shapes, 1.0);
+            let mut verts = 0usize;
+            for prim in &prims {
+                if let egui::epaint::Primitive::Mesh(mesh) = &prim.primitive {
+                    verts += mesh.vertices.len();
+                }
+            }
+            // Vértice egui ≈ 20 B (pos 8 + uv 8 + color 4).
+            let mib = verts as f64 * 20.0 / 1048576.0;
+            println!(
+                "t1f {n} funciones: {} prims, {verts} vértices ≈ {mib:.1} MiB",
+                prims.len()
+            );
+        }
+    }
+
+    /// Regresión del crash real `Texture with 'egui_texid_Managed(N)'
+    /// label has been destroyed` (escena de 2000 rótulos): las evicciones
+    /// de `GracefulTextureCache` deben quedar retiradas (vivas) durante la
+    /// gracia y dropearse recién al cumplirse; `try_insert` no evicta.
+    #[test]
+    fn graceful_texture_cache_evicta_con_gracia_y_try_insert_no_churnea() {
+        let ctx = egui::Context::default();
+        let cap = std::num::NonZeroUsize::new(2).expect("cap 2");
+        let mut cache: super::GracefulTextureCache<u64> = super::GracefulTextureCache::new(cap);
+        let color = egui::ColorImage::new([1, 1], egui::Color32::WHITE);
+        let subir = |ctx: &egui::Context, nombre: &str| {
+            ctx.load_texture(nombre, color.clone(), egui::TextureOptions::NEAREST)
+        };
+        // try_insert respeta el tope sin evictar ni churnear.
+        assert!(cache.try_insert(1, subir(&ctx, "a")));
+        assert!(cache.try_insert(2, subir(&ctx, "b")));
+        assert!(!cache.try_insert(3, subir(&ctx, "c")), "lleno");
+        assert_eq!(cache.len(), 2);
+        assert!(cache.contains(&1) && cache.contains(&2) && !cache.contains(&3));
+        assert_eq!(cache.retired_pending(), 0);
+        // insert evicta con gracia: el handle sigue vivo hasta cumplirla.
+        cache.insert(1, subir(&ctx, "a2"));
+        assert_eq!(cache.retired_pending(), 1, "evicción retirada, no dropeada");
+        for _ in 0..crate::anim_ui::TEXTURE_GRACE_FRAMES {
+            cache.tick();
+        }
+        assert_eq!(cache.retired_pending(), 0, "gracia cumplida");
+        assert!(cache.contains(&1), "la reinserción queda viva");
+    }
+
+    /// Regresión end-to-end: 300 rótulos con caché de 256 no panican
+    /// (los 44 sobrantes caen a ASCII) y el cache queda lleno sin churn.
+    #[test]
+    fn draw_tex_label_300_con_cache_llena_cae_a_ascii_sin_panico() {
+        use egui::Pos2;
+        let ctx = egui::Context::default();
+        let painter = ctx.layer_painter(egui::LayerId::background());
+        let super::FunctionLabelDraw::TexRaster { bitmap, .. } =
+            super::decide_function_label("f", "x^2")
+        else {
+            panic!("el rótulo de prueba debe rasterizar");
+        };
+        let salida = ctx.run(egui::RawInput::default(), |_| {
+            for i in 0..300usize {
+                let key = format!("prueba-{i:03} = x^2");
+                super::draw_tex_label(
+                    &painter,
+                    Pos2::new((i % 20) as f32 * 8.0, (i / 20) as f32 * 8.0),
+                    &key,
+                    &bitmap,
+                    egui::Color32::WHITE,
+                );
+            }
+        });
+        let lleno = super::TEX_LABEL_TEXTURES.with(|c| c.borrow().len());
+        assert_eq!(lleno, 256, "el cache se llena y no churnea");
+        let _ = salida;
+    }
+
+    /// T2: el presupuesto de undo se cumple con documento grande — 500
+    /// funciones + 200 snapshots empujan la pila contra los topes y el
+    /// contador running debe acotar cantidad (≤50) y bytes (≤50 MiB) sin
+    /// escanear la deque. (El RSS real se mide E2E en profiling.md §2.5:
+    /// VmRSS es global al proceso de tests y no sirve para asserts.)
+    #[test]
+    fn t2_presupuesto_undo_acota_pila_con_documento_grande() {
+        use crate::controllers::{DocumentController, MAX_UNDO, MAX_UNDO_BYTES};
+        let mut doc = Document::new();
+        for i in 0..500 {
+            doc.try_add_object(GeoObject::Function(FunctionObj::new(format!(
+                "sin({} * x)",
+                i + 1
+            ))))
+            .expect("agregar");
+        }
+        let peso = doc.estimated_bytes();
+        println!("t2 peso estimado/doc con 500 funciones: {peso} bytes");
+        assert!(peso > 0);
+        let mut ctl = DocumentController::from_parts(
+            doc.clone(),
+            std::collections::VecDeque::new(),
+            std::collections::VecDeque::new(),
+            0,
+        );
+        for _ in 0..200 {
+            ctl.push_snapshot(doc.clone());
+        }
+        let (documento, pila, _, total) = ctl.into_parts();
+        assert!(pila.len() <= MAX_UNDO, "tope de cantidad");
+        assert!(total <= MAX_UNDO_BYTES, "tope de bytes");
+        assert_eq!(documento.object_count(), 500);
+        println!(
+            "t2 pila final: {} snapshots, {total} bytes (topes {MAX_UNDO}/{MAX_UNDO_BYTES})",
+            pila.len()
+        );
+    }
+
+    /// T1h: presupuesto de vértices — la escena de 2000 objetos que
+    /// crasheaba (329 MB > tope wgpu 256 MB) debe exceder el presupuesto,
+    /// y una escena pesada-normal (300 mixtos) debe entrar holgada.
+    #[test]
+    fn t1h_presupuesto_cubre_escena_densa_y_no_muerde_normal() {
+        fn estima(n_funciones: usize) -> usize {
+            let mut doc = Document::new();
+            doc.set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+            for i in 0..n_funciones {
+                doc.try_add_object(GeoObject::Function(FunctionObj::new(format!(
+                    "sin({} * x)",
+                    i + 1
+                ))))
+                .expect("agregar");
+            }
+            let rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let mut total = 0usize;
+            for (_, obj) in doc.objects_iter() {
+                total = total.saturating_add(super::estimate_object_vertices(&doc, obj, rect));
+            }
+            total
+        }
+        let densa = estima(2000);
+        let normal = estima(300);
+        println!(
+            "t1h estimado 2000={densa} 300={normal} (tope {})",
+            super::FRAME_VERTEX_BUDGET
+        );
+        assert!(
+            densa > super::FRAME_VERTEX_BUDGET,
+            "la escena que crasheaba debe exceder el presupuesto"
+        );
+        assert!(
+            normal * 2 < super::FRAME_VERTEX_BUDGET,
+            "escena normal con 2× de margen"
+        );
+    }
+
+    /// T1h-bis: truncado end-to-end — dibujar la escena densa no panicquea
+    /// y marca omitidos; la escena chica marca 0.
+    #[test]
+    fn t1h_truncado_end_to_end_marca_omitidos() {
+        let mut app = crate::app::dummy_grafito_app();
+        app.document
+            .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        for i in 0..2000 {
+            app.document
+                .try_add_object(GeoObject::Function(FunctionObj::new(format!(
+                    "sin({} * x)",
+                    i + 1
+                ))))
+                .expect("agregar");
+        }
+        let ctx = egui::Context::default();
+        let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+        });
+        assert!(
+            app.frame_budget_skipped > 0,
+            "la escena densa debe truncar en vez de crashear"
+        );
+        let mut chica = crate::app::dummy_grafito_app();
+        chica
+            .document
+            .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+        chica
+            .document
+            .try_add_object(GeoObject::Function(FunctionObj::new("sin(x)")))
+            .expect("agregar");
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            chica.draw_objects(&painter, canvas_rect, false, |_| {});
+        });
+        assert_eq!(chica.frame_budget_skipped, 0);
+    }
+
+    /// T1h-ter: pin de cobertura — toda variante dibujada en
+    /// `draw_object_styled` debe estar explícita en `estimate_object_vertices`
+    /// (el catch-all `_ => 0` es solo para lo no dibujado). Si alguien agrega
+    /// un brazo de dibujo, este test obliga a estimarlo.
+    #[test]
+    fn t1h_estimador_cubre_todas_las_variantes_dibujadas() {
+        let source = include_str!("render_2d.rs");
+        let draw_start = source
+            .find("pub(crate) fn draw_object_styled(")
+            .expect("draw_object_styled existe");
+        let draw_end = source[draw_start..]
+            .find("\n    pub(crate) fn ")
+            .map(|i| draw_start + i)
+            .unwrap_or(source.len());
+        let draw_body = &source[draw_start..draw_end];
+        let est_start = source
+            .find("fn estimate_object_vertices(")
+            .expect("estimador existe");
+        let est_end = source[est_start..]
+            .find("\nfn truncate_paint_plan_by_vertices(")
+            .map(|i| est_start + i)
+            .unwrap_or(source.len());
+        let est_body = &source[est_start..est_end];
+        let mut faltan = Vec::new();
+        // Brazos `GeoObject::X` del draw (incluye `A(_) | B(_)` múltiples).
+        for caps in draw_body.split("GeoObject::").skip(1).map(|resto| {
+            resto
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<String>()
+        }) {
+            if caps.is_empty() || caps == "Transformed" {
+                continue;
+            }
+            // El estimador la nombra como `GO::X` (o cae en `_`, que acá
+            // está prohibido para variantes dibujadas).
+            if !est_body.contains(&format!("GO::{caps}")) {
+                faltan.push(caps);
+            }
+        }
+        assert!(
+            faltan.is_empty(),
+            "variantes dibujadas sin estimador explícito: {faltan:?}"
+        );
+    }
+
+    /// T1e: cuenta shapes y vértices por categoría (el crash de 2000
+    /// objetos pide 329 MB de vertex buffer > tope wgpu 256 MB). Usa
+    /// `FullOutput.shapes` post-draw, sin GPU.
+    #[test]
+    fn t1e_formas_y_vertices_por_categoria() {
+        use grafito_core::{CircleObj, FunctionObj, GeoObject, ImplicitCurveObj};
+        fn cuenta(nombre: &str, mut montar: impl FnMut(&mut Document)) {
+            let mut app = crate::app::dummy_grafito_app();
+            app.document
+                .set_view(grafito_geometry::ViewTransform::new(800.0, 600.0));
+            montar(&mut app.document);
+            let ctx = egui::Context::default();
+            let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+            let salida = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+            });
+            let mut formas = 0usize;
+            let mut vertices = 0usize;
+            let mut hist = std::collections::BTreeMap::new();
+            for shape in salida.shapes.iter().map(|s| &s.shape) {
+                formas += 1;
+                let nombre = match shape {
+                    egui::epaint::Shape::Vec(_) => "Vec",
+                    egui::epaint::Shape::Path(_) => "Path",
+                    egui::epaint::Shape::Mesh(_) => "Mesh",
+                    egui::epaint::Shape::QuadraticBezier(_) => "QBez",
+                    egui::epaint::Shape::CubicBezier(_) => "CBez",
+                    egui::epaint::Shape::Rect(_) => "Rect",
+                    egui::epaint::Shape::Circle(_) => "Circle",
+                    egui::epaint::Shape::Ellipse(_) => "Ellipse",
+                    egui::epaint::Shape::Text(_) => "Text",
+                    egui::epaint::Shape::LineSegment { .. } => "Seg",
+                    egui::epaint::Shape::Noop => "Noop",
+                    egui::epaint::Shape::Callback(_) => "Cb",
+                };
+                *hist.entry(nombre).or_insert(0) += 1;
+                vertices += match shape {
+                    egui::epaint::Shape::Vec(_) => 0,
+                    egui::epaint::Shape::Path(p) => p.points.len(),
+                    egui::epaint::Shape::Mesh(m) => m.vertices.len(),
+                    egui::epaint::Shape::QuadraticBezier(b) => b.points.len(),
+                    egui::epaint::Shape::CubicBezier(b) => b.points.len(),
+                    egui::epaint::Shape::Rect(_) | egui::epaint::Shape::Circle(_) => 4,
+                    egui::epaint::Shape::Ellipse(_) => 64,
+                    egui::epaint::Shape::Text(t) => t.galley.num_vertices,
+                    egui::epaint::Shape::LineSegment { points, .. } => points.len(),
+                    egui::epaint::Shape::Noop => 0,
+                    egui::epaint::Shape::Callback(_) => 0,
+                };
+            }
+            println!("t1e {nombre}: {formas} shapes, ~{vertices} vértices {hist:?}");
+        }
+        cuenta("vacio", |_| {});
+        cuenta("50_funciones", |doc| {
+            for i in 0..50 {
+                doc.try_add_object(GeoObject::Function(FunctionObj::new(format!(
+                    "sin({} * x)",
+                    i + 1
+                ))))
+                .expect("agregar");
+            }
+        });
+        cuenta("50_vectores", |doc| {
+            for _ in 0..50 {
+                doc.try_add_object(GeoObject::VectorField2D(VectorField2DObj::new("y", "-x")))
+                    .expect("agregar");
+            }
+        });
+        cuenta("10_implicitas", |doc| {
+            for i in 0..10 {
+                doc.try_add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                    &format!("x^2 + y^2 - {}", (i + 1) * (i + 1)),
+                    "0",
+                    RelationOperator::Eq,
+                )))
+                .expect("agregar");
+            }
+        });
+        cuenta("50_funciones_etiquetadas", |doc| {
+            for i in 0..50 {
+                let mut fun = FunctionObj::new(format!("sin({} * x)", i + 1));
+                fun.label = format!("f{i}");
+                doc.try_add_object(GeoObject::Function(fun))
+                    .expect("agregar");
+            }
+        });
+        cuenta("50_circulos", |doc| {
+            for i in 0..50 {
+                doc.try_add_object(GeoObject::Circle(CircleObj::new(
+                    Point2::new(f64::from(i), 0.0),
+                    1.0,
+                )))
+                .expect("agregar");
+            }
+        });
+    }
+
+    /// T1c: aísla el pipeline por función (muestreo + refine + proyección,
+    /// sin shapes ni labels) frente al draw completo, con y sin etiquetas.
+    ///
+    /// Incluye la variante fusionada (una sola pasada) como función local:
+    /// el A/B la midió ~35% MÁS lenta que dos pasadas (V1 3.43 ms vs V3
+    /// 4.61 ms intercalados), así que producción usa dos pasadas con
+    /// scratch y esto queda como registro del negativo. No fusionar.
+    #[allow(clippy::too_many_arguments)]
+    fn fusionada_una_pasada(
+        samples: &[(f64, Option<f64>)],
+        expr: &str,
+        variables: &std::collections::BTreeMap<String, f64>,
+        view: &grafito_geometry::ViewTransform,
+        canvas_rect: Rect,
+        out: &mut Vec<(f64, Option<Pos2>)>,
+    ) {
+        out.clear();
+        out.reserve(samples.len() + 8);
+        let mut iter = samples.iter().copied().peekable();
+        while let Some((x1, y1_opt)) = iter.next() {
+            out.push((
+                x1,
+                y1_opt.and_then(|y1| super::function_screen_point(view, canvas_rect, x1, y1)),
+            ));
+            if let Some(&(x2, y2_opt)) = iter.peek() {
+                if y1_opt.is_some() != y2_opt.is_some() {
+                    let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
+                    let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
+                    let mut best_y = if let Some(y1) = y1_opt {
+                        y1
+                    } else {
+                        y2_opt.unwrap_or(0.0)
+                    };
+                    for _ in 0..24 {
+                        let mid = (good_x + bad_x) * 0.5;
+                        if let Ok(y) =
+                            grafito_geometry::expr::eval_function_with_vars(expr, mid, variables)
+                        {
+                            if y.is_finite() {
+                                good_x = mid;
+                                best_y = y;
+                            } else {
+                                bad_x = mid;
+                            }
+                        } else {
+                            bad_x = mid;
+                        }
+                    }
+                    out.push((
+                        good_x,
+                        super::function_screen_point(view, canvas_rect, good_x, best_y),
+                    ));
+                }
+            }
+        }
+    }
+    #[test]
+    fn frame_cpu_pipeline_vs_draw_y_etiquetas() {
+        use grafito_core::function_sampling;
+        let mut app = crate::app::dummy_grafito_app();
+        let view = grafito_geometry::ViewTransform::new(800.0, 600.0);
+        app.document.set_view(view);
+        for i in 0..200 {
+            let expr = match i % 4 {
+                0 => format!("sin({} * x)", i + 1),
+                1 => format!("x^2 / {} - {i}", i + 2),
+                2 => format!("{i} * cos(x / {})", i + 1),
+                _ => format!("exp(-x^2 / {})", i + 1),
+            };
+            let mut fun = FunctionObj::new(expr);
+            fun.label = format!("f{i}");
+            app.document.add_object(GeoObject::Function(fun));
+        }
+        let ctx = egui::Context::default();
+        let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let grid = function_sampling::recommended_grid_size_for_quality(
+            canvas_rect.width(),
+            app.document.render_quality,
+        );
+        println!("pipeline: grid_size={grid}");
+        // Calienta cachés.
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            app.draw_objects(&painter, canvas_rect, false, |_| {});
+        });
+        // (a) A/B/C intercalado: V1 = dos pasadas con `Vec` frescos (código
+        // viejo), V2 = dos pasadas con buffers reutilizados, V3 = una pasada
+        // fusionada con scratch. Mismo trabajo, min de cada uno.
+        fn refina_dos_pasadas(
+            guard: &[(f64, Option<f64>)],
+            expr: &str,
+            variables: &std::collections::BTreeMap<String, f64>,
+            view: &grafito_geometry::ViewTransform,
+            canvas_rect: Rect,
+            refinado: &mut Vec<(f64, Option<f64>)>,
+            proyectado: &mut Vec<Option<Pos2>>,
+        ) {
+            refinado.clear();
+            refinado.reserve(guard.len() + 8);
+            let mut iter = guard.iter().copied().peekable();
+            while let Some(current) = iter.next() {
+                refinado.push(current);
+                if let Some(&next) = iter.peek() {
+                    let (x1, y1_opt) = current;
+                    let (x2, y2_opt) = next;
+                    if y1_opt.is_some() != y2_opt.is_some() {
+                        let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
+                        let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
+                        let mut best_y = if let Some(y1) = y1_opt {
+                            y1
+                        } else {
+                            y2_opt.unwrap_or(0.0)
+                        };
+                        for _ in 0..24 {
+                            let mid = (good_x + bad_x) * 0.5;
+                            if let Ok(y) = grafito_geometry::expr::eval_function_with_vars(
+                                expr, mid, variables,
+                            ) {
+                                if y.is_finite() {
+                                    good_x = mid;
+                                    best_y = y;
+                                } else {
+                                    bad_x = mid;
+                                }
+                            } else {
+                                bad_x = mid;
+                            }
+                        }
+                        refinado.push((good_x, Some(best_y)));
+                    }
+                }
+            }
+            proyectado.clear();
+            proyectado.extend(refinado.iter().map(|&(x, y)| {
+                y.and_then(|y| super::function_screen_point(view, canvas_rect, x, y))
+            }));
+        }
+        let mut v1 = std::time::Duration::MAX;
+        let mut v2 = std::time::Duration::MAX;
+        let mut v3 = std::time::Duration::MAX;
+        let mut v5 = std::time::Duration::MAX;
+        let mut buf_a: Vec<(f64, Option<f64>)> = Vec::new();
+        let mut buf_b: Vec<Option<Pos2>> = Vec::new();
+        for _ in 0..7 {
+            // V1: todo fresco por función.
+            let t0 = std::time::Instant::now();
+            for _ in 0..10 {
+                for (_, obj) in app.document.objects_iter() {
+                    if let GeoObject::Function(fun) = obj {
+                        let (min_x, max_x) = (-8.0, 8.0);
+                        let guard = function_sampling::samples_or_compute(
+                            fun,
+                            (min_x, max_x),
+                            grid,
+                            &app.document.variables,
+                        );
+                        // V1: dos pasadas con `Vec` frescos por función
+                        // (bisección real, idéntica a producción).
+                        let mut refinado: Vec<(f64, Option<f64>)> =
+                            Vec::with_capacity(guard.len() + 8);
+                        let mut iter = guard.iter().copied().peekable();
+                        while let Some(current) = iter.next() {
+                            refinado.push(current);
+                            if let Some(&next) = iter.peek() {
+                                let (x1, y1_opt) = current;
+                                let (x2, y2_opt) = next;
+                                if y1_opt.is_some() != y2_opt.is_some() {
+                                    let mut good_x = if y1_opt.is_some() { x1 } else { x2 };
+                                    let mut bad_x = if y1_opt.is_some() { x2 } else { x1 };
+                                    let mut best_y = if let Some(y1) = y1_opt {
+                                        y1
+                                    } else {
+                                        y2_opt.unwrap_or(0.0)
+                                    };
+                                    for _ in 0..24 {
+                                        let mid = (good_x + bad_x) * 0.5;
+                                        if let Ok(y) =
+                                            grafito_geometry::expr::eval_function_with_vars(
+                                                &fun.expr,
+                                                mid,
+                                                &app.document.variables,
+                                            )
+                                        {
+                                            if y.is_finite() {
+                                                good_x = mid;
+                                                best_y = y;
+                                            } else {
+                                                bad_x = mid;
+                                            }
+                                        } else {
+                                            bad_x = mid;
+                                        }
+                                    }
+                                    refinado.push((good_x, Some(best_y)));
+                                }
+                            }
+                        }
+                        let proyectado: Vec<Option<Pos2>> = refinado
+                            .iter()
+                            .map(|&(x, y)| {
+                                y.and_then(|y| {
+                                    super::function_screen_point(&view, canvas_rect, x, y)
+                                })
+                            })
+                            .collect();
+                        std::hint::black_box(proyectado);
+                    }
+                }
+            }
+            v1 = v1.min(t0.elapsed() / 10);
+            // V2: dos pasadas, buffers locales reutilizados.
+            let t1 = std::time::Instant::now();
+            for _ in 0..10 {
+                for (_, obj) in app.document.objects_iter() {
+                    if let GeoObject::Function(fun) = obj {
+                        let (min_x, max_x) = (-8.0, 8.0);
+                        let guard = function_sampling::samples_or_compute(
+                            fun,
+                            (min_x, max_x),
+                            grid,
+                            &app.document.variables,
+                        );
+                        refina_dos_pasadas(
+                            &guard,
+                            &fun.expr,
+                            &app.document.variables,
+                            &view,
+                            canvas_rect,
+                            &mut buf_a,
+                            &mut buf_b,
+                        );
+                        std::hint::black_box(&buf_b);
+                    }
+                }
+            }
+            v2 = v2.min(t1.elapsed() / 10);
+            // V3: fusionado con `Vec` fresco (el scratch de producción
+            // ya no tiene ese tipo; el A/B del 2026-09-17 mostró que la
+            // maquinaria take/return no explica la diferencia).
+            let t2 = std::time::Instant::now();
+            for _ in 0..10 {
+                for (_, obj) in app.document.objects_iter() {
+                    if let GeoObject::Function(fun) = obj {
+                        let (min_x, max_x) = (-8.0, 8.0);
+                        let guard = function_sampling::samples_or_compute(
+                            fun,
+                            (min_x, max_x),
+                            grid,
+                            &app.document.variables,
+                        );
+                        let mut fusionado: Vec<(f64, Option<Pos2>)> = Vec::new();
+                        fusionada_una_pasada(
+                            &guard,
+                            &fun.expr,
+                            &app.document.variables,
+                            &view,
+                            canvas_rect,
+                            &mut fusionado,
+                        );
+                        std::hint::black_box(fusionado);
+                    }
+                }
+            }
+            v3 = v3.min(t2.elapsed() / 10);
+            // V5: repite V3 para confirmar estabilidad del número.
+            let t3 = std::time::Instant::now();
+            for _ in 0..10 {
+                for (_, obj) in app.document.objects_iter() {
+                    if let GeoObject::Function(fun) = obj {
+                        let (min_x, max_x) = (-8.0, 8.0);
+                        let guard = function_sampling::samples_or_compute(
+                            fun,
+                            (min_x, max_x),
+                            grid,
+                            &app.document.variables,
+                        );
+                        let mut out: Vec<(f64, Option<Pos2>)> = Vec::new();
+                        fusionada_una_pasada(
+                            &guard,
+                            &fun.expr,
+                            &app.document.variables,
+                            &view,
+                            canvas_rect,
+                            &mut out,
+                        );
+                        std::hint::black_box(out);
+                    }
+                }
+            }
+            v5 = v5.min(t3.elapsed() / 10);
+        }
+        // (b) draw completo con etiquetas (7 repeticiones, min).
+        let mut draw_con = std::time::Duration::MAX;
+        for _ in 0..7 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                let t = std::time::Instant::now();
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+                draw_con = draw_con.min(t.elapsed());
+            });
+        }
+        // (c) draw sin etiquetas.
+        for (_, obj) in app.document.objects_iter_mut() {
+            if let GeoObject::Function(fun) = obj {
+                fun.label.clear();
+            }
+        }
+        let mut draw_sin = std::time::Duration::MAX;
+        for _ in 0..7 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                let t = std::time::Instant::now();
+                app.draw_objects(&painter, canvas_rect, false, |_| {});
+                draw_sin = draw_sin.min(t.elapsed());
+            });
+        }
+        // (d) draw con auto-labels (`F₃₉`: letra + subíndice). Antes de los
+        // glifos ₀-₉ caían al camino ASCII (~50 µs/label de teselado); ahora
+        // deben costar como los explícitos (bitmap cacheado).
+        for (_, obj) in app.document.objects_iter_mut() {
+            if let GeoObject::Function(fun) = obj {
+                fun.label.clear();
+            }
+        }
+        // Re-etiquetar vía auto-label: quitar y re-agregar regenera `Fₙ`.
+        let mut auto_app = crate::app::dummy_grafito_app();
+        auto_app.document.set_view(view);
+        for i in 0..200 {
+            let expr = match i % 4 {
+                0 => format!("sin({} * x)", i + 1),
+                1 => format!("x^2 / {} - {i}", i + 2),
+                2 => format!("{i} * cos(x / {})", i + 1),
+                _ => format!("exp(-x^2 / {})", i + 1),
+            };
+            auto_app
+                .document
+                .try_add_object(GeoObject::Function(FunctionObj::new(expr)))
+                .expect("agregar");
+        }
+        assert_eq!(auto_app.document.object_count(), 200);
+        let first_label = match auto_app.document.objects_iter().next() {
+            Some((_, GeoObject::Function(f))) => f.label.clone(),
+            _ => "SIN-FUNCIONES".to_string(),
+        };
+        let mut draw_auto = std::time::Duration::MAX;
+        let mut auto_shapes = 0usize;
+        for _ in 0..7 {
+            let salida = ctx.run(egui::RawInput::default(), |ctx| {
+                let painter = ctx.layer_painter(egui::LayerId::background());
+                let t = std::time::Instant::now();
+                auto_app.draw_objects(&painter, canvas_rect, false, |_| {});
+                draw_auto = draw_auto.min(t.elapsed());
+            });
+            auto_shapes = salida.shapes.len();
+        }
+        println!("pipeline_V1_fresco: {v1:?} pipeline_V2_reuso: {v2:?} pipeline_V3_fusion: {v3:?} pipeline_V5_fusion_fresco: {v5:?} draw_con_etiquetas: {draw_con:?} draw_sin_etiquetas: {draw_sin:?} draw_auto_labels: {draw_auto:?} ({auto_shapes} shapes, primera etiqueta: {first_label:?})");
+        // Pin end-to-end del camino bitmap para auto-labels: la escena
+        // auto-etiquetada debe emitir Mesh (blits cacheados), cero Text
+        // (teselado por frame). Si un auto-label pierde cobertura de glifos,
+        // vuelve al camino ASCII y este assert lo caza.
+        let salida_auto = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            auto_app.draw_objects(&painter, canvas_rect, false, |_| {});
+        });
+        let mut n_mesh = 0usize;
+        let mut n_text = 0usize;
+        for shape in salida_auto.shapes.iter().map(|s| &s.shape) {
+            match shape {
+                egui::epaint::Shape::Mesh(_) => n_mesh += 1,
+                egui::epaint::Shape::Text(_) => n_text += 1,
+                _ => {}
+            }
+        }
+        println!("auto_labels: {n_mesh} blits bitmap, {n_text} textos");
+        assert!(n_mesh >= 100, "los auto-labels deben blitear bitmaps");
+        assert_eq!(n_text, 0, "ningún auto-label por camino ASCII");
     }
 }

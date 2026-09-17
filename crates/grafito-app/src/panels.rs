@@ -2417,25 +2417,62 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                             "p = {value:.3} en [{:.3}, {:.3}] · las funciones con `p` se re-muestrean solas",
                                             live.min, live.max
                                         ));
+                                        // T6: un arrastre = una sola entrada de undo (el
+                                        // `before` vive en memoria temporal hasta soltar).
+                                        let gesture_key = egui::Id::new((
+                                            crate::app::PANEL_GESTURE_UNDO_KEY,
+                                            "live-p",
+                                        ));
+                                        if response.drag_started() {
+                                            crate::app::panel_gesture_begin(
+                                                ui.ctx(),
+                                                gesture_key,
+                                                &app.document,
+                                            );
+                                        }
                                         if response.changed() {
-                                            let mut snapshot =
-                                                crate::app::DeferredPanelSnapshot::new(
-                                                    app.undo_stack.len(),
-                                                );
-                                            snapshot.capture(&app.document);
-                                            if let Err(error) =
-                                                app.document.set_live_param("p", value)
-                                            {
-                                                let message =
-                                                    format!("Parámetro vivo: {error}");
-                                                app.cas_result = message.clone();
-                                                app.notify(
-                                                    message,
-                                                    grafito_ui::toast::ToastKind::Error,
+                                            if response.dragged() {
+                                                // Gesto en curso: mutar sin pushear.
+                                                if let Err(error) =
+                                                    app.document.set_live_param("p", value)
+                                                {
+                                                    let message =
+                                                        format!("Parámetro vivo: {error}");
+                                                    app.cas_result = message.clone();
+                                                    app.notify(
+                                                        message,
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                            } else {
+                                                let mut snapshot =
+                                                    crate::app::DeferredPanelSnapshot::new(
+                                                        app.undo_stack.len(),
+                                                    );
+                                                snapshot.capture(&app.document);
+                                                if let Err(error) =
+                                                    app.document.set_live_param("p", value)
+                                                {
+                                                    let message =
+                                                        format!("Parámetro vivo: {error}");
+                                                    app.cas_result = message.clone();
+                                                    app.notify(
+                                                        message,
+                                                        grafito_ui::toast::ToastKind::Error,
+                                                    );
+                                                }
+                                                snapshot.save_if_semantically_changed(
+                                                    &mut app.document,
+                                                    &mut app.undo_stack,
+                                                    &mut app.redo_stack,
                                                 );
                                             }
-                                            snapshot.save_if_semantically_changed(
-                                                &mut app.document,
+                                        }
+                                        if response.drag_stopped() {
+                                            crate::app::panel_gesture_commit(
+                                                ui.ctx(),
+                                                gesture_key,
+                                                app.document.version,
                                                 &mut app.undo_stack,
                                                 &mut app.redo_stack,
                                             );

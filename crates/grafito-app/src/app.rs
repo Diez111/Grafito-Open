@@ -1154,6 +1154,44 @@ impl DeferredPanelSnapshot {
     }
 }
 
+/// Clave base para el `before` por gesto en memoria temporal egui (el
+/// segundo componente identifica el slider: `"live-p"`, `("style", oid)`…).
+pub(crate) const PANEL_GESTURE_UNDO_KEY: &str = "panel_gesture_undo";
+
+/// Guarda el `before` una sola vez al iniciar un arrastre de slider de
+/// panel. Sin esto, cada frame con cambio pushea un `Document` entero e
+/// inunda el undo a mitad del gesto (los sliders del canvas ya usan este
+/// patrón con `CANVAS_SLIDER_UNDO_KEY`; punto-arrastre usa
+/// `point_drag_has_mutated`). Idempotente por clave.
+pub(crate) fn panel_gesture_begin(ctx: &egui::Context, key: egui::Id, document: &Document) {
+    ctx.memory_mut(|mem| {
+        if mem.data.get_temp::<Document>(key).is_none() {
+            mem.data.insert_temp(key, document.clone());
+        }
+    });
+}
+
+/// Commitea el gesto al soltar: una sola entrada si la versión cambió
+/// (O(1), sin serializar; la versión solo bumpea en mutaciones
+/// comprometidas, el contrato que ya usan los memos). Devuelve `true` si
+/// pusheó. Un gesto sin cambio neto no deja entrada.
+pub(crate) fn panel_gesture_commit(
+    ctx: &egui::Context,
+    key: egui::Id,
+    current_version: u64,
+    undo_stack: &mut VecDeque<Document>,
+    redo_stack: &mut VecDeque<ChangeSet>,
+) -> bool {
+    let before: Option<Document> = ctx.memory_mut(|mem| mem.data.remove_temp(key));
+    match before {
+        Some(before) if before.version != current_version => {
+            push_history_snapshot(undo_stack, redo_stack, before);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Inserts a complete object batch on detached state and records one undo
 /// snapshot only after every object has passed validation.
 pub(crate) fn commit_object_insertions(
@@ -1692,6 +1730,10 @@ pub struct GrafitoApp {
     /// Se actualiza con saturating_add/sub en push/pop y se enforce con MAX_UNDO/BYTES.
     /// Ver `crate::controllers::DocumentController::undo_total_bytes`.
     pub undo_total_bytes: usize,
+    /// Objetos omitidos del frame por el presupuesto de vértices GPU
+    /// (`FRAME_VERTEX_BUDGET` en render_2d): se recalcula en cada
+    /// `draw_objects` (0 = escena dentro del tope). Ver insignia honesta.
+    pub(crate) frame_budget_skipped: usize,
     /// Ventana onboarding Scandinavian 30s — true si `config.onboarding_completed` es false.
     /// Se muestra una vez con 3 pasos + [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
     pub show_onboarding: bool,
@@ -2430,6 +2472,7 @@ impl GrafitoApp {
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
             undo_total_bytes: 0,
+            frame_budget_skipped: 0,
             show_onboarding: !config.onboarding_completed,
             pending_save_job: None,
             pending_open_job: None,
@@ -9044,6 +9087,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         undo_stack: VecDeque::new(),
         redo_stack: VecDeque::new(),
         undo_total_bytes: 0,
+        frame_budget_skipped: 0,
         show_onboarding: false,
         pending_save_job: None,
         pending_open_job: None,

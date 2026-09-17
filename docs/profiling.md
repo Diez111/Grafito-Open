@@ -71,7 +71,7 @@ código caliente, y se revierte en una línea si una sesión real lo empeora.
   está listo (máquina `DomainGridState`/`resolve_*_job`). Paridad con el
   camino sync cubierta por tests GPU (`gpu_compute.rs`).
 
-### 2.5 RAM (Ola 4)
+### 2.5 RAM (Ola 4 + T2 2026-09-17)
 
 - `HISTORY_FULL_FRAMES_MAX` 3→1 (los frames completos del asistente se
   retenían ×3; el replay válido es cap 1 — test `frames_compartidos_roundtrip_*`).
@@ -82,6 +82,101 @@ código caliente, y se revierte en una línea si una sesión real lo empeora.
 - Buffers wgpu: shrink con histéresis ×4 y piso 1 MiB (`ensure_buffer_capacity`).
 - Stream del asistente: acumulador cap 256 KiB con flag `truncated` (antes
   podía crecer sin cota si el proveedor no cortaba).
+- **RSS medido E2E** (proceso real, `/proc/PID/status`): idle vacío 80 MiB
+  (21 MiB anónimos = heap propio; resto file-mapped compartido). Startup
+  cold ~2 s (splash con 3 gates reales GPU→escena→plugins, self-report
+  919 ms). Generador de escena grande:
+  `cargo run --release -p grafito-app --example generar_escena_grande`
+  (2000 objetos, 1.3 MB JSON) + `grafito /tmp/escena_grande.json`.
+- **Undo por gesto (T6)**: los sliders de panel pusheaban 1 `Document`
+  entero por frame con cambio (un drag = ~100 pushes que evictaban el
+  historial). Ahora `panel_gesture_begin/commit` (mismo patrón que los
+  sliders del canvas): 1 entrada por gesto; teclado sigue inmediato.
+  Test `gesto_slider_undo_coalescea_un_drag_en_una_sola_entrada`.
+- **Presupuesto undo verificado con doc grande (T2)**:
+  500 funciones + 200 pushes → pila ≤50 y bytes ≤50 MiB
+  (test `t2_presupuesto_undo_acota_pila_con_documento_grande`).
+
+## 2.6 Frame real en release (T1 2026-09-17, escena 300, 800×600)
+
+Atribución por categoría (hit, min-de-7): 200 funciones etiquetadas
+10 ms; +30 paramétricas / +20 vectores / +10 implícitas / +40 puntos
+marginal ~0 (caches compartidos entre etapas del test). Escena 300:
+miss 108 ms / hit 20 ms. Desglose del hit (200 funciones): pipeline
+muestreo+refine+proyección 3.3 ms + labels 2.4 ms + shapes 3.6 ms.
+
+- **Pipeline con scratch (V2)**: `refine_function_samples_into` +
+  proyección escriben en buffers thread-local reutilizados (0 allocs en
+  hit). A/B intercalado: V1 fresco 3.4 ms / V2 reuse 3.3 ms / V3+V5
+  fusionado 4.6-4.8 ms. **La fusión en una pasada PIERDE ~35%** (causa
+  microarquitectural no determinada; el dato manda): no fusionar.
+- **Labels a bitmap (T7)**: los auto-labels (`F₃₉`) caían al camino ASCII
+  por falta de glifos ₀-₉ en la fuente bitmap → teselado por frame.
+  Agregados los 10 glifos (`tex_raster.rs`): 104 blits bitmap, 0 textos;
+  `draw_auto_labels` ≈ `draw_con_etiquetas`. Pin end-to-end en el test.
+- **Paramétricas/polar adaptativas**: steps 4000 fijos → grid del
+  viewport (igual que funciones): 32k→6.4k vértices por curva; emisión
+  por runs (`Shape::line` por run en sólido en vez de 1 shape por
+  segmento: los caps redondos costaban 5×). Teselado 50 curvas: 79→24 ms.
+- **Teselado domina**: 50 funciones 10 ms, 50 paramétricas 24 ms de
+  teselado vs ~3-9 ms de draw CPU. El resto del frame está en egui/wgpu,
+  fuera de nuestro código caliente.
+- **Cobertura flat 100%** (test `flat_corpus_aula`, 50/50: 32 funciones,
+  12 componentes paramétricos, 6 implícitas). SIMD sigue diferido: con
+  transcendentales libm dominando el sampler, el techo es bajo y el
+  riesgo alto; reabrir solo si el sampler domina un perfil real.
+
+## 2.7 Presupuesto de vértices (crash real → fix)
+
+Escena válida de 2000 objetos (bajo `MAX_OBJECT_COUNT` 5000) mataba el
+proceso: `egui_vertex_buffer` de 329 MB > tope wgpu 256 MB (panic fatal).
+Medición t1f (teselado headless real): 2000 funciones ≈ 13M vértices ≈
+260 MB; escala ~5k vértices/función. Fix: `FRAME_VERTEX_BUDGET`
+(6M vértices ≈ 120 MB, 2× de margen para chrome UI + atlas) con
+`estimate_object_vertices` barato por objeto (grids conocidos, sin
+muestrear); al excederse se trunca el plan (los primeros objetos siempre
+se dibujan) y se muestra insignia honesta en el canvas en vez de
+crashear. Tests: calibración (2000 excede, 300 entra con 2×),
+truncado end-to-end, pin de cobertura estimador-vs-brazos-de-dibujo.
+Hallazgo lateral del mismo trabajo: `ORDERED_VISIBLE_CACHE` y
+`DISPLAY_OVERRIDE_CACHE` keyeaban solo por versión/label → dos
+documentos con igual versión colisionaban (canvas erróneo al abrir un
+archivo nuevo); ahora llevan `Document::cache_nonce` (fresco en
+`new`/deserialize, preservado en `clone`) con test de regresión.
+
+## 2.8 Texturas managed: gracia obligatoria (crash real → fix)
+
+Segundo crash de la misma escena: `Queue::submit: Texture with
+'egui_texid_Managed(N)' label has been destroyed`. Causa: los LRU de
+texturas (`TEX_LABEL_TEXTURES` 64, `FRACTAL_TEXTURES` 8,
+`COMPLEX_GRID_TEXTURES` 16) dropeaban el `TextureHandle` en el frame de
+la evicción; con cientos de rótulos (auto-labels `F₃₉` ahora van a
+bitmap por los glifos ₀-₉) el churn destruía texturas aún referenciadas
+por el submit en vuelo. Fix: `GracefulTextureCache` (LRU + cola de
+retiro con `TEXTURE_GRACE_FRAMES` 3, mismo patrón que
+`FillTextureCacheStore`), tick por frame en `draw_objects`, y política
+**sin-evictar** para rótulos (`try_insert` + cap 256 + fallback ASCII
+cuando está lleno: sin churn no hay drops bajo presión). Tests:
+`graceful_texture_cache_evicta_con_gracia_y_try_insert_no_churnea` y
+`draw_tex_label_300_con_cache_llena_cae_a_ascii_sin_panico`.
+Verificación E2E: la escena de 2000 objetos **abre y renderiza** (576
+dibujados + insignia "1424 objetos omitidos") sin panic; la vista
+guardada de esa escena (scale 50 con 1200 funciones oscilando más
+rápido que el píxel) se ve como bandas por solapamiento de trazos —
+alias visual esperable de la escena extrema, no un defecto del motor.
+
+## 2.9 Binario: eframe sin backend glow (T5)
+
+`eframe` default-features traía `glow`/`glutin` (backend OpenGL que la
+app no usa: solo wgpu). `default-features = false` +
+`["wgpu", "accesskit", "default_fonts", "wayland", "web_screen_reader",
+"x11"]` saca del árbol `egui_glow`, `glutin`, `glutin-winit`,
+`glutin_egl_sys`, `glutin_glx_sys`, `sctk-adwaita`, `cgl` (7 crates,
+verificado en el diff del lock y `cargo tree -i egui_glow` = vacío).
+`glow` sigue en el lock por `wgpu-hal` (backend GL de wgpu, no
+instanciado). Binario release: 44.8 MB; smoke E2E con ventana real OK.
+Sin delta de tamaño A/B exacto (el baseline no-PGO previo era de otro
+commit); el argumento es de árbol de dependencias, no de MB.
 
 ## 3. Simd (`wide`) — decisión diferida
 

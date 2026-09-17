@@ -5803,3 +5803,59 @@ fn build_hash_no_es_local_ni_vacio() {
         );
     }
 }
+
+#[test]
+fn gesto_slider_undo_coalescea_un_drag_en_una_sola_entrada() {
+    let ctx = egui::Context::default();
+    let key = egui::Id::new((crate::app::PANEL_GESTURE_UNDO_KEY, "live-p-test"));
+    let mut document = grafito_core::Document::new();
+    let mut undo_stack: VecDeque<grafito_core::Document> = VecDeque::new();
+    let mut redo_stack: VecDeque<grafito_core::ChangeSet> = VecDeque::new();
+
+    // Commit sin begin previo: no pushea nada.
+    assert!(!crate::app::panel_gesture_commit(
+        &ctx,
+        key,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    ));
+    assert!(undo_stack.is_empty());
+
+    // Drag de 60 frames con cambio: una sola entrada (no 60).
+    crate::app::panel_gesture_begin(&ctx, key, &document);
+    for _ in 0..60 {
+        document.bump_version();
+    }
+    assert!(crate::app::panel_gesture_commit(
+        &ctx,
+        key,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    ));
+    assert_eq!(undo_stack.len(), 1);
+
+    // Gesto sin cambio neto: cero entradas nuevas.
+    crate::app::panel_gesture_begin(&ctx, key, &document);
+    assert!(!crate::app::panel_gesture_commit(
+        &ctx,
+        key,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    ));
+    assert_eq!(undo_stack.len(), 1);
+
+    // Segundo gesto con cambio: segunda entrada (uno por gesto).
+    crate::app::panel_gesture_begin(&ctx, key, &document);
+    document.bump_version();
+    assert!(crate::app::panel_gesture_commit(
+        &ctx,
+        key,
+        document.version,
+        &mut undo_stack,
+        &mut redo_stack,
+    ));
+    assert_eq!(undo_stack.len(), 2);
+}
