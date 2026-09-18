@@ -11,10 +11,13 @@ use grafito_ui::animation::interpolate_color;
 use grafito_ui::icons::{action_icon_button, draw_icon, Icon};
 use grafito_ui::theme::{current_theme, DARK, LIGHT};
 use grafito_ui::tokens::{
+    AUTOCOMPLETE_CHROME_RESERVE, AUTOCOMPLETE_GAP, AUTOCOMPLETE_MIN_LIST_H, BOTTOM_BAR_PAD_X,
+    BOTTOM_BAR_PAD_Y, BOTTOM_INPUT_H, BOTTOM_INPUT_RADIUS, BOTTOM_INPUT_RESERVED_W,
     BREAKPOINT_COMPACT, DRAWER_RIGHT_DEFAULT, DRAWER_RIGHT_MAX, DRAWER_RIGHT_MIN, ICON_MD,
     PANEL_LEFT_MIN, RADIUS_LG, RADIUS_MD, RADIUS_PILL, RADIUS_SM, RAIL_ITEM_HEIGHT,
-    RAIL_ITEM_PAD_X, RAIL_WIDTH, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS, SPACING_BUTTON_X,
-    SPACING_BUTTON_Y, SPACING_MINIMAL_X, SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM, TYPE_XS,
+    RAIL_ITEM_PAD_X, RAIL_WIDTH, SHADOW_ALPHA, SHADOW_POPUP_BLUR, SHADOW_POPUP_OFFSET_Y, SPACE_LG,
+    SPACE_MD, SPACE_SM, SPACE_XS, SPACING_BUTTON_X, SPACING_BUTTON_Y, SPACING_MINIMAL_X,
+    SPACING_MINIMAL_Y, TYPE_2XS, TYPE_SM, TYPE_XS,
 };
 use grafito_ui::Tool;
 use std::collections::VecDeque;
@@ -1209,108 +1212,130 @@ pub(crate) fn draw_bottom_bar(app: &mut GrafitoApp, ctx: &egui::Context, show_in
     puffin::profile_scope!("ui_bottom_bar");
 
     let theme = current_theme(ctx);
-    let accent = theme.accent;
-    let _sep_col = theme.separator;
     let txt_dim = theme.text_tertiary;
-    let _txt_col = theme.text_primary;
+    let quiet_action = theme.text_secondary;
 
-    // ── INPUT BAR — hairline 10% (no negro)
-    if show_input {
-        let mut should_exec = false;
-        egui::TopBottomPanel::bottom("input_bar")
-            .exact_height(40.0)
-            .show_separator_line(false)
-            .frame(
-                egui::Frame::none()
-                    .fill(theme.input_bar_bg)
-                    .stroke(egui::Stroke::NONE)
-                    .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
-            )
-            .show(ctx, |ui| {
-                // El popup de sugerencias ocupa toda la barra (integra columna).
-                let span = (ui.next_widget_position().x, ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new("+").color(accent).size(17.0).strong());
-                    let response = draw_command_input(
-                        ui,
-                        app,
-                        "bottom_bar",
-                        [command_input_width(ui.available_width(), 40.0), 26.0],
-                        "Entrada... (ej: sin(x), A=(1,2), Derivative[x^2,x])",
-                        true,
-                        Some(span),
-                    );
-                    if response.submitted && !app.input_text.is_empty() {
-                        should_exec = true;
-                    }
-
-                    if action_icon_button(ui, Icon::Play, accent, "Ejecutar entrada").clicked() {
-                        should_exec = true;
-                    }
-                });
-            });
-        if should_exec && !app.input_text.is_empty() {
-            let time = ctx.input(|i| i.time);
-            app.submit_input_text(time);
-        }
-    }
-
-    // ── STATUS BAR — hairline
-    egui::TopBottomPanel::bottom("status_bar")
-        .exact_height(24.0)
+    // ── BOTTOM CHROME — una sola superficie quieta (Scandinavian).
+    // Antes eran dos paneles con dos fondos (banding) + campo pill (radio 16
+    // global sobre 26 px de alto = cápsula) + placeholder con ejemplos.
+    // Ahora: un panel `panel_bg`, estado slim arriba, campo inset rectangular
+    // (radio 8, 32 px) abajo; los ejemplos viven en el hover (disclosure).
+    let mut should_exec = false;
+    egui::TopBottomPanel::bottom("bottom_chrome")
         .show_separator_line(false)
         .frame(
             egui::Frame::none()
-                .fill(theme.status_bar_bg)
+                .fill(theme.panel_bg)
                 .stroke(egui::Stroke::NONE)
-                .inner_margin(egui::Margin::symmetric(10.0, 1.0)),
+                .inner_margin(egui::Margin::symmetric(BOTTOM_BAR_PAD_X, BOTTOM_BAR_PAD_Y)),
         )
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                let coord_text = if let Some(pos) = app.last_mouse_pos {
-                    let view = app.document.view();
-                    let local = app
-                        .canvas_origin
-                        .map(|origin| canvas_local_pointer(pos, origin))
-                        .unwrap_or(pos);
-                    let world = view.screen_to_world(glam::Vec2::new(local.x, local.y));
-                    if view.x_log || view.y_log {
-                        format!("x: {:.4}, y: {:.4}", world.x, world.y)
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = SPACE_XS;
+                // ── Estado: coordenadas · hint (truncado) · conteo
+                ui.horizontal(|ui| {
+                    let coord_text = if let Some(pos) = app.last_mouse_pos {
+                        let view = app.document.view();
+                        let local = app
+                            .canvas_origin
+                            .map(|origin| canvas_local_pointer(pos, origin))
+                            .unwrap_or(pos);
+                        let world = view.screen_to_world(glam::Vec2::new(local.x, local.y));
+                        if view.x_log || view.y_log {
+                            format!("x: {:.4}, y: {:.4}", world.x, world.y)
+                        } else {
+                            format!("x: {:.2}, y: {:.2}", world.x, world.y)
+                        }
                     } else {
-                        format!("x: {:.2}, y: {:.2}", world.x, world.y)
-                    }
-                } else {
-                    "x: ---, y: ---".to_string()
-                };
-                ui.label(egui::RichText::new(coord_text).size(TYPE_XS).color(txt_dim));
-                ui.add_space(SPACE_LG);
-                let hint = if let Some(h) = app.pending_action_hint() {
-                    h.to_string()
-                } else {
-                    match app.current_view {
-                        ViewMode::D2 => status_hint_for_tool(app.current_tool),
-                        ViewMode::D3 => format!(
-                            "{} · {}",
-                            app.view3d.name(),
-                            status_hint_for_3d_tool(app.current_tool)
-                        ),
-                    }
-                };
-                if !hint.is_empty() {
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(hint).size(TYPE_XS).color(txt_dim))
+                        "x: ---, y: ---".to_string()
+                    };
+                    ui.label(egui::RichText::new(coord_text).size(TYPE_XS).color(txt_dim));
+                    ui.add_space(SPACE_LG);
+                    let hint = if let Some(h) = app.pending_action_hint() {
+                        h.to_string()
+                    } else {
+                        match app.current_view {
+                            ViewMode::D2 => status_hint_for_tool(app.current_tool),
+                            ViewMode::D3 => format!(
+                                "{} · {}",
+                                app.view3d.name(),
+                                status_hint_for_3d_tool(app.current_tool)
+                            ),
+                        }
+                    };
+                    if !hint.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(hint).size(TYPE_XS).color(txt_dim),
+                            )
                             .truncate(),
+                        );
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} objetos", app.document.object_count()))
+                                .size(TYPE_XS)
+                                .color(txt_dim),
+                        );
+                    });
+                });
+
+                // ── Entrada: campo rectangular + ejecutar fantasma
+                if show_input {
+                    // El popup de sugerencias ocupa toda la barra (integra columna).
+                    let span = (ui.next_widget_position().x, ui.available_width());
+                    let input_row = ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = SPACE_SM;
+                        // Radio global es LG (16): sobre 32 px de alto da
+                        // cápsula. El campo de entrada es rectangular suave.
+                        {
+                            let visuals = ui.visuals_mut();
+                            visuals.widgets.inactive.rounding =
+                                egui::Rounding::same(BOTTOM_INPUT_RADIUS);
+                            visuals.widgets.hovered.rounding =
+                                egui::Rounding::same(BOTTOM_INPUT_RADIUS);
+                            visuals.widgets.active.rounding =
+                                egui::Rounding::same(BOTTOM_INPUT_RADIUS);
+                        }
+                        let response = draw_command_input(
+                            ui,
+                            app,
+                            "bottom_bar",
+                            [
+                                command_input_width(ui.available_width(), BOTTOM_INPUT_RESERVED_W),
+                                BOTTOM_INPUT_H,
+                            ],
+                            "Entrada…",
+                            true,
+                            Some(span),
+                        );
+                        if response.submitted && !app.input_text.is_empty() {
+                            should_exec = true;
+                        }
+
+                        if action_icon_button(
+                            ui,
+                            Icon::Play,
+                            quiet_action,
+                            "Ejecutar entrada (Enter)",
+                        )
+                        .clicked()
+                        {
+                            should_exec = true;
+                        }
+                    });
+                    // Disclosure progresiva: los ejemplos viven en el hover,
+                    // no en el placeholder.
+                    input_row.response.on_hover_text(
+                        "Escribí un comando — p. ej. sin(x) · A=(1,2) · Derivative[x^2,x] — Enter ejecuta, / enfoca",
                     );
                 }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(format!("{} objetos", app.document.object_count()))
-                            .size(TYPE_XS)
-                            .color(txt_dim),
-                    );
-                });
             });
         });
+    if should_exec && !app.input_text.is_empty() {
+        let time = ctx.input(|i| i.time);
+        app.submit_input_text(time);
+    }
 }
 
 pub(crate) fn draw_command_input(
@@ -1589,6 +1614,24 @@ fn dialog_contents(
         });
 }
 
+/// Lado del popup de autocompletado respecto al campo: `true` = arriba.
+///
+/// Sin aire debajo (barra inferior: ~8 px) el `Area` con `constrain` se
+/// corría hacia arriba tapando la entrada. La regla es determinista: si
+/// abajo no entra ni una fila + cromo, o si arriba hay más aire, se abre
+/// hacia arriba. Puro, testeable headless.
+pub(crate) fn autocomplete_places_above(space_above: f32, space_below: f32) -> bool {
+    let min_below = AUTOCOMPLETE_MIN_LIST_H + AUTOCOMPLETE_CHROME_RESERVE + AUTOCOMPLETE_GAP;
+    space_below < min_below || space_below < space_above
+}
+
+/// Alto máximo de la lista con scroll: el aire disponible menos gap y
+/// cromo (footer + padding). Nunca negativo: con aire 0 solo queda el
+/// footer. Puro, testeable headless.
+pub(crate) fn autocomplete_list_max_height(available_space: f32) -> f32 {
+    (available_space - AUTOCOMPLETE_GAP - AUTOCOMPLETE_CHROME_RESERVE).max(0.0)
+}
+
 fn draw_autocomplete_popup(
     ui: &mut egui::Ui,
     app: &mut GrafitoApp,
@@ -1597,12 +1640,26 @@ fn draw_autocomplete_popup(
     popup_span: Option<(f32, f32)>,
     suggestions: &[AutocompleteItem],
 ) -> bool {
-    // Integrado, no tarjeta flotante: misma superficie que el input
-    // (`input_bg`), sin borde ni sombra, pegado al borde inferior y a lo
-    // ancho de la columna — se lee como continuación del panel, no como
-    // ventana. Sin `popup_span` cae al ancho del campo.
+    // Integrado, no ventana: misma columna que el campo. Abajo (drawer,
+    // álgebra) pegado como continuación del panel; arriba (barra inferior
+    // sin aire) card flotante quieta con hairline + sombra popup. La lista
+    // scrollea acotada al aire real: el popup jamás tapa el campo.
+    // Sin `popup_span` cae al ancho del campo.
     let (span_x, span_w) = popup_span.unwrap_or((input_rect.min.x, input_rect.width()));
-    let popup_pos = egui::pos2(span_x, input_rect.max.y);
+    let screen = ui.ctx().screen_rect();
+    let space_above = input_rect.min.y - screen.min.y;
+    let space_below = screen.max.y - input_rect.max.y;
+    let above = autocomplete_places_above(space_above, space_below);
+    let available = if above { space_above } else { space_below };
+    let list_max = autocomplete_list_max_height(available);
+    let (popup_pos, pivot) = if above {
+        (
+            egui::pos2(span_x, input_rect.min.y - AUTOCOMPLETE_GAP),
+            egui::Align2::LEFT_BOTTOM,
+        )
+    } else {
+        (egui::pos2(span_x, input_rect.max.y), egui::Align2::LEFT_TOP)
+    };
     let selected = app.autocomplete.selected;
     // Honestidad visual: solo hay fila destacada si el usuario la eligió
     // con ↑↓ (navigated). Sin navegar, Enter envía el texto tal cual — pintar
@@ -1611,87 +1668,115 @@ fn draw_autocomplete_popup(
     let theme = current_theme(ui.ctx());
     let display: Vec<(String, String)> = suggestions
         .iter()
-        .take(8)
+        .take(MAX_AUTOCOMPLETE_SUGGESTIONS)
         .map(|it| (it.text.clone(), it.detail.clone()))
         .collect();
     let popup_id = ui.id().with(id_salt).with("autocomplete_popup");
     let mut clicked: Option<usize> = None;
+    // Card flotante de arriba: superficie panel + hairline 10% + sombra
+    // popup (tokens); pegada de abajo: continuación sin borde ni sombra.
+    let frame = if above {
+        egui::Frame::none()
+            .fill(theme.panel_bg)
+            .stroke(theme.hairline_stroke())
+            .rounding(egui::Rounding::same(RADIUS_SM))
+            .shadow(egui::Shadow {
+                offset: egui::vec2(0.0, SHADOW_POPUP_OFFSET_Y),
+                blur: SHADOW_POPUP_BLUR,
+                spread: 0.0,
+                color: egui::Color32::from_black_alpha(SHADOW_ALPHA),
+            })
+            .inner_margin(egui::Margin {
+                left: SPACE_SM,
+                right: SPACE_SM,
+                top: SPACE_XS,
+                bottom: SPACE_XS,
+            })
+    } else {
+        egui::Frame::none()
+            .fill(theme.input_bg)
+            .rounding(egui::Rounding {
+                nw: 0.0,
+                ne: 0.0,
+                sw: RADIUS_SM,
+                se: RADIUS_SM,
+            })
+            .inner_margin(egui::Margin {
+                left: SPACE_SM,
+                right: SPACE_SM,
+                top: SPACE_XS,
+                bottom: SPACE_XS,
+            })
+    };
     egui::Area::new(popup_id)
         .fixed_pos(popup_pos)
+        .pivot(pivot)
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
-            egui::Frame::none()
-                .fill(theme.input_bg)
-                .rounding(egui::Rounding {
-                    nw: 0.0,
-                    ne: 0.0,
-                    sw: RADIUS_SM,
-                    se: RADIUS_SM,
-                })
-                .inner_margin(egui::Margin {
-                    left: SPACE_SM,
-                    right: SPACE_SM,
-                    top: SPACE_XS,
-                    bottom: SPACE_XS,
-                })
-                .show(ui, |ui| {
-                    ui.set_min_width((span_w - 2.0 * SPACE_SM).max(0.0));
-                    ui.set_max_width((span_w - 2.0 * SPACE_SM).max(0.0));
-                    // Selección serena (tinta sage, texto primario) en vez de
-                    // píldora de acento: guía sin gritar.
-                    ui.scope(|ui| {
-                        let visuals = ui.visuals_mut();
-                        visuals.selection.bg_fill = theme.selection_bg;
-                        visuals.selection.stroke = egui::Stroke::new(1.0, theme.text_primary);
-                        ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
-                            for (i, (text, detail)) in display.iter().enumerate() {
-                                let mut job = egui::text::LayoutJob::single_section(
-                                    text.clone(),
-                                    egui::TextFormat {
-                                        font_id: egui::FontId::proportional(TYPE_SM),
-                                        color: theme.text_primary,
-                                        ..Default::default()
-                                    },
-                                );
-                                job.append(
-                                    "   ",
-                                    0.0,
-                                    egui::TextFormat {
-                                        font_id: egui::FontId::proportional(TYPE_XS),
-                                        color: theme.text_tertiary,
-                                        ..Default::default()
-                                    },
-                                );
-                                job.append(
-                                    detail,
-                                    0.0,
-                                    egui::TextFormat {
-                                        font_id: egui::FontId::proportional(TYPE_XS),
-                                        color: theme.text_tertiary,
-                                        ..Default::default()
-                                    },
-                                );
-                                if ui
-                                    .add(egui::SelectableLabel::new(
-                                        highlight && i == selected,
-                                        job,
-                                    ))
-                                    .clicked()
-                                {
-                                    clicked = Some(i);
-                                }
-                            }
+            frame.show(ui, |ui| {
+                ui.set_min_width((span_w - 2.0 * SPACE_SM).max(0.0));
+                ui.set_max_width((span_w - 2.0 * SPACE_SM).max(0.0));
+                // Selección serena (tinta sage, texto primario) en vez de
+                // píldora de acento: guía sin gritar.
+                ui.scope(|ui| {
+                    let visuals = ui.visuals_mut();
+                    visuals.selection.bg_fill = theme.selection_bg;
+                    visuals.selection.stroke = egui::Stroke::new(1.0, theme.text_primary);
+                    egui::ScrollArea::vertical()
+                        .max_height(list_max)
+                        .show(ui, |ui| {
+                            ui.with_layout(
+                                egui::Layout::top_down_justified(egui::Align::LEFT),
+                                |ui| {
+                                    for (i, (text, detail)) in display.iter().enumerate() {
+                                        let mut job = egui::text::LayoutJob::single_section(
+                                            text.clone(),
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::proportional(TYPE_SM),
+                                                color: theme.text_primary,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        job.append(
+                                            "   ",
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::proportional(TYPE_XS),
+                                                color: theme.text_tertiary,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        job.append(
+                                            detail,
+                                            0.0,
+                                            egui::TextFormat {
+                                                font_id: egui::FontId::proportional(TYPE_XS),
+                                                color: theme.text_tertiary,
+                                                ..Default::default()
+                                            },
+                                        );
+                                        let row = ui.add(egui::SelectableLabel::new(
+                                            highlight && i == selected,
+                                            job,
+                                        ));
+                                        if highlight && i == selected {
+                                            row.scroll_to_me(Some(egui::Align::Center));
+                                        }
+                                        if row.clicked() {
+                                            clicked = Some(i);
+                                        }
+                                    }
+                                },
+                            );
                         });
-                    });
-                    ui.add_space(SPACE_XS);
-                    ui.label(
-                        egui::RichText::new(
-                            "↑↓ elegir · Enter aceptar · Tab completar · Esc cerrar",
-                        )
+                });
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("↑↓ elegir · Enter aceptar · Tab completar · Esc cerrar")
                         .size(TYPE_XS)
                         .color(theme.text_tertiary),
-                    );
-                });
+                );
+            });
         });
     if let Some(i) = clicked {
         app.autocomplete.selected = i;
@@ -1718,7 +1803,7 @@ pub(crate) fn status_hint_for_3d_tool(tool: Tool) -> String {
 
 fn status_hint_for_tool(tool: Tool) -> String {
     match tool {
-        Tool::Select => "Seleccionar: clic objeto, arrastrar vacio para mover vista".to_string(),
+        Tool::Select => "Clic objeto · arrastrar fondo para mover".to_string(),
         Tool::Point => "Punto: clic para crear".to_string(),
         Tool::Point3D => "Punto 3D: clic para crear".to_string(),
         Tool::Line => "Recta: clic en dos puntos".to_string(),
@@ -2453,6 +2538,7 @@ mod autocomplete_ux_tests {
 #[cfg(test)]
 mod coverage_sweep_chrome_pure {
     use super::*;
+    use grafito_ui::Tool;
     #[test]
     fn barrido_umbrales_de_cromo() {
         assert!(rail_labels_visible(200.0));
@@ -2467,5 +2553,34 @@ mod coverage_sweep_chrome_pure {
         assert_eq!(command_input_width(100.0, 200.0), 0.0);
         let p = canvas_local_pointer(egui::Pos2::new(15.0, 20.0), egui::Pos2::new(5.0, 10.0));
         assert_eq!((p.x, p.y), (10.0, 10.0));
+    }
+
+    #[test]
+    fn bottom_chrome_es_minimo_y_rectangular() {
+        // Rectangular suave (8), nunca pill; alto táctil base 4.
+        assert_eq!(BOTTOM_INPUT_RADIUS, RADIUS_SM);
+        assert_eq!(BOTTOM_INPUT_H, 32.0);
+        // Hint por defecto corto, con separador ·, sin prefijo verbo-so.
+        let hint = status_hint_for_tool(Tool::Select);
+        assert!(hint.contains('·'), "hint Select con ·: {hint}");
+        assert!(
+            hint.chars().count() <= 40,
+            "hint Select corto (≤40): {hint}"
+        );
+        assert!(!hint.contains("Seleccionar:"));
+    }
+
+    #[test]
+    fn autocomplete_popup_nunca_tapa_el_campo() {
+        // Barra inferior: ~8 px debajo → abre arriba.
+        assert!(autocomplete_places_above(600.0, 8.0));
+        // Drawer/álgebra con aire debajo → abajo (comportamiento actual).
+        assert!(!autocomplete_places_above(100.0, 500.0));
+        // Ventana corta: gana el lado con más aire.
+        assert!(autocomplete_places_above(400.0, 100.0));
+        assert!(!autocomplete_places_above(100.0, 400.0));
+        // La lista se acota al aire real menos gap y cromo, nunca negativa.
+        assert_eq!(autocomplete_list_max_height(600.0), 600.0 - 4.0 - 32.0);
+        assert_eq!(autocomplete_list_max_height(20.0), 0.0);
     }
 }
