@@ -279,6 +279,41 @@ pub const PALETTE_DETAIL_INDENT: f32 = SPACE_LG;
 pub const PALETTE_PAGE_STEP: usize = 10;
 
 // ═══════════════════════════════════════════════════════════
+// Bottom chrome — barra de entrada + estado (Scandinavian quiet)
+// Una sola superficie `panel_bg`; el campo es tarjeta inset `input_bg`
+// con hairline 10% y radio SM (8, rectangular), nunca pill.
+// ═══════════════════════════════════════════════════════════
+
+/// Alto del campo de entrada inferior — 32 px = KEYBOARD_KEY_H, base 4,
+/// ≥ HIT_TARGET_MIN 24 (WCAG 2.5.8).
+pub const BOTTOM_INPUT_H: f32 = 32.0;
+/// Alto de la fila de estado (coordenadas · hint · conteo) — 24 px, base 4.
+pub const BOTTOM_STATUS_H: f32 = 24.0;
+/// Radio del campo de entrada — 8 px = RADIUS_SM (rectangular suave).
+/// El pill (999) queda reservado a toggles/controles segmentados.
+pub const BOTTOM_INPUT_RADIUS: f32 = RADIUS_SM;
+/// Ancho reservado a la derecha del campo (botón ejecutar 26 + aire) — 40 px, base 4.
+pub const BOTTOM_INPUT_RESERVED_W: f32 = 40.0;
+/// Padding horizontal del chrome inferior — 16 px = SPACE_LG.
+pub const BOTTOM_BAR_PAD_X: f32 = SPACE_LG;
+/// Padding vertical del chrome inferior — 8 px = SPACE_SM.
+pub const BOTTOM_BAR_PAD_Y: f32 = SPACE_SM;
+
+// ═══════════════════════════════════════════════════════════
+// Autocompletado — popup integrado al campo (Scandinavian quiet)
+// Abajo (drawer/álgebra, pegado) o arriba (barra inferior sin aire
+// debajo, card flotante con hairline + sombra popup). Nunca tapa el campo:
+// el lado se elige por aire disponible y la lista scrollea acotada.
+// ═══════════════════════════════════════════════════════════
+
+/// Separación campo ↔ popup flotante de arriba — 4 px = SPACE_XS.
+pub const AUTOCOMPLETE_GAP: f32 = SPACE_XS;
+/// Reserva de cromo del popup (footer + padding interno) — 32 px, base 4.
+pub const AUTOCOMPLETE_CHROME_RESERVE: f32 = 32.0;
+/// Lista mínima útil (una fila) — 28 px, base 4.
+pub const AUTOCOMPLETE_MIN_LIST_H: f32 = 28.0;
+
+// ═══════════════════════════════════════════════════════════
 // Helpers — layout functions (Scandinavian, sin hardcodes)
 // ═══════════════════════════════════════════════════════════
 
@@ -632,6 +667,47 @@ mod tests {
         assert!(TOAST_DURATION_DEFAULT < TOAST_DURATION_ERROR);
         assert!(TOAST_MIN_HEIGHT >= HIT_TARGET_MIN);
         assert_eq!(TOAST_TOP_OFFSET, TOP_BAR_HEIGHT + SPACE_SM);
+    }
+
+    #[test]
+    fn bottom_chrome_tokens_are_quiet_and_rectangular() {
+        // Rectangular suave: 8, nunca pill.
+        assert_eq!(BOTTOM_INPUT_RADIUS, RADIUS_SM);
+        assert_eq!(BOTTOM_INPUT_RADIUS, 8.0);
+        assert!(BOTTOM_INPUT_RADIUS < 16.0);
+        // Altos táctiles en base 4 y por encima del mínimo WCAG 24.
+        assert_eq!(BOTTOM_INPUT_H, 32.0);
+        assert_eq!(BOTTOM_STATUS_H, 24.0);
+        assert!(BOTTOM_INPUT_H >= HIT_TARGET_MIN);
+        assert_eq!(BOTTOM_BAR_PAD_X, SPACE_LG);
+        assert_eq!(BOTTOM_BAR_PAD_Y, SPACE_SM);
+        for v in [
+            BOTTOM_INPUT_H,
+            BOTTOM_STATUS_H,
+            BOTTOM_INPUT_RESERVED_W,
+            BOTTOM_BAR_PAD_X,
+            BOTTOM_BAR_PAD_Y,
+        ] {
+            assert_eq!(v % 4.0, 0.0, "bottom value {v} must be multiple of base 4");
+        }
+    }
+
+    #[test]
+    fn autocomplete_tokens_fit_base_4_and_reserve_chrome() {
+        assert_eq!(AUTOCOMPLETE_GAP, SPACE_XS);
+        assert_eq!(AUTOCOMPLETE_CHROME_RESERVE, 32.0);
+        assert_eq!(AUTOCOMPLETE_MIN_LIST_H, 28.0);
+        // La reserva cubre footer + padding: la lista mínima + cromo es
+        // lo mínimo que exige el lado de abajo para no flipear.
+        let min_below = AUTOCOMPLETE_MIN_LIST_H + AUTOCOMPLETE_CHROME_RESERVE + AUTOCOMPLETE_GAP;
+        assert_eq!(min_below, 64.0);
+        for v in [
+            AUTOCOMPLETE_GAP,
+            AUTOCOMPLETE_CHROME_RESERVE,
+            AUTOCOMPLETE_MIN_LIST_H,
+        ] {
+            assert_eq!(v % 4.0, 0.0, "value {v} must be multiple of base 4");
+        }
     }
 
     #[test]
