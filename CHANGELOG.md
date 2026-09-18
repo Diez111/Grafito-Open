@@ -6,10 +6,12 @@ El formato está basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1
 y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/v2.0.0.html).
 
 > Nota de versiones: las entradas `1.2.x-beta` (2026-08) pertenecen a la línea previa
-> a la renumeración; la versión vigente es `1.1.0` (fuente de verdad: `Cargo.toml`,
-> tag `v1.1.0` y artefactos en `dist/`).
+> a la renumeración; la versión vigente es `1.2.0` (fuente de verdad: `Cargo.toml`,
+> tag `v1.2.0` y artefactos en `dist/`).
 
 ## [Unreleased]
+
+## [1.2.0] - 2026-09-18
 
 #### Agregado
 - **Cierre del gap GeoGebra (P0–P4)**: 338 → **639 comandos** (599 visibles + 15 acciones UI = 614 en paleta, 25 categorías).

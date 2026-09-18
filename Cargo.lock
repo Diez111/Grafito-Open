@@ -2626,7 +2626,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-agent"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "log",
  "serde",
@@ -2635,7 +2635,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-anim"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "grafito-geometry",
@@ -2647,7 +2647,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-app"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -2699,7 +2699,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-assistant"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "alkahest-cas",
  "base64 0.22.1",
@@ -2721,7 +2721,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-assistant-types"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-classroom"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "grafito-profile",
  "iroh",
@@ -2740,7 +2740,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-command"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "geo",
  "glam",
@@ -2756,7 +2756,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-complex"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "num-complex",
  "serde",
@@ -2764,7 +2764,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "geo",
@@ -2786,7 +2786,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-geometry"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "evalexpr",
@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-pedagogy"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "grafito-anim",
  "grafito-geometry",
@@ -2828,7 +2828,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-plugins"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "libc",
  "log",
@@ -2839,7 +2839,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-profile"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2847,11 +2847,11 @@ dependencies = [
 
 [[package]]
 name = "grafito-release-tests"
-version = "1.1.0"
+version = "1.2.0"
 
 [[package]]
 name = "grafito-render"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2871,7 +2871,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-tex"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "formulary",
  "pulldown-latex",
@@ -2881,7 +2881,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-ui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "criterion",
  "egui",
@@ -2899,7 +2899,7 @@ dependencies = [
 
 [[package]]
 name = "grafito-whiteboard"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "serde",
 ]
