@@ -23,7 +23,7 @@ grafito-ui        ─────────────> grafito-app (Piel)
 - `/statem`: enums `Estado` + transiciones tipadas; estados inválidos no compilan
 - `/rust-design`: newtypes (`AnimJobId`, `Resolution`), `Result/Option` en bordes, `unwrap_used = deny`, `clippy -D warnings = 0`
 - `/rust-ui`: `fn render(&Estado) -> Frame`; cero I/O/spawn en `Ui::`
-- Tokens: `compaction.prune:true`, `reserved:12000`, `small_model` para title; evitar contexts >100k
+- Tokens: `compaction.prune:true`, `reserved:12000`, `small_model` = `deepseek-v4.1-flash`; instructions = AGENTS.md + ledger + MEMORY.md (arquitectura y catálogo de skills on-demand); evitar contexts >100k
 
 ## Presupuestos (ver `docs/architecture.md:8`)
 
@@ -85,11 +85,11 @@ Skill `computer-control` (plugin global, en todos los proyectos):
 - Input: `desktop_input type|key|click|move|scroll` (ydotool). Avisos: `desktop_notify`.
 - Memoria: tool `memory` (project/all-projects, cruza sesiones verificado) + `memory-keeper` curra `MEMORY.md`/`.jspace` en `session.idle`.
 
-## MCP (verificados `opencode mcp list` 6/6 connected + `memory` global)
+## MCP (verificados `opencode mcp list` 5/6 connected + `memory` global)
 
 Runtimes instalados user-local (sin sudo): bun 1.4.2 (`~/.bun/bin`), uv 0.12.10 (`~/.local/bin`). Comandos con paths absolutos (no dependen del PATH del shell) + `timeout: 30000`. `time` dado de baja (no hay paquete instalable; redundante con `date`); `fetch` va por `uvx mcp-server-fetch` (el `@modelcontextprotocol/server-fetch` da 404 en npm).
 
-`filesystem` (scope `.`), `git`, `fetch`, `memory`, `sequential-thinking`, `context7` remote.
+`git`, `fetch`, `memory`, `sequential-thinking`, `context7` remote. `filesystem` desactivado 2026-09-17 (redundante con read/write/glob/grep; -14 tools/request).
 Full (GitHub/Figman/Playwright/DBHub/Qdrant) solo por agente y bajo demanda — ver catálogo §4.
 
 ## Agents especializados

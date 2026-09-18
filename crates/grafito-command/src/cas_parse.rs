@@ -56,6 +56,7 @@ pub fn extract_cas_command(text: &str) -> Option<(String, String, std::ops::Rang
         "Asymptote",
         "GroebnerDegRevLex",
         "GroebnerBasis",
+        "GroebnerLex",
         "Groebner",
         "Factor",
         "Expand",

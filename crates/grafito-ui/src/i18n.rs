@@ -99,12 +99,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 193;
+pub const MSG_COUNT: usize = 323;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (87) + `palette` (22) +
+/// `toolbar.group` (18) + `toolbar.tool` (88) + `palette` (22) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (15) +
-/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) = 193.
+/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) + `menu` (65) + `assistant` (62) = 323.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -125,7 +125,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.group.advanced", es: "Avanzado", en: "Advanced" },
     Msg { key: "toolbar.group.transform", es: "Transformar", en: "Transform" },
     Msg { key: "toolbar.group.dynamics", es: "Dinámica", en: "Dynamics" },
-    // ── toolbar.tool (87) — ES idéntico a `ToolEntry` en toolbar.rs ──
+    // ── toolbar.tool (88) — ES idéntico a `ToolEntry` en toolbar.rs ──
     Msg { key: "toolbar.tool.select", es: "Seleccionar", en: "Select" },
     Msg { key: "toolbar.tool.point", es: "Punto", en: "Point" },
     Msg { key: "toolbar.tool.midpoint", es: "M Punto medio", en: "Midpoint" },
@@ -214,6 +214,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.tetrahedron3d", es: "Tetraedro", en: "Tetrahedron" },
     Msg { key: "toolbar.tool.checkbox", es: "Casilla", en: "Checkbox" },
     Msg { key: "toolbar.tool.inputbox", es: "Caja de entrada", en: "Input box" },
+    Msg { key: "toolbar.tool.text", es: "Texto", en: "Text" },
     // ── palette (18): 15 acciones UI + título + vacío + pie ──
     // ES idéntico a `UI_ACTIONS` en command_palette.rs; EN = clave estable de despacho.
     Msg { key: "palette.action.point", es: "Herramienta Punto", en: "Point Tool" },
@@ -314,6 +315,140 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "panel.conformal.title", es: "Animación de Mapeo Conforme", en: "Conformal mapping animation" },
     Msg { key: "panel.conformal.animate", es: "Animar deformación (homotopía)", en: "Animate deformation (homotopy)" },
     Msg { key: "panel.conformal.speed", es: "Velocidad", en: "Speed" },
+    // ── menu.* — menús de la barra superior (`grafito-app/src/ui.rs`).
+    Msg { key: "menu.file.title", es: "Archivo", en: "File" },
+    Msg { key: "menu.file.new", es: "Nuevo", en: "New" },
+    Msg { key: "menu.file.open", es: "Abrir…", en: "Open…" },
+    Msg { key: "menu.file.save", es: "Guardar", en: "Save" },
+    Msg { key: "menu.file.save_as", es: "Guardar como…", en: "Save As…" },
+    Msg { key: "menu.file.import_ggb", es: "Importar GeoGebra (.ggb)…", en: "Import GeoGebra (.ggb)…" },
+    Msg { key: "menu.file.export", es: "Exportar", en: "Export" },
+    Msg { key: "menu.file.export_ggb", es: "GeoGebra (.ggb)…", en: "GeoGebra (.ggb)…" },
+    Msg { key: "menu.file.export_svg", es: "SVG…", en: "SVG…" },
+    Msg { key: "menu.file.export_png", es: "PNG…", en: "PNG…" },
+    Msg { key: "menu.file.export_tikz", es: "TikZ…", en: "TikZ…" },
+    Msg { key: "menu.file.export_pick_dir", es: "Elegís la carpeta y el nombre en el diálogo.", en: "Choose the folder and name in the dialog." },
+    Msg { key: "menu.file.export_pdf", es: "PDF…", en: "PDF…" },
+    Msg { key: "menu.file.export_pdf_hint", es: "Vectorial multipágina (una por hoja con contenido).", en: "Multipage vector (one per sheet with content)." },
+    Msg { key: "menu.file.reveal", es: "Mostrar en carpeta", en: "Show in folder" },
+    Msg { key: "menu.file.reveal_hint", es: "Abre la carpeta de tu última exportación.", en: "Open your last export folder." },
+    Msg { key: "menu.file.reveal_empty", es: "Exportá algo primero para activar esto.", en: "Export something first to enable this." },
+    Msg { key: "menu.file.exit", es: "Salir", en: "Exit" },
+    Msg { key: "menu.edit.title", es: "Editar", en: "Edit" },
+    Msg { key: "menu.edit.undo", es: "Deshacer", en: "Undo" },
+    Msg { key: "menu.edit.redo", es: "Rehacer", en: "Redo" },
+    Msg { key: "menu.edit.delete", es: "Eliminar", en: "Delete" },
+    Msg { key: "menu.edit.steps", es: "{n}/{max} pasos", en: "{n}/{max} steps" },
+    Msg { key: "menu.view.title", es: "Vista", en: "View" },
+    Msg { key: "menu.view.grid", es: "Mostrar cuadrícula", en: "Show grid" },
+    Msg { key: "menu.view.dark_mode", es: "Modo oscuro", en: "Dark mode" },
+    Msg { key: "menu.view.snap", es: "Ajustar a cuadrícula", en: "Snap to grid" },
+    Msg { key: "menu.view.x_log", es: "Eje X log", en: "X axis log" },
+    Msg { key: "menu.view.y_log", es: "Eje Y log", en: "Y axis log" },
+    Msg { key: "menu.view.both_log", es: "Ambos ejes log", en: "Both axes log" },
+    Msg { key: "menu.view.gpu", es: "Renderizado GPU", en: "GPU rendering" },
+    Msg { key: "menu.persp.title", es: "Perspectivas", en: "Perspectives" },
+    Msg { key: "menu.persp.heading", es: "Perspectiva", en: "Perspective" },
+    Msg { key: "menu.persp.locked", es: "Bloqueado en modo examen", en: "Locked in exam mode" },
+    Msg { key: "menu.persp.exam_mode", es: "Modo examen", en: "Exam mode" },
+    Msg { key: "menu.persp.exam_hint", es: "Salí del examen para cambiar de vista.", en: "Leave the exam to switch views." },
+    Msg { key: "menu.persp.load_example", es: "Cargar ejemplo de esta perspectiva", en: "Load example for this perspective" },
+    Msg { key: "menu.persp.load_example_hint", es: "Carga objetos de ejemplo solo si el documento está vacío", en: "Loads example objects only if the document is empty" },
+    Msg { key: "menu.tools.title", es: "Herramientas", en: "Tools" },
+    Msg { key: "menu.tools.analyze", es: "Analizar", en: "Analyze" },
+    Msg { key: "menu.tools.palette", es: "Paleta de comandos…", en: "Command palette…" },
+    Msg { key: "menu.tools.pencil", es: "Lápiz", en: "Pencil" },
+    Msg { key: "menu.tools.eraser", es: "Borrador", en: "Eraser" },
+    Msg { key: "menu.tools.keyboard", es: "Teclado visible", en: "Visible keyboard" },
+    Msg { key: "menu.tools.assistant", es: "Asistente visible", en: "Visible assistant" },
+    Msg { key: "menu.tools.trig", es: "Animación trigonométrica", en: "Trigonometric animation" },
+    Msg { key: "menu.tools.trig_hint", es: "Muestra la animación de la función trigonométrica en el lienzo", en: "Shows the trigonometric function animation on the canvas" },
+    Msg { key: "menu.tools.trig_unavailable", es: "Disponible en vistas 2D", en: "Available in 2D views" },
+    Msg { key: "menu.tools.save_custom", es: "Guardar herramienta personalizada…", en: "Save custom tool…" },
+    Msg { key: "menu.tools.load_custom", es: "Cargar herramienta (.ggt)…", en: "Load tool (.ggt)…" },
+    Msg { key: "menu.panels.title", es: "Paneles", en: "Panels" },
+    Msg { key: "menu.panels.algebra", es: "Álgebra", en: "Algebra" },
+    Msg { key: "menu.panels.tools", es: "Herramientas", en: "Tools" },
+    Msg { key: "menu.panels.data", es: "Datos", en: "Data" },
+    Msg { key: "menu.panels.prob", es: "Probabilidad y Estadística", en: "Probability and Statistics" },
+    Msg { key: "menu.panels.view", es: "Vista", en: "View" },
+    Msg { key: "menu.panels.inspector_3d", es: "Inspector 3D", en: "3D Inspector" },
+    Msg { key: "menu.panels.assistant_3d", es: "Asistente 3D", en: "3D Assistant" },
+    Msg { key: "menu.panels.hide_3d", es: "Ocultar utilidad 3D", en: "Hide 3D utility" },
+    Msg { key: "menu.panels.hide", es: "Ocultar panel", en: "Hide panel" },
+    Msg { key: "menu.help.title", es: "Ayuda", en: "Help" },
+    Msg { key: "menu.help.about", es: "Acerca de Grafito v{version}", en: "About Grafito v{version}" },
+    Msg { key: "menu.help.shortcuts", es: "Atajos de teclado", en: "Keyboard shortcuts" },
+    Msg { key: "menu.help.language", es: "Idioma", en: "Language" },
+    Msg { key: "menu.more", es: "Más", en: "More" },
+    // ── assistant (41) — Ola 1.3: chrome del panel (header/composer/turnos).
+    // Las 8 `assistant.composer_*`/`limit`/`copied`/`generating` existentes se
+    // cablean acá también (estaban huérfanas). `{name}`/`{n}`/`{budget}` etc.
+    // se sustituyen en el call-site.
+    Msg { key: "assistant.header.greeting", es: "Hola, {name}", en: "Hello, {name}" },
+    Msg { key: "assistant.header.subtitle", es: "{assistant_name} · Asistente matemático", en: "{assistant_name} · Math assistant" },
+    Msg { key: "assistant.header.tokens", es: "· {n} tokens", en: "· {n} tokens" },
+    Msg { key: "assistant.header.tokens_hint", es: "Tokens reportados por el proveedor en esta sesión", en: "Tokens reported by the provider this session" },
+    Msg { key: "assistant.header.hide", es: "Ocultar asistente", en: "Hide assistant" },
+    Msg { key: "assistant.header.clear", es: "Limpiar", en: "Clear" },
+    Msg { key: "assistant.empty.role", es: "Asistente matemático", en: "Math assistant" },
+    Msg { key: "assistant.composer.context", es: "Contexto", en: "Context" },
+    Msg { key: "assistant.composer.attach", es: "Adjuntar imagen", en: "Attach image" },
+    Msg { key: "assistant.composer.images", es: "{used}/{max} imágenes", en: "{used}/{max} images" },
+    Msg { key: "assistant.composer.send", es: "Enviar", en: "Send" },
+    Msg { key: "assistant.composer.send_disabled", es: "Escribí una pregunta dentro del límite para enviar.", en: "Write a question within the limit to send." },
+    Msg { key: "assistant.composer.over_budget", es: "Acortá un poco para enviar (límite {budget}).", en: "Shorten it a bit to send ({budget} limit)." },
+    Msg { key: "assistant.composer.reasoning_hint", es: "Modo razonador: pensar antes de responder (plegable)", en: "Reasoning mode: think before answering (collapsible)" },
+    Msg { key: "assistant.composer.search_hint", es: "Buscar en internet antes de responder", en: "Search the internet before answering" },
+    Msg { key: "assistant.pending.cancelling", es: "Cancelando…", en: "Cancelling…" },
+    Msg { key: "assistant.pending.agent", es: "Agente trabajando…", en: "Agent working…" },
+    Msg { key: "assistant.stage.authorized", es: "Conectando…", en: "Connecting…" },
+    Msg { key: "assistant.stage.connecting", es: "Conectando…", en: "Connecting…" },
+    Msg { key: "assistant.stage.thinking", es: "Pensando…", en: "Thinking…" },
+    Msg { key: "assistant.stage.writing", es: "Escribiendo respuesta…", en: "Writing answer…" },
+    Msg { key: "assistant.stage.slow_suffix", es: "tardando más de lo normal, podés cancelar.", en: "taking longer than usual, you can cancel." },
+    Msg { key: "assistant.reasoning.thinking", es: "Pensando…", en: "Thinking…" },
+    Msg { key: "assistant.reasoning.with_time", es: "Razonamiento · Pensó {secs}s", en: "Reasoning · Thought {secs}s" },
+    Msg { key: "assistant.reasoning.title", es: "Razonamiento", en: "Reasoning" },
+    Msg { key: "assistant.turn.tokens", es: "{n} tokens", en: "{n} tokens" },
+    Msg { key: "assistant.turn.tokens_hint", es: "Entrada {input} · Salida {output} · Razonamiento {reasoning} · Caché {cached}", en: "Input {input} · Output {output} · Reasoning {reasoning} · Cached {cached}" },
+    Msg { key: "assistant.turn.copy", es: "Copiar", en: "Copy" },
+    Msg { key: "assistant.turn.copy_code_hint", es: "Copiar código al portapapeles", en: "Copy code to clipboard" },
+    Msg { key: "assistant.turn.copy_code", es: "Copiar código", en: "Copy code" },
+    Msg { key: "assistant.turn.copy_proposal_hint", es: "Copiar el código de la propuesta", en: "Copy the proposal code" },
+    Msg { key: "assistant.turn.copy_review_hint", es: "Copiar el código para revisarlo", en: "Copy the code to review it" },
+    Msg { key: "assistant.turn.code", es: "Código", en: "Code" },
+    Msg { key: "assistant.turn.math", es: "Expresión matemática", en: "Math expression" },
+    Msg { key: "assistant.apply.scene", es: "Aplicar escena 3D verificada y mostrar vista 3D", en: "Apply verified 3D scene and show 3D view" },
+    Msg { key: "assistant.apply.scene_params", es: "Aplicar escena 3D verificada con sus parámetros y mostrar vista 3D", en: "Apply verified 3D scene with its parameters and show 3D view" },
+    Msg { key: "assistant.apply.param_2d", es: "Aplicar parámetro verificado (vista 2D)", en: "Apply verified parameter (2D view)" },
+    Msg { key: "assistant.apply.checked", es: "Comando comprobado localmente antes de mostrarse.", en: "Command checked locally before display." },
+    Msg { key: "assistant.apply.also_set", es: "Al aplicar también se establecerá: {}.", en: "Applying will also set: {}." },
+    Msg { key: "assistant.apply.summarized", es: "Propuesta comprobada de una respuesta resumida", en: "Verified proposal from a summarized answer" },
+    Msg { key: "assistant.turn.clarify", es: "Necesito una aclaración", en: "I need clarification" },
+    Msg { key: "assistant.response.partial", es: "Respuesta parcial…", en: "Partial response…" },
+    Msg { key: "assistant.apply.rejected", es: "Esta propuesta no superó la comprobación local.", en: "This proposal did not pass local verification." },
+    Msg { key: "assistant.apply.only_verified", es: "Sólo se habilitan acciones verificadas de la respuesta actual.", en: "Only verified actions from the current response are enabled." },
+    Msg { key: "assistant.apply.ask_correction", es: "Pedir una corrección", en: "Ask for a correction" },
+    Msg { key: "assistant.apply.already_applied", es: "La propuesta ya se incorporó al documento.", en: "The proposal is already in the document." },
+    Msg { key: "assistant.apply.command_ok", es: "Comando comprobado con sus parámetros necesarios. Vista {view}.", en: "Command verified with its required parameters. View {view}." },
+    Msg { key: "assistant.apply.scene_ok", es: "Escena 3D comprobada; se aplica de forma atómica. Vista 3D.", en: "3D scene verified; it is applied atomically. 3D view." },
+    Msg { key: "assistant.apply.param_ok", es: "Parámetro comprobado listo para aplicar. Vista 2D.", en: "Verified parameter ready to apply. 2D view." },
+    Msg { key: "assistant.apply.params_fmt", es: "{base} Parámetros: {params}.", en: "{base} Parameters: {params}." },
+    Msg { key: "assistant.apply.command_label", es: "Aplicar el comando comprobado con sus parámetros y mostrar vista {view}", en: "Apply the verified command with its parameters and show view {view}" },
+    Msg { key: "assistant.apply.command_label_simple", es: "Aplicar el comando comprobado y mostrar vista {view}", en: "Apply the verified command and show view {view}" },
+    Msg { key: "assistant.apply.scene_all_ok", es: "Escena completa comprobada localmente; se aplica de forma atómica.", en: "Full scene verified locally; it is applied atomically." },
+    Msg { key: "assistant.apply.param_checked", es: "Parámetro comprobado localmente antes de mostrarse.", en: "Parameter verified locally before display." },
+    Msg { key: "assistant.apply.block", es: "Aplica este bloque en Grafito", en: "Applies this block in Grafito" },
+    Msg { key: "assistant.apply.block_view", es: "Aplica este bloque en Grafito y ajusta la vista", en: "Applies this block in Grafito and adjusts the view" },
+    Msg { key: "assistant.error.transport", es: "Se cortó la conexión. Tu texto está a salvo.", en: "The connection dropped. Your text is safe." },
+    Msg { key: "assistant.error.saved", es: "Tu texto está a salvo.", en: "Your text is safe." },
+    Msg { key: "assistant.turn.copy_response_hint", es: "Copiar la respuesta al portapapeles", en: "Copy the response to the clipboard" },
+    Msg { key: "assistant.apply.command_ready", es: "Comando comprobado listo para aplicar al documento. Vista {view}.", en: "Command verified, ready to apply to the document. View {view}." },
+    Msg { key: "assistant.origin.local", es: "Local", en: "Local" },
+    Msg { key: "assistant.origin.remote", es: "Consulta remota autorizada", en: "Authorized remote query" },
+    Msg { key: "assistant.apply.unchecked", es: "Propuesta sin comprobar", en: "Unverified proposal" },
+    Msg { key: "assistant.apply.unchecked_hint", es: "La comprobación se limitó a las primeras {n} propuesta(s) de esta respuesta.", en: "Verification covered only the first {n} proposal(s) of this response." },
 ];
 
 // ── Acceso ──
@@ -495,6 +630,7 @@ pub fn tool_label(slug: &str, locale: Locale) -> &'static str {
         "tetrahedron3d" => t("toolbar.tool.tetrahedron3d", locale),
         "checkbox" => t("toolbar.tool.checkbox", locale),
         "inputbox" => t("toolbar.tool.inputbox", locale),
+        "text" => t("toolbar.tool.text", locale),
         _ => "",
     }
 }
@@ -722,13 +858,13 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
-// 193 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 323 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
 // 12 app/misc + 2 anim + 14 media.title + 87 `toolbar.tool` + 3
 // `panel.conformal`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 193/193 (100%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 323/323 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -741,9 +877,9 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (193). Ordenado por dominio como
+/// Claves principales de UI con traducción PT (323). Ordenado por dominio como
 /// [`MESSAGES`]: grupos (18) + paleta (22) + onboarding (12) + cheat (10) +
-/// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (87) +
+/// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (88) +
 /// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
     // ── grupos (18) ──
@@ -857,7 +993,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "media.title.subspace", pt: "Span linear" },
     PtMsg { key: "media.title.fractal", pt: "Fractal de Koch" },
     PtMsg { key: "media.title.default", pt: "Animação" },
-    // ── toolbar.tool (87) — R3.4 cierra el recorte F3d/W2 ──
+    // ── toolbar.tool (88) — R3.4 cierra el recorte F3d/W2 ──
     PtMsg { key: "toolbar.tool.select", pt: "Selecionar" },
     PtMsg { key: "toolbar.tool.point", pt: "Ponto" },
     PtMsg { key: "toolbar.tool.midpoint", pt: "M Ponto médio" },
@@ -945,14 +1081,146 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "toolbar.tool.tetrahedron3d", pt: "Tetraedro" },
     PtMsg { key: "toolbar.tool.checkbox", pt: "Caixa de seleção" },
     PtMsg { key: "toolbar.tool.inputbox", pt: "Caixa de entrada" },
+    PtMsg { key: "toolbar.tool.text", pt: "Texto" },
     // ── panel.conformal (3) — R3.4 cierra el fallback ES ──
     PtMsg { key: "panel.conformal.title", pt: "Animação de Mapeamento Conforme" },
     PtMsg { key: "panel.conformal.animate", pt: "Animar deformação (homotopia)" },
     PtMsg { key: "panel.conformal.speed", pt: "Velocidade" },
+    // ── menu (63) — Ola 1.3: menús de la barra superior ──
+    PtMsg { key: "menu.file.title", pt: "Ficheiro" },
+    PtMsg { key: "menu.file.new", pt: "Novo" },
+    PtMsg { key: "menu.file.open", pt: "Abrir…" },
+    PtMsg { key: "menu.file.save", pt: "Guardar" },
+    PtMsg { key: "menu.file.save_as", pt: "Guardar como…" },
+    PtMsg { key: "menu.file.import_ggb", pt: "Importar GeoGebra (.ggb)…" },
+    PtMsg { key: "menu.file.export", pt: "Exportar" },
+    PtMsg { key: "menu.file.export_ggb", pt: "GeoGebra (.ggb)…" },
+    PtMsg { key: "menu.file.export_svg", pt: "SVG…" },
+    PtMsg { key: "menu.file.export_png", pt: "PNG…" },
+    PtMsg { key: "menu.file.export_tikz", pt: "TikZ…" },
+    PtMsg { key: "menu.file.export_pick_dir", pt: "Escolha a pasta e o nome no diálogo." },
+    PtMsg { key: "menu.file.export_pdf", pt: "PDF…" },
+    PtMsg { key: "menu.file.export_pdf_hint", pt: "Vetor multipágina (um por folha com conteúdo)." },
+    PtMsg { key: "menu.file.reveal", pt: "Mostrar na pasta" },
+    PtMsg { key: "menu.file.reveal_hint", pt: "Abre a pasta da sua última exportação." },
+    PtMsg { key: "menu.file.reveal_empty", pt: "Exporte algo primeiro para ativar isto." },
+    PtMsg { key: "menu.file.exit", pt: "Sair" },
+    PtMsg { key: "menu.edit.title", pt: "Editar" },
+    PtMsg { key: "menu.edit.undo", pt: "Anular" },
+    PtMsg { key: "menu.edit.redo", pt: "Refazer" },
+    PtMsg { key: "menu.edit.delete", pt: "Eliminar" },
+    PtMsg { key: "menu.edit.steps", pt: "{n}/{max} passos" },
+    PtMsg { key: "menu.view.title", pt: "Ver" },
+    PtMsg { key: "menu.view.grid", pt: "Mostrar grelha" },
+    PtMsg { key: "menu.view.dark_mode", pt: "Modo escuro" },
+    PtMsg { key: "menu.view.snap", pt: "Ajustar à grelha" },
+    PtMsg { key: "menu.view.x_log", pt: "Eixo X log" },
+    PtMsg { key: "menu.view.y_log", pt: "Eixo Y log" },
+    PtMsg { key: "menu.view.both_log", pt: "Ambos os eixos log" },
+    PtMsg { key: "menu.view.gpu", pt: "Renderização GPU" },
+    PtMsg { key: "menu.persp.title", pt: "Perspetivas" },
+    PtMsg { key: "menu.persp.heading", pt: "Perspetiva" },
+    PtMsg { key: "menu.persp.locked", pt: "Bloqueado em modo de exame" },
+    PtMsg { key: "menu.persp.exam_mode", pt: "Modo de exame" },
+    PtMsg { key: "menu.persp.exam_hint", pt: "Saia do exame para mudar de vista." },
+    PtMsg { key: "menu.persp.load_example", pt: "Carregar exemplo desta perspetiva" },
+    PtMsg { key: "menu.persp.load_example_hint", pt: "Carrega objetos de exemplo apenas se o documento estiver vazio" },
+    PtMsg { key: "menu.tools.title", pt: "Ferramentas" },
+    PtMsg { key: "menu.tools.analyze", pt: "Analisar" },
+    PtMsg { key: "menu.tools.palette", pt: "Paleta de comandos…" },
+    PtMsg { key: "menu.tools.pencil", pt: "Lápis" },
+    PtMsg { key: "menu.tools.eraser", pt: "Borracha" },
+    PtMsg { key: "menu.tools.keyboard", pt: "Teclado visível" },
+    PtMsg { key: "menu.tools.assistant", pt: "Assistente visível" },
+    PtMsg { key: "menu.tools.trig", pt: "Animação trigonométrica" },
+    PtMsg { key: "menu.tools.trig_hint", pt: "Mostra a animação da função trigonométrica na tela" },
+    PtMsg { key: "menu.tools.trig_unavailable", pt: "Disponível em vistas 2D" },
+    PtMsg { key: "menu.tools.save_custom", pt: "Guardar ferramenta personalizada…" },
+    PtMsg { key: "menu.tools.load_custom", pt: "Carregar ferramenta (.ggt)…" },
+    PtMsg { key: "menu.panels.title", pt: "Painéis" },
+    PtMsg { key: "menu.panels.algebra", pt: "Álgebra" },
+    PtMsg { key: "menu.panels.tools", pt: "Ferramentas" },
+    PtMsg { key: "menu.panels.data", pt: "Dados" },
+    PtMsg { key: "menu.panels.prob", pt: "Probabilidade e Estatística" },
+    PtMsg { key: "menu.panels.view", pt: "Vista" },
+    PtMsg { key: "menu.panels.inspector_3d", pt: "Inspetor 3D" },
+    PtMsg { key: "menu.panels.assistant_3d", pt: "Assistente 3D" },
+    PtMsg { key: "menu.panels.hide_3d", pt: "Ocultar utilitário 3D" },
+    PtMsg { key: "menu.panels.hide", pt: "Ocultar painel" },
+    PtMsg { key: "menu.help.title", pt: "Ajuda" },
+    PtMsg { key: "menu.help.about", pt: "Sobre o Grafito v{version}" },
+    PtMsg { key: "menu.help.shortcuts", pt: "Atalhos de teclado" },
+    PtMsg { key: "menu.help.language", pt: "Idioma" },
+    PtMsg { key: "menu.more", pt: "Mais" },
+    // ── assistant (41) — Ola 1.3 ──
+    PtMsg { key: "assistant.header.greeting", pt: "Olá, {name}" },
+    PtMsg { key: "assistant.header.subtitle", pt: "{assistant_name} · Assistente matemático" },
+    PtMsg { key: "assistant.header.tokens", pt: "· {n} tokens" },
+    PtMsg { key: "assistant.header.tokens_hint", pt: "Tokens reportados pelo provedor nesta sessão" },
+    PtMsg { key: "assistant.header.hide", pt: "Ocultar assistente" },
+    PtMsg { key: "assistant.header.clear", pt: "Limpar" },
+    PtMsg { key: "assistant.empty.role", pt: "Assistente matemático" },
+    PtMsg { key: "assistant.composer.context", pt: "Contexto" },
+    PtMsg { key: "assistant.composer.attach", pt: "Anexar imagem" },
+    PtMsg { key: "assistant.composer.images", pt: "{used}/{max} imagens" },
+    PtMsg { key: "assistant.composer.send", pt: "Enviar" },
+    PtMsg { key: "assistant.composer.send_disabled", pt: "Escreva uma pergunta dentro do limite para enviar." },
+    PtMsg { key: "assistant.composer.over_budget", pt: "Encurte um pouco para enviar (limite {budget})." },
+    PtMsg { key: "assistant.composer.reasoning_hint", pt: "Modo de raciocínio: pensar antes de responder (recolhível)" },
+    PtMsg { key: "assistant.composer.search_hint", pt: "Pesquisar na internet antes de responder" },
+    PtMsg { key: "assistant.pending.cancelling", pt: "A cancelar…" },
+    PtMsg { key: "assistant.pending.agent", pt: "Agente a trabalhar…" },
+    PtMsg { key: "assistant.stage.authorized", pt: "A ligar…" },
+    PtMsg { key: "assistant.stage.connecting", pt: "A ligar…" },
+    PtMsg { key: "assistant.stage.thinking", pt: "A pensar…" },
+    PtMsg { key: "assistant.stage.writing", pt: "A escrever resposta…" },
+    PtMsg { key: "assistant.stage.slow_suffix", pt: "a demorar mais que o normal, pode cancelar." },
+    PtMsg { key: "assistant.reasoning.thinking", pt: "A pensar…" },
+    PtMsg { key: "assistant.reasoning.with_time", pt: "Raciocínio · Pensou {secs}s" },
+    PtMsg { key: "assistant.reasoning.title", pt: "Raciocínio" },
+    PtMsg { key: "assistant.turn.tokens", pt: "{n} tokens" },
+    PtMsg { key: "assistant.turn.tokens_hint", pt: "Entrada {input} · Saída {output} · Raciocínio {reasoning} · Cache {cached}" },
+    PtMsg { key: "assistant.turn.copy", pt: "Copiar" },
+    PtMsg { key: "assistant.turn.copy_code_hint", pt: "Copiar código para a área de transferência" },
+    PtMsg { key: "assistant.turn.copy_code", pt: "Copiar código" },
+    PtMsg { key: "assistant.turn.copy_proposal_hint", pt: "Copiar o código da proposta" },
+    PtMsg { key: "assistant.turn.copy_review_hint", pt: "Copiar o código para rever" },
+    PtMsg { key: "assistant.turn.code", pt: "Código" },
+    PtMsg { key: "assistant.turn.math", pt: "Expressão matemática" },
+    PtMsg { key: "assistant.apply.scene", pt: "Aplicar cena 3D verificada e mostrar vista 3D" },
+    PtMsg { key: "assistant.apply.scene_params", pt: "Aplicar cena 3D verificada com seus parâmetros e mostrar vista 3D" },
+    PtMsg { key: "assistant.apply.param_2d", pt: "Aplicar parâmetro verificado (vista 2D)" },
+    PtMsg { key: "assistant.apply.checked", pt: "Comando verificado localmente antes de mostrar." },
+    PtMsg { key: "assistant.apply.also_set", pt: "Ao aplicar também será definido: {}." },
+    PtMsg { key: "assistant.apply.summarized", pt: "Proposta verificada de uma resposta resumida" },
+    PtMsg { key: "assistant.turn.clarify", pt: "Preciso de um esclarecimento" },
+    PtMsg { key: "assistant.response.partial", pt: "Resposta parcial…" },
+    PtMsg { key: "assistant.apply.rejected", pt: "Esta proposta não passou na verificação local." },
+    PtMsg { key: "assistant.apply.only_verified", pt: "Só se habilitam ações verificadas da resposta atual." },
+    PtMsg { key: "assistant.apply.ask_correction", pt: "Pedir uma correção" },
+    PtMsg { key: "assistant.apply.already_applied", pt: "A proposta já foi incorporada ao documento." },
+    PtMsg { key: "assistant.apply.command_ok", pt: "Comando verificado com os parâmetros necessários. Vista {view}." },
+    PtMsg { key: "assistant.apply.scene_ok", pt: "Cena 3D verificada; é aplicada de forma atómica. Vista 3D." },
+    PtMsg { key: "assistant.apply.param_ok", pt: "Parâmetro verificado pronto para aplicar. Vista 2D." },
+    PtMsg { key: "assistant.apply.params_fmt", pt: "{base} Parâmetros: {params}." },
+    PtMsg { key: "assistant.apply.command_label", pt: "Aplicar o comando verificado com os seus parâmetros e mostrar vista {view}" },
+    PtMsg { key: "assistant.apply.command_label_simple", pt: "Aplicar o comando verificado e mostrar vista {view}" },
+    PtMsg { key: "assistant.apply.scene_all_ok", pt: "Cena completa verificada localmente; é aplicada de forma atómica." },
+    PtMsg { key: "assistant.apply.param_checked", pt: "Parâmetro verificado localmente antes de mostrar." },
+    PtMsg { key: "assistant.apply.block", pt: "Aplica este bloco no Grafito" },
+    PtMsg { key: "assistant.apply.block_view", pt: "Aplica este bloco no Grafito e ajusta a vista" },
+    PtMsg { key: "assistant.error.transport", pt: "A ligação caiu. O seu texto está a salvo." },
+    PtMsg { key: "assistant.error.saved", pt: "O seu texto está a salvo." },
+    PtMsg { key: "assistant.turn.copy_response_hint", pt: "Copiar a resposta para a área de transferência" },
+    PtMsg { key: "assistant.apply.command_ready", pt: "Comando verificado pronto para aplicar ao documento. Vista {view}." },
+    PtMsg { key: "assistant.origin.local", pt: "Local" },
+    PtMsg { key: "assistant.origin.remote", pt: "Consulta remota autorizada" },
+    PtMsg { key: "assistant.apply.unchecked", pt: "Proposta sem verificar" },
+    PtMsg { key: "assistant.apply.unchecked_hint", pt: "A verificação limitou-se às primeiras {n} proposta(s) desta resposta." },
 ];
 
 /// Texto PT de `key`, o `None` si la clave no está en el catálogo.
-/// Desde R3.4 el overlay es total (193/193): `None` solo para claves
+/// Desde R3.4 el overlay es total (323/323): `None` solo para claves
 /// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
@@ -966,7 +1234,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 193.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 323.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -978,20 +1246,20 @@ pub fn pt_coverage() -> (usize, usize) {
 /// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 193/193 = falso).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 323/323 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 193/193"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 323/323"`.
 /// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
 }
 
-// ── Italiano / Français / Deutsch: overlays completos (193/193 c/u) ──
+// ── Italiano / Français / Deutsch: overlays completos (323/323 c/u) ──
 //
 // Generados desde `/tmp/opencode/i18n_table.txt` (190 líneas `clave|it|fr|de`,
 // mismo orden que `MESSAGES`, texto tal cual sin re-traducir). Patrón idéntico
@@ -1011,8 +1279,8 @@ pub struct OverlayMsg {
     pub text: &'static str,
 }
 
-/// Claves principales de UI con traducción al Italiano (193). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Italiano (323). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static IT_MESSAGES: &[OverlayMsg] = &[
@@ -1089,7 +1357,7 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
         key: "toolbar.group.dynamics",
         text: "Dinamica",
     },
-    // ── tools (87) ──
+    // ── tools (88) ──
     OverlayMsg {
         key: "toolbar.tool.select",
         text: "Seleziona",
@@ -1437,6 +1705,10 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg {
         key: "toolbar.tool.inputbox",
         text: "Casella di input",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.text",
+        text: "Testo",
     },
     // ── paleta (19) ──
     OverlayMsg {
@@ -1799,10 +2071,528 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
         key: "panel.conformal.speed",
         text: "Velocità",
     },
+    // ── menu (63) — Ola 1.3 ──
+    OverlayMsg {
+        key: "menu.file.title",
+        text: "File",
+    },
+    OverlayMsg {
+        key: "menu.file.new",
+        text: "Nuovo",
+    },
+    OverlayMsg {
+        key: "menu.file.open",
+        text: "Apri…",
+    },
+    OverlayMsg {
+        key: "menu.file.save",
+        text: "Salva",
+    },
+    OverlayMsg {
+        key: "menu.file.save_as",
+        text: "Salva con nome…",
+    },
+    OverlayMsg {
+        key: "menu.file.import_ggb",
+        text: "Importa GeoGebra (.ggb)…",
+    },
+    OverlayMsg {
+        key: "menu.file.export",
+        text: "Esporta",
+    },
+    OverlayMsg {
+        key: "menu.file.export_ggb",
+        text: "GeoGebra (.ggb)…",
+    },
+    OverlayMsg {
+        key: "menu.file.export_svg",
+        text: "SVG…",
+    },
+    OverlayMsg {
+        key: "menu.file.export_png",
+        text: "PNG…",
+    },
+    OverlayMsg {
+        key: "menu.file.export_tikz",
+        text: "TikZ…",
+    },
+    OverlayMsg {
+        key: "menu.file.export_pick_dir",
+        text: "Scegli cartella e nome nel dialogo.",
+    },
+    OverlayMsg {
+        key: "menu.file.export_pdf",
+        text: "PDF…",
+    },
+    OverlayMsg {
+        key: "menu.file.export_pdf_hint",
+        text: "Vettoriale multipagina (una per foglio con contenuto).",
+    },
+    OverlayMsg {
+        key: "menu.file.reveal",
+        text: "Mostra nella cartella",
+    },
+    OverlayMsg {
+        key: "menu.file.reveal_hint",
+        text: "Apre la cartella dell'ultima esportazione.",
+    },
+    OverlayMsg {
+        key: "menu.file.reveal_empty",
+        text: "Esporta prima qualcosa per attivarlo.",
+    },
+    OverlayMsg {
+        key: "menu.file.exit",
+        text: "Esci",
+    },
+    OverlayMsg {
+        key: "menu.edit.title",
+        text: "Modifica",
+    },
+    OverlayMsg {
+        key: "menu.edit.undo",
+        text: "Annulla",
+    },
+    OverlayMsg {
+        key: "menu.edit.redo",
+        text: "Ripeti",
+    },
+    OverlayMsg {
+        key: "menu.edit.delete",
+        text: "Elimina",
+    },
+    OverlayMsg {
+        key: "menu.edit.steps",
+        text: "{n}/{max} passi",
+    },
+    OverlayMsg {
+        key: "menu.view.title",
+        text: "Vista",
+    },
+    OverlayMsg {
+        key: "menu.view.grid",
+        text: "Mostra griglia",
+    },
+    OverlayMsg {
+        key: "menu.view.dark_mode",
+        text: "Modalità scura",
+    },
+    OverlayMsg {
+        key: "menu.view.snap",
+        text: "Aggancia alla griglia",
+    },
+    OverlayMsg {
+        key: "menu.view.x_log",
+        text: "Asse X log",
+    },
+    OverlayMsg {
+        key: "menu.view.y_log",
+        text: "Asse Y log",
+    },
+    OverlayMsg {
+        key: "menu.view.both_log",
+        text: "Entrambi gli assi log",
+    },
+    OverlayMsg {
+        key: "menu.view.gpu",
+        text: "Rendering GPU",
+    },
+    OverlayMsg {
+        key: "menu.persp.title",
+        text: "Prospettive",
+    },
+    OverlayMsg {
+        key: "menu.persp.heading",
+        text: "Prospettiva",
+    },
+    OverlayMsg {
+        key: "menu.persp.locked",
+        text: "Bloccato in modalità esame",
+    },
+    OverlayMsg {
+        key: "menu.persp.exam_mode",
+        text: "Modalità esame",
+    },
+    OverlayMsg {
+        key: "menu.persp.exam_hint",
+        text: "Esci dall'esame per cambiare vista.",
+    },
+    OverlayMsg {
+        key: "menu.persp.load_example",
+        text: "Carica esempio di questa prospettiva",
+    },
+    OverlayMsg {
+        key: "menu.persp.load_example_hint",
+        text: "Carica oggetti di esempio solo se il documento è vuoto",
+    },
+    OverlayMsg {
+        key: "menu.tools.title",
+        text: "Strumenti",
+    },
+    OverlayMsg {
+        key: "menu.tools.analyze",
+        text: "Analizza",
+    },
+    OverlayMsg {
+        key: "menu.tools.palette",
+        text: "Tavolozza comandi…",
+    },
+    OverlayMsg {
+        key: "menu.tools.pencil",
+        text: "Matita",
+    },
+    OverlayMsg {
+        key: "menu.tools.eraser",
+        text: "Gomma",
+    },
+    OverlayMsg {
+        key: "menu.tools.keyboard",
+        text: "Tastiera visibile",
+    },
+    OverlayMsg {
+        key: "menu.tools.assistant",
+        text: "Assistente visibile",
+    },
+    OverlayMsg {
+        key: "menu.tools.trig",
+        text: "Animazione trigonometrica",
+    },
+    OverlayMsg {
+        key: "menu.tools.trig_hint",
+        text: "Mostra l'animazione della funzione trigonometrica sulla tela",
+    },
+    OverlayMsg {
+        key: "menu.tools.trig_unavailable",
+        text: "Disponibile nelle viste 2D",
+    },
+    OverlayMsg {
+        key: "menu.tools.save_custom",
+        text: "Salva strumento personalizzato…",
+    },
+    OverlayMsg {
+        key: "menu.tools.load_custom",
+        text: "Carica strumento (.ggt)…",
+    },
+    OverlayMsg {
+        key: "menu.panels.title",
+        text: "Pannelli",
+    },
+    OverlayMsg {
+        key: "menu.panels.algebra",
+        text: "Algebra",
+    },
+    OverlayMsg {
+        key: "menu.panels.tools",
+        text: "Strumenti",
+    },
+    OverlayMsg {
+        key: "menu.panels.data",
+        text: "Dati",
+    },
+    OverlayMsg {
+        key: "menu.panels.prob",
+        text: "Probabilità e statistica",
+    },
+    OverlayMsg {
+        key: "menu.panels.view",
+        text: "Vista",
+    },
+    OverlayMsg {
+        key: "menu.panels.inspector_3d",
+        text: "Ispettore 3D",
+    },
+    OverlayMsg {
+        key: "menu.panels.assistant_3d",
+        text: "Assistente 3D",
+    },
+    OverlayMsg {
+        key: "menu.panels.hide_3d",
+        text: "Nascondi utilità 3D",
+    },
+    OverlayMsg {
+        key: "menu.panels.hide",
+        text: "Nascondi pannello",
+    },
+    OverlayMsg {
+        key: "menu.help.title",
+        text: "Aiuto",
+    },
+    OverlayMsg {
+        key: "menu.help.about",
+        text: "Informazioni su Grafito v{version}",
+    },
+    OverlayMsg {
+        key: "menu.help.shortcuts",
+        text: "Scorciatoie da tastiera",
+    },
+    OverlayMsg {
+        key: "menu.help.language",
+        text: "Lingua",
+    },
+    OverlayMsg {
+        key: "menu.more",
+        text: "Altro",
+    },
+    // ── assistant (41) — Ola 1.3 ──
+    OverlayMsg {
+        key: "assistant.header.greeting",
+        text: "Ciao, {name}",
+    },
+    OverlayMsg {
+        key: "assistant.header.subtitle",
+        text: "{assistant_name} · Assistente matematico",
+    },
+    OverlayMsg {
+        key: "assistant.header.tokens",
+        text: "· {n} token",
+    },
+    OverlayMsg {
+        key: "assistant.header.tokens_hint",
+        text: "Token riportati dal provider in questa sessione",
+    },
+    OverlayMsg {
+        key: "assistant.header.hide",
+        text: "Nascondi assistente",
+    },
+    OverlayMsg {
+        key: "assistant.header.clear",
+        text: "Cancella",
+    },
+    OverlayMsg {
+        key: "assistant.empty.role",
+        text: "Assistente matematico",
+    },
+    OverlayMsg {
+        key: "assistant.composer.context",
+        text: "Contesto",
+    },
+    OverlayMsg {
+        key: "assistant.composer.attach",
+        text: "Allega immagine",
+    },
+    OverlayMsg {
+        key: "assistant.composer.images",
+        text: "{used}/{max} immagini",
+    },
+    OverlayMsg {
+        key: "assistant.composer.send",
+        text: "Invia",
+    },
+    OverlayMsg {
+        key: "assistant.composer.send_disabled",
+        text: "Scrivi una domanda entro il limite per inviare.",
+    },
+    OverlayMsg {
+        key: "assistant.composer.over_budget",
+        text: "Accorcia un po' per inviare (limite {budget}).",
+    },
+    OverlayMsg {
+        key: "assistant.composer.reasoning_hint",
+        text: "Modalità ragionamento: pensa prima di rispondere (comprimibile)",
+    },
+    OverlayMsg {
+        key: "assistant.composer.search_hint",
+        text: "Cerca in internet prima di rispondere",
+    },
+    OverlayMsg {
+        key: "assistant.pending.cancelling",
+        text: "Annullamento…",
+    },
+    OverlayMsg {
+        key: "assistant.pending.agent",
+        text: "Agente al lavoro…",
+    },
+    OverlayMsg {
+        key: "assistant.stage.authorized",
+        text: "Connessione…",
+    },
+    OverlayMsg {
+        key: "assistant.stage.connecting",
+        text: "Connessione…",
+    },
+    OverlayMsg {
+        key: "assistant.stage.thinking",
+        text: "Penso…",
+    },
+    OverlayMsg {
+        key: "assistant.stage.writing",
+        text: "Scrivo la risposta…",
+    },
+    OverlayMsg {
+        key: "assistant.stage.slow_suffix",
+        text: "ci sta mettendo più del normale, puoi annullare.",
+    },
+    OverlayMsg {
+        key: "assistant.reasoning.thinking",
+        text: "Penso…",
+    },
+    OverlayMsg {
+        key: "assistant.reasoning.with_time",
+        text: "Ragionamento · Pensato {secs}s",
+    },
+    OverlayMsg {
+        key: "assistant.reasoning.title",
+        text: "Ragionamento",
+    },
+    OverlayMsg {
+        key: "assistant.turn.tokens",
+        text: "{n} token",
+    },
+    OverlayMsg {
+        key: "assistant.turn.tokens_hint",
+        text: "Input {input} · Output {output} · Ragionamento {reasoning} · Cache {cached}",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy",
+        text: "Copia",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy_code_hint",
+        text: "Copia il codice negli appunti",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy_code",
+        text: "Copia codice",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy_proposal_hint",
+        text: "Copia il codice della proposta",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy_review_hint",
+        text: "Copia il codice per rivederlo",
+    },
+    OverlayMsg {
+        key: "assistant.turn.code",
+        text: "Codice",
+    },
+    OverlayMsg {
+        key: "assistant.turn.math",
+        text: "Espressione matematica",
+    },
+    OverlayMsg {
+        key: "assistant.apply.scene",
+        text: "Applica scena 3D verificata e mostra vista 3D",
+    },
+    OverlayMsg {
+        key: "assistant.apply.scene_params",
+        text: "Applica scena 3D verificata con i suoi parametri e mostra vista 3D",
+    },
+    OverlayMsg {
+        key: "assistant.apply.param_2d",
+        text: "Applica parametro verificato (vista 2D)",
+    },
+    OverlayMsg {
+        key: "assistant.apply.checked",
+        text: "Comando verificato in locale prima di mostrarlo.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.also_set",
+        text: "Applicando verrà impostato anche: {}.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.summarized",
+        text: "Proposta verificata da una risposta riassunta",
+    },
+    OverlayMsg {
+        key: "assistant.turn.clarify",
+        text: "Ho bisogno di un chiarimento",
+    },
+    OverlayMsg {
+        key: "assistant.response.partial",
+        text: "Risposta parziale…",
+    },
+    OverlayMsg {
+        key: "assistant.apply.rejected",
+        text: "Questa proposta non ha superato la verifica locale.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.only_verified",
+        text: "Si abilitano solo azioni verificate della risposta corrente.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.ask_correction",
+        text: "Chiedi una correzione",
+    },
+    OverlayMsg {
+        key: "assistant.apply.already_applied",
+        text: "La proposta è già stata incorporata nel documento.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.command_ok",
+        text: "Comando verificato con i parametri necessari. Vista {view}.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.scene_ok",
+        text: "Scena 3D verificata; viene applicata in modo atomico. Vista 3D.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.param_ok",
+        text: "Parametro verificato pronto da applicare. Vista 2D.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.params_fmt",
+        text: "{base} Parametri: {params}.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.command_label",
+        text: "Applica il comando verificato con i suoi parametri e mostra la vista {view}",
+    },
+    OverlayMsg {
+        key: "assistant.apply.command_label_simple",
+        text: "Applica il comando verificato e mostra la vista {view}",
+    },
+    OverlayMsg {
+        key: "assistant.apply.scene_all_ok",
+        text: "Scena completa verificata localmente; viene applicata in modo atomico.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.param_checked",
+        text: "Parametro verificato localmente prima di mostrarlo.",
+    },
+    OverlayMsg {
+        key: "assistant.apply.block",
+        text: "Applica questo blocco in Grafito",
+    },
+    OverlayMsg {
+        key: "assistant.apply.block_view",
+        text: "Applica questo blocco in Grafito e regola la vista",
+    },
+    OverlayMsg {
+        key: "assistant.error.transport",
+        text: "La connessione è caduta. Il tuo testo è al sicuro.",
+    },
+    OverlayMsg {
+        key: "assistant.error.saved",
+        text: "Il tuo testo è al sicuro.",
+    },
+    OverlayMsg {
+        key: "assistant.turn.copy_response_hint",
+        text: "Copia la risposta negli appunti",
+    },
+    OverlayMsg {
+        key: "assistant.apply.command_ready",
+        text: "Comando verificato pronto da applicare al documento. Vista {view}.",
+    },
+    OverlayMsg {
+        key: "assistant.origin.local",
+        text: "Locale",
+    },
+    OverlayMsg {
+        key: "assistant.origin.remote",
+        text: "Consulta remota autorizzata",
+    },
+    OverlayMsg {
+        key: "assistant.apply.unchecked",
+        text: "Proposta non verificata",
+    },
+    OverlayMsg {
+        key: "assistant.apply.unchecked_hint",
+        text: "La verifica si è limitata alle prime {n} proposta/e di questa risposta.",
+    },
 ];
 
 /// Texto Italiano de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (193/193): `None` solo para claves inexistentes.
+/// El overlay es total (323/323): `None` solo para claves inexistentes.
 pub fn it(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < IT_MESSAGES.len() {
@@ -1819,8 +2609,8 @@ pub fn it_coverage() -> (usize, usize) {
     (IT_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Français (193). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Français (323). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static FR_MESSAGES: &[OverlayMsg] = &[
@@ -1843,7 +2633,7 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.group.advanced", text: "Avancé" },
     OverlayMsg { key: "toolbar.group.transform", text: "Transformer" },
     OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamique" },
-    // ── tools (87) ──
+    // ── tools (88) ──
     OverlayMsg { key: "toolbar.tool.select", text: "Sélectionner" },
     OverlayMsg { key: "toolbar.tool.point", text: "Point" },
     OverlayMsg { key: "toolbar.tool.midpoint", text: "Milieu" },
@@ -1931,6 +2721,7 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.tool.tetrahedron3d", text: "Tétraèdre" },
     OverlayMsg { key: "toolbar.tool.checkbox", text: "Case" },
     OverlayMsg { key: "toolbar.tool.inputbox", text: "Zone de saisie" },
+    OverlayMsg { key: "toolbar.tool.text", text: "Texte" },
     // ── paleta (19) ──
     OverlayMsg { key: "palette.action.point", text: "Outil Point" },
     OverlayMsg { key: "palette.action.line", text: "Outil Droite" },
@@ -2027,10 +2818,141 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "panel.conformal.title", text: "Animation de mapping conforme" },
     OverlayMsg { key: "panel.conformal.animate", text: "Animer la déformation (homotopie)" },
     OverlayMsg { key: "panel.conformal.speed", text: "Vitesse" },
+    // ── menu (63) — Ola 1.3 ──
+    OverlayMsg { key: "menu.file.title", text: "Fichier" },
+    OverlayMsg { key: "menu.file.new", text: "Nouveau" },
+    OverlayMsg { key: "menu.file.open", text: "Ouvrir…" },
+    OverlayMsg { key: "menu.file.save", text: "Enregistrer" },
+    OverlayMsg { key: "menu.file.save_as", text: "Enregistrer sous…" },
+    OverlayMsg { key: "menu.file.import_ggb", text: "Importer GeoGebra (.ggb)…" },
+    OverlayMsg { key: "menu.file.export", text: "Exporter" },
+    OverlayMsg { key: "menu.file.export_ggb", text: "GeoGebra (.ggb)…" },
+    OverlayMsg { key: "menu.file.export_svg", text: "SVG…" },
+    OverlayMsg { key: "menu.file.export_png", text: "PNG…" },
+    OverlayMsg { key: "menu.file.export_tikz", text: "TikZ…" },
+    OverlayMsg { key: "menu.file.export_pick_dir", text: "Choisissez le dossier et le nom dans le dialogue." },
+    OverlayMsg { key: "menu.file.export_pdf", text: "PDF…" },
+    OverlayMsg { key: "menu.file.export_pdf_hint", text: "Vectoriel multipage (un par feuille avec contenu)." },
+    OverlayMsg { key: "menu.file.reveal", text: "Afficher dans le dossier" },
+    OverlayMsg { key: "menu.file.reveal_hint", text: "Ouvre le dossier de votre dernier export." },
+    OverlayMsg { key: "menu.file.reveal_empty", text: "Exportez d'abord quelque chose pour activer ceci." },
+    OverlayMsg { key: "menu.file.exit", text: "Quitter" },
+    OverlayMsg { key: "menu.edit.title", text: "Édition" },
+    OverlayMsg { key: "menu.edit.undo", text: "Annuler" },
+    OverlayMsg { key: "menu.edit.redo", text: "Rétablir" },
+    OverlayMsg { key: "menu.edit.delete", text: "Supprimer" },
+    OverlayMsg { key: "menu.edit.steps", text: "{n}/{max} étapes" },
+    OverlayMsg { key: "menu.view.title", text: "Affichage" },
+    OverlayMsg { key: "menu.view.grid", text: "Afficher la grille" },
+    OverlayMsg { key: "menu.view.dark_mode", text: "Mode sombre" },
+    OverlayMsg { key: "menu.view.snap", text: "Ajuster à la grille" },
+    OverlayMsg { key: "menu.view.x_log", text: "Axe X log" },
+    OverlayMsg { key: "menu.view.y_log", text: "Axe Y log" },
+    OverlayMsg { key: "menu.view.both_log", text: "Les deux axes log" },
+    OverlayMsg { key: "menu.view.gpu", text: "Rendu GPU" },
+    OverlayMsg { key: "menu.persp.title", text: "Perspectives" },
+    OverlayMsg { key: "menu.persp.heading", text: "Perspective" },
+    OverlayMsg { key: "menu.persp.locked", text: "Verrouillé en mode examen" },
+    OverlayMsg { key: "menu.persp.exam_mode", text: "Mode examen" },
+    OverlayMsg { key: "menu.persp.exam_hint", text: "Quittez l'examen pour changer de vue." },
+    OverlayMsg { key: "menu.persp.load_example", text: "Charger l'exemple de cette perspective" },
+    OverlayMsg { key: "menu.persp.load_example_hint", text: "Charge des objets d'exemple seulement si le document est vide" },
+    OverlayMsg { key: "menu.tools.title", text: "Outils" },
+    OverlayMsg { key: "menu.tools.analyze", text: "Analyser" },
+    OverlayMsg { key: "menu.tools.palette", text: "Palette de commandes…" },
+    OverlayMsg { key: "menu.tools.pencil", text: "Crayon" },
+    OverlayMsg { key: "menu.tools.eraser", text: "Gomme" },
+    OverlayMsg { key: "menu.tools.keyboard", text: "Clavier visible" },
+    OverlayMsg { key: "menu.tools.assistant", text: "Assistant visible" },
+    OverlayMsg { key: "menu.tools.trig", text: "Animation trigonométrique" },
+    OverlayMsg { key: "menu.tools.trig_hint", text: "Affiche l'animation de la fonction trigonométrique sur la toile" },
+    OverlayMsg { key: "menu.tools.trig_unavailable", text: "Disponible dans les vues 2D" },
+    OverlayMsg { key: "menu.tools.save_custom", text: "Enregistrer l'outil personnalisé…" },
+    OverlayMsg { key: "menu.tools.load_custom", text: "Charger l'outil (.ggt)…" },
+    OverlayMsg { key: "menu.panels.title", text: "Panneaux" },
+    OverlayMsg { key: "menu.panels.algebra", text: "Algèbre" },
+    OverlayMsg { key: "menu.panels.tools", text: "Outils" },
+    OverlayMsg { key: "menu.panels.data", text: "Données" },
+    OverlayMsg { key: "menu.panels.prob", text: "Probabilités et statistiques" },
+    OverlayMsg { key: "menu.panels.view", text: "Vue" },
+    OverlayMsg { key: "menu.panels.inspector_3d", text: "Inspecteur 3D" },
+    OverlayMsg { key: "menu.panels.assistant_3d", text: "Assistant 3D" },
+    OverlayMsg { key: "menu.panels.hide_3d", text: "Masquer l'utilitaire 3D" },
+    OverlayMsg { key: "menu.panels.hide", text: "Masquer le panneau" },
+    OverlayMsg { key: "menu.help.title", text: "Aide" },
+    OverlayMsg { key: "menu.help.about", text: "À propos de Grafito v{version}" },
+    OverlayMsg { key: "menu.help.shortcuts", text: "Raccourcis clavier" },
+    OverlayMsg { key: "menu.help.language", text: "Langue" },
+    OverlayMsg { key: "menu.more", text: "Plus" },
+    // ── assistant (41) — Ola 1.3 ──
+    OverlayMsg { key: "assistant.header.greeting", text: "Bonjour, {name}" },
+    OverlayMsg { key: "assistant.header.subtitle", text: "{assistant_name} · Assistant mathématique" },
+    OverlayMsg { key: "assistant.header.tokens", text: "· {n} tokens" },
+    OverlayMsg { key: "assistant.header.tokens_hint", text: "Tokens rapportés par le fournisseur cette session" },
+    OverlayMsg { key: "assistant.header.hide", text: "Masquer l'assistant" },
+    OverlayMsg { key: "assistant.header.clear", text: "Effacer" },
+    OverlayMsg { key: "assistant.empty.role", text: "Assistant mathématique" },
+    OverlayMsg { key: "assistant.composer.context", text: "Contexte" },
+    OverlayMsg { key: "assistant.composer.attach", text: "Joindre une image" },
+    OverlayMsg { key: "assistant.composer.images", text: "{used}/{max} images" },
+    OverlayMsg { key: "assistant.composer.send", text: "Envoyer" },
+    OverlayMsg { key: "assistant.composer.send_disabled", text: "Écrivez une question dans la limite pour envoyer." },
+    OverlayMsg { key: "assistant.composer.over_budget", text: "Raccourcissez un peu pour envoyer (limite {budget})." },
+    OverlayMsg { key: "assistant.composer.reasoning_hint", text: "Mode raisonnement : réfléchir avant de répondre (repliable)" },
+    OverlayMsg { key: "assistant.composer.search_hint", text: "Rechercher sur internet avant de répondre" },
+    OverlayMsg { key: "assistant.pending.cancelling", text: "Annulation…" },
+    OverlayMsg { key: "assistant.pending.agent", text: "Agent au travail…" },
+    OverlayMsg { key: "assistant.stage.authorized", text: "Connexion…" },
+    OverlayMsg { key: "assistant.stage.connecting", text: "Connexion…" },
+    OverlayMsg { key: "assistant.stage.thinking", text: "Réflexion…" },
+    OverlayMsg { key: "assistant.stage.writing", text: "Écriture de la réponse…" },
+    OverlayMsg { key: "assistant.stage.slow_suffix", text: "prend plus de temps que d'habitude, vous pouvez annuler." },
+    OverlayMsg { key: "assistant.reasoning.thinking", text: "Réflexion…" },
+    OverlayMsg { key: "assistant.reasoning.with_time", text: "Raisonnement · Réfléchi {secs}s" },
+    OverlayMsg { key: "assistant.reasoning.title", text: "Raisonnement" },
+    OverlayMsg { key: "assistant.turn.tokens", text: "{n} tokens" },
+    OverlayMsg { key: "assistant.turn.tokens_hint", text: "Entrée {input} · Sortie {output} · Raisonnement {reasoning} · Cache {cached}" },
+    OverlayMsg { key: "assistant.turn.copy", text: "Copier" },
+    OverlayMsg { key: "assistant.turn.copy_code_hint", text: "Copier le code dans le presse-papiers" },
+    OverlayMsg { key: "assistant.turn.copy_code", text: "Copier le code" },
+    OverlayMsg { key: "assistant.turn.copy_proposal_hint", text: "Copier le code de la proposition" },
+    OverlayMsg { key: "assistant.turn.copy_review_hint", text: "Copier le code pour le relire" },
+    OverlayMsg { key: "assistant.turn.code", text: "Code" },
+    OverlayMsg { key: "assistant.turn.math", text: "Expression mathématique" },
+    OverlayMsg { key: "assistant.apply.scene", text: "Appliquer la scène 3D vérifiée et afficher la vue 3D" },
+    OverlayMsg { key: "assistant.apply.scene_params", text: "Appliquer la scène 3D vérifiée avec ses paramètres et afficher la vue 3D" },
+    OverlayMsg { key: "assistant.apply.param_2d", text: "Appliquer le paramètre vérifié (vue 2D)" },
+    OverlayMsg { key: "assistant.apply.checked", text: "Commande vérifiée localement avant affichage." },
+    OverlayMsg { key: "assistant.apply.also_set", text: "Appliquer définira aussi : {}." },
+    OverlayMsg { key: "assistant.apply.summarized", text: "Proposition vérifiée d'une réponse résumée" },
+    OverlayMsg { key: "assistant.turn.clarify", text: "J'ai besoin d'une clarification" },
+    OverlayMsg { key: "assistant.response.partial", text: "Réponse partielle…" },
+    OverlayMsg { key: "assistant.apply.rejected", text: "Cette proposition n'a pas passé la vérification locale." },
+    OverlayMsg { key: "assistant.apply.only_verified", text: "Seules les actions vérifiées de la réponse actuelle sont activées." },
+    OverlayMsg { key: "assistant.apply.ask_correction", text: "Demander une correction" },
+    OverlayMsg { key: "assistant.apply.already_applied", text: "La proposition est déjà intégrée au document." },
+    OverlayMsg { key: "assistant.apply.command_ok", text: "Commande vérifiée avec ses paramètres nécessaires. Vue {view}." },
+    OverlayMsg { key: "assistant.apply.scene_ok", text: "Scène 3D vérifiée ; appliquée de façon atomique. Vue 3D." },
+    OverlayMsg { key: "assistant.apply.param_ok", text: "Paramètre vérifié prêt à appliquer. Vue 2D." },
+    OverlayMsg { key: "assistant.apply.params_fmt", text: "{base} Paramètres : {params}." },
+    OverlayMsg { key: "assistant.apply.command_label", text: "Appliquer la commande vérifiée avec ses paramètres et afficher la vue {view}" },
+    OverlayMsg { key: "assistant.apply.command_label_simple", text: "Appliquer la commande vérifiée et afficher la vue {view}" },
+    OverlayMsg { key: "assistant.apply.scene_all_ok", text: "Scène complète vérifiée localement ; appliquée de façon atomique." },
+    OverlayMsg { key: "assistant.apply.param_checked", text: "Paramètre vérifié localement avant affichage." },
+    OverlayMsg { key: "assistant.apply.block", text: "Applique ce bloc dans Grafito" },
+    OverlayMsg { key: "assistant.apply.block_view", text: "Applique ce bloc dans Grafito et ajuste la vue" },
+    OverlayMsg { key: "assistant.error.transport", text: "La connexion a été coupée. Votre texte est en sécurité." },
+    OverlayMsg { key: "assistant.error.saved", text: "Votre texte est en sécurité." },
+    OverlayMsg { key: "assistant.turn.copy_response_hint", text: "Copier la réponse dans le presse-papiers" },
+    OverlayMsg { key: "assistant.apply.command_ready", text: "Commande vérifiée prête à appliquer au document. Vue {view}." },
+    OverlayMsg { key: "assistant.origin.local", text: "Local" },
+    OverlayMsg { key: "assistant.origin.remote", text: "Requête distante autorisée" },
+    OverlayMsg { key: "assistant.apply.unchecked", text: "Proposition non vérifiée" },
+    OverlayMsg { key: "assistant.apply.unchecked_hint", text: "La vérification s'est limitée aux {n} première(s) proposition(s) de cette réponse." },
 ];
 
 /// Texto Français de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (193/193): `None` solo para claves inexistentes.
+/// El overlay es total (323/323): `None` solo para claves inexistentes.
 pub fn fr(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < FR_MESSAGES.len() {
@@ -2047,8 +2969,8 @@ pub fn fr_coverage() -> (usize, usize) {
     (FR_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Deutsch (193). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (87) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Deutsch (323). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static DE_MESSAGES: &[OverlayMsg] = &[
@@ -2071,7 +2993,7 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.group.advanced", text: "Erweitert" },
     OverlayMsg { key: "toolbar.group.transform", text: "Transformieren" },
     OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamik" },
-    // ── tools (87) ──
+    // ── tools (88) ──
     OverlayMsg { key: "toolbar.tool.select", text: "Auswählen" },
     OverlayMsg { key: "toolbar.tool.point", text: "Punkt" },
     OverlayMsg { key: "toolbar.tool.midpoint", text: "Mittelpunkt" },
@@ -2159,6 +3081,7 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.tool.tetrahedron3d", text: "Tetraeder" },
     OverlayMsg { key: "toolbar.tool.checkbox", text: "Kontrollkästchen" },
     OverlayMsg { key: "toolbar.tool.inputbox", text: "Eingabefeld" },
+    OverlayMsg { key: "toolbar.tool.text", text: "Text" },
     // ── paleta (19) ──
     OverlayMsg { key: "palette.action.point", text: "Punkt-Werkzeug" },
     OverlayMsg { key: "palette.action.line", text: "Geraden-Werkzeug" },
@@ -2255,10 +3178,141 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "panel.conformal.title", text: "Konforme Abbildungsanimation" },
     OverlayMsg { key: "panel.conformal.animate", text: "Deformation animieren (Homotopie)" },
     OverlayMsg { key: "panel.conformal.speed", text: "Geschwindigkeit" },
+    // ── menu (63) — Ola 1.3 ──
+    OverlayMsg { key: "menu.file.title", text: "Datei" },
+    OverlayMsg { key: "menu.file.new", text: "Neu" },
+    OverlayMsg { key: "menu.file.open", text: "Öffnen…" },
+    OverlayMsg { key: "menu.file.save", text: "Speichern" },
+    OverlayMsg { key: "menu.file.save_as", text: "Speichern unter…" },
+    OverlayMsg { key: "menu.file.import_ggb", text: "GeoGebra importieren (.ggb)…" },
+    OverlayMsg { key: "menu.file.export", text: "Exportieren" },
+    OverlayMsg { key: "menu.file.export_ggb", text: "GeoGebra (.ggb)…" },
+    OverlayMsg { key: "menu.file.export_svg", text: "SVG…" },
+    OverlayMsg { key: "menu.file.export_png", text: "PNG…" },
+    OverlayMsg { key: "menu.file.export_tikz", text: "TikZ…" },
+    OverlayMsg { key: "menu.file.export_pick_dir", text: "Ordner und Namen im Dialog wählen." },
+    OverlayMsg { key: "menu.file.export_pdf", text: "PDF…" },
+    OverlayMsg { key: "menu.file.export_pdf_hint", text: "Mehrseitiger Vektor (einer pro Blatt mit Inhalt)." },
+    OverlayMsg { key: "menu.file.reveal", text: "Im Ordner anzeigen" },
+    OverlayMsg { key: "menu.file.reveal_hint", text: "Öffnet den Ordner Ihres letzten Exports." },
+    OverlayMsg { key: "menu.file.reveal_empty", text: "Exportieren Sie zuerst etwas, um dies zu aktivieren." },
+    OverlayMsg { key: "menu.file.exit", text: "Beenden" },
+    OverlayMsg { key: "menu.edit.title", text: "Bearbeiten" },
+    OverlayMsg { key: "menu.edit.undo", text: "Rückgängig" },
+    OverlayMsg { key: "menu.edit.redo", text: "Wiederholen" },
+    OverlayMsg { key: "menu.edit.delete", text: "Löschen" },
+    OverlayMsg { key: "menu.edit.steps", text: "{n}/{max} Schritte" },
+    OverlayMsg { key: "menu.view.title", text: "Ansicht" },
+    OverlayMsg { key: "menu.view.grid", text: "Raster anzeigen" },
+    OverlayMsg { key: "menu.view.dark_mode", text: "Dunkelmodus" },
+    OverlayMsg { key: "menu.view.snap", text: "Am Raster fangen" },
+    OverlayMsg { key: "menu.view.x_log", text: "X-Achse log" },
+    OverlayMsg { key: "menu.view.y_log", text: "Y-Achse log" },
+    OverlayMsg { key: "menu.view.both_log", text: "Beide Achsen log" },
+    OverlayMsg { key: "menu.view.gpu", text: "GPU-Rendering" },
+    OverlayMsg { key: "menu.persp.title", text: "Ansichten" },
+    OverlayMsg { key: "menu.persp.heading", text: "Ansicht" },
+    OverlayMsg { key: "menu.persp.locked", text: "In Prüfung gesperrt" },
+    OverlayMsg { key: "menu.persp.exam_mode", text: "Prüfungsmodus" },
+    OverlayMsg { key: "menu.persp.exam_hint", text: "Verlassen Sie die Prüfung, um die Ansicht zu wechseln." },
+    OverlayMsg { key: "menu.persp.load_example", text: "Beispiel dieser Ansicht laden" },
+    OverlayMsg { key: "menu.persp.load_example_hint", text: "Lädt Beispielobjekte nur, wenn das Dokument leer ist" },
+    OverlayMsg { key: "menu.tools.title", text: "Werkzeuge" },
+    OverlayMsg { key: "menu.tools.analyze", text: "Analysieren" },
+    OverlayMsg { key: "menu.tools.palette", text: "Befehlspalette…" },
+    OverlayMsg { key: "menu.tools.pencil", text: "Stift" },
+    OverlayMsg { key: "menu.tools.eraser", text: "Radierer" },
+    OverlayMsg { key: "menu.tools.keyboard", text: "Tastatur sichtbar" },
+    OverlayMsg { key: "menu.tools.assistant", text: "Assistent sichtbar" },
+    OverlayMsg { key: "menu.tools.trig", text: "Trigonometrische Animation" },
+    OverlayMsg { key: "menu.tools.trig_hint", text: "Zeigt die Animation der trigonometrischen Funktion auf der Leinwand" },
+    OverlayMsg { key: "menu.tools.trig_unavailable", text: "In 2D-Ansichten verfügbar" },
+    OverlayMsg { key: "menu.tools.save_custom", text: "Benutzerdefiniertes Werkzeug speichern…" },
+    OverlayMsg { key: "menu.tools.load_custom", text: "Werkzeug laden (.ggt)…" },
+    OverlayMsg { key: "menu.panels.title", text: "Bereiche" },
+    OverlayMsg { key: "menu.panels.algebra", text: "Algebra" },
+    OverlayMsg { key: "menu.panels.tools", text: "Werkzeuge" },
+    OverlayMsg { key: "menu.panels.data", text: "Daten" },
+    OverlayMsg { key: "menu.panels.prob", text: "Wahrscheinlichkeit und Statistik" },
+    OverlayMsg { key: "menu.panels.view", text: "Ansicht" },
+    OverlayMsg { key: "menu.panels.inspector_3d", text: "3D-Inspektor" },
+    OverlayMsg { key: "menu.panels.assistant_3d", text: "3D-Assistent" },
+    OverlayMsg { key: "menu.panels.hide_3d", text: "3D-Hilfsprogramm ausblenden" },
+    OverlayMsg { key: "menu.panels.hide", text: "Bereich ausblenden" },
+    OverlayMsg { key: "menu.help.title", text: "Hilfe" },
+    OverlayMsg { key: "menu.help.about", text: "Über Grafito v{version}" },
+    OverlayMsg { key: "menu.help.shortcuts", text: "Tastaturkürzel" },
+    OverlayMsg { key: "menu.help.language", text: "Sprache" },
+    OverlayMsg { key: "menu.more", text: "Mehr" },
+    // ── assistant (41) — Ola 1.3 ──
+    OverlayMsg { key: "assistant.header.greeting", text: "Hallo, {name}" },
+    OverlayMsg { key: "assistant.header.subtitle", text: "{assistant_name} · Mathe-Assistent" },
+    OverlayMsg { key: "assistant.header.tokens", text: "· {n} Tokens" },
+    OverlayMsg { key: "assistant.header.tokens_hint", text: "Vom Anbieter gemeldete Tokens in dieser Sitzung" },
+    OverlayMsg { key: "assistant.header.hide", text: "Assistent ausblenden" },
+    OverlayMsg { key: "assistant.header.clear", text: "Leeren" },
+    OverlayMsg { key: "assistant.empty.role", text: "Mathe-Assistent" },
+    OverlayMsg { key: "assistant.composer.context", text: "Kontext" },
+    OverlayMsg { key: "assistant.composer.attach", text: "Bild anhängen" },
+    OverlayMsg { key: "assistant.composer.images", text: "{used}/{max} Bilder" },
+    OverlayMsg { key: "assistant.composer.send", text: "Senden" },
+    OverlayMsg { key: "assistant.composer.send_disabled", text: "Schreibe eine Frage innerhalb des Limits zum Senden." },
+    OverlayMsg { key: "assistant.composer.over_budget", text: "Kürze etwas zum Senden (Limit {budget})." },
+    OverlayMsg { key: "assistant.composer.reasoning_hint", text: "Begründungsmodus: vor dem Antworten nachdenken (einklappbar)" },
+    OverlayMsg { key: "assistant.composer.search_hint", text: "Vor dem Antworten im Internet suchen" },
+    OverlayMsg { key: "assistant.pending.cancelling", text: "Wird abgebrochen…" },
+    OverlayMsg { key: "assistant.pending.agent", text: "Agent arbeitet…" },
+    OverlayMsg { key: "assistant.stage.authorized", text: "Verbinde…" },
+    OverlayMsg { key: "assistant.stage.connecting", text: "Verbinde…" },
+    OverlayMsg { key: "assistant.stage.thinking", text: "Denke nach…" },
+    OverlayMsg { key: "assistant.stage.writing", text: "Schreibe Antwort…" },
+    OverlayMsg { key: "assistant.stage.slow_suffix", text: "dauert länger als üblich, du kannst abbrechen." },
+    OverlayMsg { key: "assistant.reasoning.thinking", text: "Denke nach…" },
+    OverlayMsg { key: "assistant.reasoning.with_time", text: "Begründung · {secs}s nachgedacht" },
+    OverlayMsg { key: "assistant.reasoning.title", text: "Begründung" },
+    OverlayMsg { key: "assistant.turn.tokens", text: "{n} Tokens" },
+    OverlayMsg { key: "assistant.turn.tokens_hint", text: "Eingabe {input} · Ausgabe {output} · Begründung {reasoning} · Cache {cached}" },
+    OverlayMsg { key: "assistant.turn.copy", text: "Kopieren" },
+    OverlayMsg { key: "assistant.turn.copy_code_hint", text: "Code in die Zwischenablage kopieren" },
+    OverlayMsg { key: "assistant.turn.copy_code", text: "Code kopieren" },
+    OverlayMsg { key: "assistant.turn.copy_proposal_hint", text: "Code des Vorschlags kopieren" },
+    OverlayMsg { key: "assistant.turn.copy_review_hint", text: "Code zum Prüfen kopieren" },
+    OverlayMsg { key: "assistant.turn.code", text: "Code" },
+    OverlayMsg { key: "assistant.turn.math", text: "Mathematischer Ausdruck" },
+    OverlayMsg { key: "assistant.apply.scene", text: "Verifizierte 3D-Szene anwenden und 3D-Ansicht zeigen" },
+    OverlayMsg { key: "assistant.apply.scene_params", text: "Verifizierte 3D-Szene mit ihren Parametern anwenden und 3D-Ansicht zeigen" },
+    OverlayMsg { key: "assistant.apply.param_2d", text: "Verifizierten Parameter anwenden (2D-Ansicht)" },
+    OverlayMsg { key: "assistant.apply.checked", text: "Befehl vor der Anzeige lokal geprüft." },
+    OverlayMsg { key: "assistant.apply.also_set", text: "Anwenden setzt auch: {}." },
+    OverlayMsg { key: "assistant.apply.summarized", text: "Verifizierter Vorschlag aus einer zusammengefassten Antwort" },
+    OverlayMsg { key: "assistant.turn.clarify", text: "Ich brauche eine Klärung" },
+    OverlayMsg { key: "assistant.response.partial", text: "Teilweise Antwort…" },
+    OverlayMsg { key: "assistant.apply.rejected", text: "Dieser Vorschlag hat die lokale Prüfung nicht bestanden." },
+    OverlayMsg { key: "assistant.apply.only_verified", text: "Es sind nur verifizierte Aktionen der aktuellen Antwort aktiviert." },
+    OverlayMsg { key: "assistant.apply.ask_correction", text: "Korrektur anfordern" },
+    OverlayMsg { key: "assistant.apply.already_applied", text: "Der Vorschlag ist bereits im Dokument." },
+    OverlayMsg { key: "assistant.apply.command_ok", text: "Befehl mit den nötigen Parametern geprüft. Ansicht {view}." },
+    OverlayMsg { key: "assistant.apply.scene_ok", text: "3D-Szene geprüft; wird atomar angewendet. 3D-Ansicht." },
+    OverlayMsg { key: "assistant.apply.param_ok", text: "Geprüfter Parameter bereit zum Anwenden. 2D-Ansicht." },
+    OverlayMsg { key: "assistant.apply.params_fmt", text: "{base} Parameter: {params}." },
+    OverlayMsg { key: "assistant.apply.command_label", text: "Geprüften Befehl mit seinen Parametern anwenden und Ansicht {view} zeigen" },
+    OverlayMsg { key: "assistant.apply.command_label_simple", text: "Geprüften Befehl anwenden und Ansicht {view} zeigen" },
+    OverlayMsg { key: "assistant.apply.scene_all_ok", text: "Vollständige Szene lokal geprüft; wird atomar angewendet." },
+    OverlayMsg { key: "assistant.apply.param_checked", text: "Parameter vor der Anzeige lokal geprüft." },
+    OverlayMsg { key: "assistant.apply.block", text: "Wendet diesen Block in Grafito an" },
+    OverlayMsg { key: "assistant.apply.block_view", text: "Wendet diesen Block in Grafito an und passt die Ansicht an" },
+    OverlayMsg { key: "assistant.error.transport", text: "Die Verbindung wurde getrennt. Dein Text ist sicher." },
+    OverlayMsg { key: "assistant.error.saved", text: "Dein Text ist sicher." },
+    OverlayMsg { key: "assistant.turn.copy_response_hint", text: "Antwort in die Zwischenablage kopieren" },
+    OverlayMsg { key: "assistant.apply.command_ready", text: "Befehl geprüft, bereit zum Anwenden auf das Dokument. Ansicht {view}." },
+    OverlayMsg { key: "assistant.origin.local", text: "Lokal" },
+    OverlayMsg { key: "assistant.origin.remote", text: "Autorisierte Remote-Anfrage" },
+    OverlayMsg { key: "assistant.apply.unchecked", text: "Ungeprüfter Vorschlag" },
+    OverlayMsg { key: "assistant.apply.unchecked_hint", text: "Die Prüfung beschränkte sich auf die ersten {n} Vorschläge dieser Antwort." },
 ];
 
 /// Texto Deutsch de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (193/193): `None` solo para claves inexistentes.
+/// El overlay es total (323/323): `None` solo para claves inexistentes.
 pub fn de(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < DE_MESSAGES.len() {
@@ -2347,7 +3401,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 193);
+        assert_eq!(MSG_COUNT, 323);
     }
 
     #[test]
@@ -2561,10 +3615,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // R3.4: overlay total PT — 193 claves, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 323 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 193);
-        assert_eq!(pt_coverage(), (193, 193));
+        assert_eq!(PT_MESSAGES.len(), 323);
+        assert_eq!(pt_coverage(), (323, 323));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -2757,9 +3811,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(tool_total, 87);
+        assert_eq!(tool_total, 88);
         assert_eq!(
-            tool_covered, 87,
+            tool_covered, 88,
             "tools en PT: R3.4 cierra el recorte al 100%"
         );
         assert_eq!(pt("toolbar.tool.translate"), Some("Translada"));
@@ -2797,11 +3851,11 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 193/193 = 100%. Se imprime el % real con
+        // Cobertura PT medida: 323/323 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (193, 193));
+        assert_eq!((covered, total), (323, 323));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
         assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
@@ -2812,16 +3866,16 @@ mod tests {
         // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
         // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
         // y el texto con conteo para el hover histórico.
-        assert!(!pt_is_partial(), "R3.4 193/193 = 100%: sin badge parcial");
+        assert!(!pt_is_partial(), "R3.4 323/323 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 193/193");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 323/323");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (193, 193));
+        assert_eq!((covered, total), (323, 323));
     }
 
-    // ── Overlays IT/FR/DE (193/193 c/u, texto tal cual de la tabla) ──
+    // ── Overlays IT/FR/DE (323/323 c/u, texto tal cual de la tabla) ──
 
-    /// Aserciones comunes de overlay total: 193 entradas, cobertura 193/193,
+    /// Aserciones comunes de overlay total: 323 entradas, cobertura 323/323,
     /// sin duplicados ni vacíos, claves dentro del catálogo y en su mismo orden.
     fn assert_overlay_total(
         table: &[OverlayMsg],
@@ -2829,8 +3883,8 @@ mod tests {
         coverage: fn() -> (usize, usize),
         tag: &str,
     ) {
-        assert_eq!(table.len(), 193, "{tag}: overlay total");
-        assert_eq!(coverage(), (193, 193), "{tag}: cobertura total");
+        assert_eq!(table.len(), 323, "{tag}: overlay total");
+        assert_eq!(coverage(), (323, 323), "{tag}: cobertura total");
         let mut keys: Vec<&str> = table.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;

@@ -809,8 +809,9 @@ mod tests {
     use super::*;
     use crate::{
         BoxPlotObj, ComplexIntegralObj, Document, Fractal2DObj, GeoObject, HyperSurface4DObj,
-        ImplicitCurveObj, ParametricCurve3DObj, Point3DObj, PolygonObj, RegularPolychoron4DObj,
-        RegularPolytopeNDObj, Surface3DObj, Tetrahedron3DObj, TransformedObj, VectorField3DObj,
+        ImplicitCurveObj, ParametricCurve3DObj, Point3DObj, PointObj, PolygonObj,
+        RegularPolychoron4DObj, RegularPolytopeNDObj, Surface3DObj, Tetrahedron3DObj,
+        TransformedObj, VectorField3DObj,
     };
     use grafito_geometry::{Color, Point2, Point3D, RegularPolychoron, RegularPolytopeFamily};
     use serde_json::Value;
@@ -1997,5 +1998,27 @@ mod tests {
         assert_eq!(bytes_a, bytes_b, "archivos en disco byte-iguales");
         let _ = fs::remove_file(path_a);
         let _ = fs::remove_file(path_b);
+    }
+
+    #[test]
+    fn constraints_serializan_en_orden_determinista() {
+        // Regresión de auditoría: `ConstraintGraph` usaba HashMap/HashSet y el
+        // orden de keys en el JSON no era reproducible entre saves. Con
+        // BTreeMap/BTreeSet el save es estable y el round-trip no reordena.
+        let mut doc = Document::new();
+        let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+        let b = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(2.0, 4.0))));
+        doc.try_add_distance_constraint(a, b, 3.0)
+            .expect("distancia válida");
+
+        let json_a = serialize_document(&doc).expect("serializa");
+        let json_b = serialize_document(&doc).expect("re-serializa");
+        assert_eq!(json_a, json_b, "2 saves del mismo doc con constraints");
+
+        // Round-trip: deserializar + serializar preserva bytes y orden de keys
+        // derivadas del grafo (dependents/free_objects/creator).
+        let round = deserialize_document(&json_a).expect("deserializa");
+        let json_c = serialize_document(&round).expect("serializa round-trip");
+        assert_eq!(json_a, json_c, "round-trip byte-idéntico con constraints");
     }
 }

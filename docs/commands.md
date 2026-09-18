@@ -121,8 +121,10 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LimitBelow[expr, variable, punto]`: Estima un límite lateral por la izquierda (x→a⁻). Mutacion: solo consulta. Riesgo: medio. Alias: `limite_inferior`, `limite_izquierdo`.
 - `ParametricDerivative[x(t), y(t), variable]`: Deriva paramétrica dy/dx = (dy/dt)/(dx/dt) simbólicamente. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ParametricDerivative[x(t), y(t)]`. Alias: `derivada_parametrica`, `derivadaParametrica`.
 - `Asymptote[expr]`: Calcula asíntota oblicua y = m·x + b con m = lim f/x, b = lim f−m·x. Mutacion: solo consulta. Riesgo: medio. Formas alternativas: `Asymptote[expr, variable]`. Alias: `asintota`, `asíntota`.
-- `GroebnerDegRevLex[polinomios]`: Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate o GroebnerBasis. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`. Alias: `groebner`, `groebnerlex`.
-- `Factor[expr, variable]`: Factoriza polinomios equivalentes. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
+- `Groebner[polinomios]`: Base de Groebner por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios; orden por defecto como GroebnerBasis): Groebner[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Groebner[polinomios, variables]`.
+- `GroebnerLex[polinomios]`: Base de Groebner en orden lexicográfico por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios): GroebnerLex[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerLex[polinomios, variables]`.
+- `GroebnerDegRevLex[polinomios]`: Base de Groebner en orden grevlex por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios): GroebnerDegRevLex[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `GroebnerDegRevLex[polinomios, variables]`.
+- `Factor[expr, variable]`: Factoriza polinomios por raíces racionales y Kronecker acotado (enteros hasta grado 6); irreducible sobre Q se devuelve tal cual. Mutacion: solo consulta. Riesgo: bajo. Alias: `factorizar`.
 - `Expand[expr]`: Expande productos y potencias algebraicas. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandir`.
 - `Simplify[expr]`: Simplifica una expresion mediante reglas seguras. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificar`.
 - `TrigExpand[expr]`: Expande sin/cos de suma o resta, doble ángulo 2·u y potencias sin²/cos² a (1±cos(2u))/2; tan, potencias ≠2 y resto exigen motor general. Mutacion: solo consulta. Riesgo: bajo. Alias: `expandirTrig`.
@@ -168,8 +170,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `GaussOstrogradski[[P, Q, R], x, a, b, y, c, d, z, e, f, n]`: Calcula una verificacion de Gauss-Ostrogradski. Mutacion: solo consulta. Riesgo: alto.
 ## Matrices
 
-- `Determinant[[a, b], [c, d]]`: Calcula un determinante. Mutacion: solo consulta. Riesgo: medio. Alias: `det`.
-- `Inverse[[a, b], [c, d]]`: Calcula una matriz inversa. Mutacion: solo consulta. Riesgo: medio. Alias: `inversa`.
+- `Determinant[[a, b], [c, d]]`: Calcula el determinante; con entradas decimales exactas y hasta 32×32 usa aritmética racional exacta. Mutacion: solo consulta. Riesgo: medio. Alias: `det`.
+- `Inverse[[a, b], [c, d]]`: Calcula la inversa; con entradas decimales exactas y hasta 32×32 usa aritmética racional exacta. Mutacion: solo consulta. Riesgo: medio. Alias: `inversa`.
 - `SolveSystem[A, b]`: Resuelve un sistema lineal. Mutacion: solo consulta. Riesgo: medio. Alias: `linearsolve`, `linsolve`, `sistema`.
 - `GaussJordan[A]`: Reduce una matriz por Gauss-Jordan. Mutacion: solo consulta. Riesgo: medio.
 - `Cramer[A, b]`: Resuelve un sistema por Cramer. Mutacion: solo consulta. Riesgo: medio.
@@ -228,6 +230,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `TTest2[{a}, {b}]`: Prueba t de dos muestras independientes: TTest2[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_test2`, `prueba_t2`.
 - `TTestPaired[{a}, {b}]`: Prueba t pareada: TTestPaired[{antes}, {despues}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `ttest_paired`, `t_paired`, `prueba_t_pareada`, `ttestpareado`.
 - `ZTest[{datos}, mu0, sigma]`: Prueba z de una muestra con sigma conocido: ZTest[{datos}, mu0, sigma]. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_test`, `prueba_z`.
+- `ZTest2[{a}, {b}, sigma1, sigma2]`: Prueba z de dos muestras con sigmas poblacionales conocidos: ZTest2[{a}, {b}, sigma1, sigma2]. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_test2`, `prueba_z2`.
+- `FTest[{a}, {b}]`: Prueba F de igualdad de varianzas (bilateral): FTest[{a}, {b}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `f_test`, `prueba_f`.
 - `ChiSqTest[{obs}, {esp}]`: Prueba chi-cuadrado de bondad de ajuste: ChiSqTest[{obs}, {esp}]. Mutacion: solo consulta. Riesgo: bajo. Alias: `chi2test`, `prueba_chi2`, `chi_cuadrado`, `ChiSquaredTest`.
 - `ANOVA[{g1}, {g2}]`: ANOVA de un factor: ANOVA[{g1}, {g2}, ...]. Mutacion: solo consulta. Riesgo: bajo. Alias: `anova_oneway`.
 ## Financiera
@@ -464,9 +468,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `SetLineThickness[objeto, grosor]`: Grosor de línea 0.5..=20 en línea/círculo/polígono/polilínea/elipse: SetLineThickness[objeto, grosor]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `grosor_linea`.
 - `ShowLayer[n]`: Hace visibles los objetos de la capa n: ShowLayer[n]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `mostrar_capa`.
 - `HideLayer[n]`: Oculta los objetos de la capa n: HideLayer[n]. Mutacion: transforma objetos. Riesgo: bajo. Alias: `ocultar_capa`.
-- `StartAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
-- `StopAnimation[]`: No soportado: usa PlayPause[variable] o PlayPause[]. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
-- `Delete[objeto]`: No soportado: usa Erase[etiqueta] o EraseAll[]. Mutacion: solo consulta. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
+- `StartAnimation[]`: Pone en marcha la animación de una variable o de todas si no se indica (semántica set: repetir no alterna, a diferencia de PlayPause). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `StartAnimation[variable]`. Alias: `IniciarAnimacion`.
+- `StopAnimation[]`: Pausa la animación de una variable o de todas si no se indica (idempotente: pausar lo pausado es no-op honesto). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
+- `Delete[objeto]`: Borra el objeto con la etiqueta dada (nombre GeoGebra de Erase[etiqueta]). Mutacion: transforma objetos. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
 - `Rename[objeto, nuevo_nombre]`: Renombra la etiqueta de un objeto: Rename[objeto, nuevo_nombre] valida (no vacío, ≤64, sin saltos, sin colisión) y aplica con undo transaccional. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Renombrar`.
 ## Análisis
 
@@ -485,7 +489,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `LaplaceT[expr]`: Calculá la transformada de Laplace directa del subset F3c (1, t^n con n≤20, exp, sin/cos y combinaciones lineales): LaplaceT[expr] o LaplaceT[expr, t, s]. El resto da error honesto, no inventa. Laplace es distribución. ¿Buscabas LaplaceT[expr]? Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `LaplaceT[expr, t]`, `LaplaceT[expr, t, s]`. Alias: `transformadalaplace`, `laplace_t`.
 - `InvLaplaceT[expr]`: Calculá la Laplace inversa de racionales propios con denominador de grado ≤2: InvLaplaceT[expr] o InvLaplaceT[expr, s, t]. Grado ≥3, impropias o retardos quedan fuera del subset y dan error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `InvLaplaceT[expr, s]`, `InvLaplaceT[expr, s, t]`. Alias: `laplaceinversa`, `invlaplace_t`, `InverseLaplace`.
 - `RischInt[expr]`: Integrá por Risch-Norman (polinomios, exponenciales, logaritmos): RischInt[expr], RischInt[expr, variable] o definida RischInt[expr, variable, a, b] por FTC. Sin primitiva en el subset (p. ej. exp(x^2)) da error honesto que deriva a cuadratura. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `RischInt[expr, variable]`, `RischInt[expr, variable, a, b]`. Alias: `risch`, `risch_int`.
-- `GroebnerBasis[polinomios, variables]`: Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_basis`, `basegroebner`.
+- `GroebnerBasis[polinomios, variables]`: Calculá la base de Groebner por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate. Mutacion: solo consulta. Riesgo: bajo. Alias: `groebner_basis`, `basegroebner`.
 - `SolveODEN[coeficientes, rhs]`: Resolvé EDO lineal de orden n≤8 con coeficientes constantes por anulador + resonancia: SolveODEN[{a2,a1,a0}, rhs] o SolveODEN[{a2,a1,a0}, rhs, x]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `SolveODEN[coeficientes, rhs, variable]`. Alias: `edo_n`, `solveode`.
 - `EulerODE[a, b, rhs]`: Resolvé Euler x²·y''+a·x·y'+b·y=rhs vía x=e^t (x>0): EulerODE[a, b, rhs] o EulerODE[a, b, rhs, x]. Fuera del subset da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `EulerODE[a, b, rhs, variable]`. Alias: `edoeuler`, `euleredo`.
 - `FrobeniusSeries[p, q]`: Serie de Frobenius en punto ordinario (términos≤9): FrobeniusSeries[p, q] o FrobeniusSeries[p, q, x, x0, terminos]. Punto singular da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `FrobeniusSeries[p, q, x, x0, terminos]`. Alias: `frobenius`, `seriefrobenius`.
@@ -609,7 +613,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Matrices
 
 - `CharacteristicPolynomial[matriz]`: Polinomio característico numérico por Faddeeva-LeVerrier (n ≤ 64). Mutacion: solo consulta. Riesgo: bajo. Alias: `characteristic_polynomial`, `polinomio_caracteristico`, `charpoly`.
-- `ReducedRowEchelonForm[matriz]`: Forma escalonada reducida por filas (Gauss-Jordan numérico). Mutacion: solo consulta. Riesgo: bajo. Alias: `reduced_row_echelon_form`, `forma_escalonada`, `rref`.
+- `ReducedRowEchelonForm[matriz]`: Forma escalonada reducida por filas; exacta si las entradas son decimales exactos (≤32×32), numérica si no. Mutacion: solo consulta. Riesgo: bajo. Alias: `reduced_row_echelon_form`, `forma_escalonada`, `rref`.
 - `SVD[matriz]`: Descomposición en valores singulares U·Σ·Vᵀ (numérica, motor SVD). Mutacion: solo consulta. Riesgo: bajo. Alias: `descomposicion_svd`, `valores_singulares`.
 - `LUDecomposition[matriz]`: Descomposición LU con pivoteo parcial (numérica, motor LU). Mutacion: solo consulta. Riesgo: bajo. Alias: `lu_decomposition`, `descomposicion_lu`.
 - `QRDecomposition[matriz]`: Descomposición QR con Q ortogonal (numérica, motor QR). Mutacion: solo consulta. Riesgo: bajo. Alias: `qr_decomposition`, `descomposicion_qr`.
@@ -781,10 +785,10 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `SetPerspective[perspectiva]`: Valida una de las 10 perspectivas; se aplica desde la UI. Mutacion: solo consulta. Riesgo: bajo.
 - `SetViewDirection[dirección]`: Valida la dirección de vista 3D; la cámara vive en la app. Mutacion: solo consulta. Riesgo: bajo.
 - `SetAxesRatio[x, y]`: Guarda la razón de ejes en __view_axes_rx/ry; escala uniforme hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
-- `AxisStepX[paso]`: Guarda el paso del eje X en __view_axis_step_x; sin pasos por eje hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
-- `AxisStepY[paso]`: Guarda el paso del eje Y en __view_axis_step_y; sin pasos por eje hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
-- `ShowAxes[bool]`: Guarda mostrar ejes en __view_show_axes; el render usa sus flags hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
-- `ShowGrid[bool]`: Guarda mostrar grilla en __view_show_grid; el render usa su flag hoy, P3c. Mutacion: transforma objetos. Riesgo: bajo.
+- `AxisStepX[paso]`: Fija el paso de grilla del eje X en el lienzo 2D: AxisStepX[paso]. Mutacion: transforma objetos. Riesgo: bajo.
+- `AxisStepY[paso]`: Fija el paso de grilla del eje Y en el lienzo 2D: AxisStepY[paso]. Mutacion: transforma objetos. Riesgo: bajo.
+- `ShowAxes[bool]`: Muestra u oculta los ejes del lienzo 2D: ShowAxes[bool]. Mutacion: transforma objetos. Riesgo: bajo.
+- `ShowGrid[bool]`: Muestra u oculta la grilla del lienzo 2D: ShowGrid[bool] (sin flag vale el interruptor de la app). Mutacion: transforma objetos. Riesgo: bajo.
 - `SetConditionToShowObject[etiqueta, condición]`: Guarda la condición de visibilidad; se evalúa en el render. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetDynamicColor[etiqueta, r, g, b]`: Guarda el color dinámico r, g, b; se evalúa por frame en el render. Mutacion: transforma objetos. Riesgo: bajo.
 - `SetTooltipMode[etiqueta, modo]`: Guarda el modo de tooltip; flag-guardado, el hover al objeto llega en P3c. Mutacion: transforma objetos. Riesgo: bajo.

@@ -371,7 +371,11 @@ fn marching_squares_level(
     remaining_work: &mut usize,
     remaining_segments: &mut usize,
 ) -> Vec<(Point2, Point2)> {
-    let grid_size = rows.len().saturating_sub(1);
+    // Grilla ragged defensiva: el muestreo propio siempre es rectangular,
+    // pero un caller futuro (o un fixture manipulado) no debe poder provocar
+    // un pánico por índice. Se usa el mayor cuadrado seguro.
+    let width = rows.iter().map(Vec::len).min().unwrap_or(0);
+    let grid_size = rows.len().saturating_sub(1).min(width.saturating_sub(1));
     if grid_size == 0 {
         return Vec::new();
     }

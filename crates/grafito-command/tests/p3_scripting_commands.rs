@@ -66,8 +66,14 @@ fn p3b_listeners_store_and_validate() {
         })
         .expect("punto");
     assert!(ok_in(&mut document, &format!("OnClick[{label},SetValue[a,9]]")).contains("guardado"));
-    assert!(ok_in(&mut document, &format!("OnUpdate[{label},SetValue[a,8]]")).contains("P3c"));
-    assert!(ok_in(&mut document, "OnLoad[SetValue[a,7]]").contains("P3c"));
+    // Ola 2.7: los guiones ya no quedan pendientes: se ejecutan al cambiar
+    // el documento (OnUpdate) y al abrir (OnLoad). Al guardarse no corren.
+    assert!(
+        ok_in(&mut document, &format!("OnUpdate[{label},SetValue[a,8]]"))
+            .contains("se ejecuta al cambiar")
+    );
+    assert!(ok_in(&mut document, "OnLoad[SetValue[a,7]]").contains("se ejecuta al abrir"));
+    assert_eq!(document.variables.get("a"), None, "guardar no ejecuta");
     // El guion se valida al guardar.
     assert!(err_in(&mut document, &format!("OnClick[{label},Delete[A]]")).contains("OnClick"));
     assert!(err_in(&mut document, "OnClick[fantasma,SetValue[a,1]]").contains("no existe"));

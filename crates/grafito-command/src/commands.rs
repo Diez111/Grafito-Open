@@ -1964,6 +1964,7 @@ fn validate_command_arity(command: &CasCmd) -> Result<(), String> {
         | "BesselI"
         | "TTest"
         | "TTest2"
+        | "FTest"
         | "ChiSqTest"
         | "Epicycloid"
         | "Hypocycloid"
@@ -1973,6 +1974,7 @@ fn validate_command_arity(command: &CasCmd) -> Result<(), String> {
         | "CIProportion" => (2, 3),
         "Rayleigh" | "CIMean" => (1, 2),
         "ZTest" | "Rose" | "ArchimedeanSpiral" | "LogarithmicSpiral" => (3, 3),
+        "ZTest2" => (4, 4),
         "Cofactor" | "LaplaceExpansion" => (3, 3),
         "Lissajous" => (5, 5),
         "Quadrants" => (0, 4),
@@ -4281,7 +4283,7 @@ fn handle_remaining_cas_commands(
             }
             input_text.clear();
             return CommandOutcome::Message(format!(
-                "OnUpdate[{}] guardado (ejecución en P3c: requiere tracking de cambios)",
+                "OnUpdate[{}] guardado (se ejecuta al cambiar el documento)",
                 cmd.args[0].trim()
             ));
         }
@@ -4299,7 +4301,7 @@ fn handle_remaining_cas_commands(
             document.on_load_script = Some(script.to_string());
             input_text.clear();
             return CommandOutcome::Message(
-                "OnLoad guardado (ejecución al abrir en P3c)".to_string(),
+                "OnLoad guardado (se ejecuta al abrir el documento)".to_string(),
             );
         }
         "Turtle" => {
@@ -6390,6 +6392,9 @@ fn handle_remaining_cas_commands(
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
+            return CommandOutcome::Error(
+                "Plane3D: se requieren cuatro números finitos [a, b, c, d]".into(),
+            );
         }
         "Plane3D" if cmd.args.len() == 3 => {
             // Plane3D[label1, label2, label3]  →  plano por 3 puntos
@@ -6405,6 +6410,9 @@ fn handle_remaining_cas_commands(
                 input_text.clear();
                 return CommandOutcome::Ok;
             }
+            return CommandOutcome::Error(
+                "Plane3D: se requieren tres puntos 3D con etiquetas válidas".into(),
+            );
         }
         "Line3D" if cmd.args.len() == 6 => {
             // Line3D[x0, y0, z0, dx, dy, dz]  →  punto + dirección
@@ -9561,6 +9569,16 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message(format!("EraseAll: {} objeto(s) borrado(s)", n));
         }
+        "Delete" if cmd.args.len() == 1 => {
+            // Ola 0.3: Delete[objeto] es el nombre GeoGebra de Erase[etiqueta].
+            let label = cmd.args[0].trim();
+            if let Some(id) = find_object_by_label(document, label) {
+                document.remove_object(id);
+                input_text.clear();
+                return CommandOutcome::Message(format!("Delete: '{label}' borrado"));
+            }
+            return CommandOutcome::Error(format!("Delete: objeto '{label}' no encontrado"));
+        }
         "ScatterPlot" if cmd.args.len() >= 2 => {
             let xs = command_result!(parse_data_command_arg(
                 "ScatterPlot",
@@ -10959,6 +10977,13 @@ fn handle_remaining_cas_commands(
                     return CommandOutcome::Error(format!("Determinant: {error}"));
                 }
             };
+            // Ola 2.5: vía exacta si todas las entradas son decimales exactos.
+            if let Some(exact) = exact_matrix_from_numeric(&matrix) {
+                if let Ok(det) = exact.determinant() {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!("det = {det} (exacto)"));
+                }
+            }
             let Some(determinant) = matrix.determinant().filter(|value| value.is_finite()) else {
                 return CommandOutcome::Error(
                     "Determinant: la matriz no produjo un determinante finito".into(),
@@ -10972,6 +10997,23 @@ fn handle_remaining_cas_commands(
                 Ok(matrix) => matrix,
                 Err(error) => return CommandOutcome::Error(format!("Inverse: {error}")),
             };
+            // Ola 2.5: vía exacta. Si la exactitud dice "no invertible", es
+            // autoritativo; si desborda, cae a la vía numérica.
+            if let Some(exact) = exact_matrix_from_numeric(&matrix) {
+                match exact.inverse() {
+                    Ok(inverse) => {
+                        input_text.clear();
+                        return CommandOutcome::Message(format!(
+                            "Inverse:\n{} (exacto)",
+                            inverse.to_display_string()
+                        ));
+                    }
+                    Err(grafito_geometry::exact_linalg::ExactLinalgError::NotInvertible) => {
+                        return CommandOutcome::Error("Inverse: la matriz no es invertible".into());
+                    }
+                    Err(_) => {}
+                }
+            }
             let Some(inverse) = matrix.inverse() else {
                 return CommandOutcome::Error("Inverse: la matriz no es invertible".into());
             };
@@ -13336,6 +13378,71 @@ fn handle_remaining_cas_commands(
                 ));
             }
         }
+        "ZTest2" if cmd.args.len() == 4 => {
+            let data1 = command_result!(parse_data_command_arg(
+                "ZTest2",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            let data2 = command_result!(parse_data_command_arg(
+                "ZTest2",
+                &cmd.args[1],
+                &document.variables,
+            ));
+            let sigma1 = command_result!(parse_finite_command_arg(
+                "ZTest2",
+                "sigma1",
+                &cmd.args[2],
+                &document.variables,
+            ));
+            let sigma2 = command_result!(parse_finite_command_arg(
+                "ZTest2",
+                "sigma2",
+                &cmd.args[3],
+                &document.variables,
+            ));
+            if sigma1 <= 0.0 || sigma2 <= 0.0 {
+                return CommandOutcome::Error("ZTest2: sigma1 y sigma2 deben ser positivos".into());
+            }
+            if let Some((z_stat, p_value)) =
+                grafito_geometry::statistics::z_test_two_sample(&data1, &data2, sigma1, sigma2)
+            {
+                command_result!(require_finite_outputs("ZTest2", &[z_stat, p_value]));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "z-test (2 muestras): z = {:.4}, p = {:.6}",
+                    z_stat, p_value
+                ));
+            }
+            return CommandOutcome::Error(
+                "ZTest2: se requieren dos muestras con datos y sigmas positivos".into(),
+            );
+        }
+        "FTest" if cmd.args.len() == 2 => {
+            let data1 = command_result!(parse_data_command_arg(
+                "FTest",
+                &cmd.args[0],
+                &document.variables,
+            ));
+            let data2 = command_result!(parse_data_command_arg(
+                "FTest",
+                &cmd.args[1],
+                &document.variables,
+            ));
+            if let Some((f_stat, p_value)) =
+                grafito_geometry::statistics::f_test_two_sample(&data1, &data2)
+            {
+                command_result!(require_finite_outputs("FTest", &[f_stat, p_value]));
+                input_text.clear();
+                return CommandOutcome::Message(format!(
+                    "f-test (varianzas): F = {:.4}, p = {:.6}",
+                    f_stat, p_value
+                ));
+            }
+            return CommandOutcome::Error(
+                "FTest: se requieren dos muestras con al menos dos datos cada una".into(),
+            );
+        }
         "ChiSqTest" if cmd.args.len() == 2 => {
             let observed = command_result!(parse_data_command_arg(
                 "ChiSqTest",
@@ -15571,33 +15678,48 @@ fn execute_cas_command_typed(
             }
         }
         "GroebnerDegRevLex" | "Groebner" | "GroebnerLex" => {
-            let polys_arg = cmd.args.first().map(|s| s.as_str()).unwrap_or("");
-            let vars_arg = cmd.args.get(1).map(|s| s.as_str()).unwrap_or("");
-            let polys_vec: Vec<String> = if polys_arg.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![polys_arg.to_string()]
+            // Ola 0.2: los tres nombres GeoGebra usan el Buchberger real
+            // (`cas_motor::cas_groebner_ordered`) con el orden que pide cada
+            // nombre. El legacy 2×2 (`symbolic::groebner_basis_typed`) queda
+            // sin llamadas de comandos (solo tests propios en geometry).
+            if cmd.args.len() != 2 {
+                return Some(Err(format!(
+                    "Error: {} requiere {}[polinomios, variables]",
+                    cmd.command, cmd.command
+                )));
+            }
+            let order = match cmd.command.as_str() {
+                "GroebnerLex" => "lex",
+                "GroebnerDegRevLex" => "grevlex",
+                _ => "grlex",
             };
-            let vars_vec: Vec<String> = if vars_arg.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![vars_arg.to_string()]
-            };
-            match symbolic::groebner_basis_typed(&polys_vec, &vars_vec) {
-                grafito_geometry::outcome::MathResult::Exact(value) => Some(Ok(value)),
-                grafito_geometry::outcome::MathResult::Approximate { value, .. } => Some(Ok(value)),
-                grafito_geometry::outcome::MathResult::ResourceLimit(err) => {
-                    Some(Err(format!("Groebner límite de recursos: {err:?}")))
+            let polys = parse_w1_brace_list(&cmd.args[0]);
+            let vars = parse_w1_brace_list(&cmd.args[1]);
+            if polys.is_empty() || vars.is_empty() {
+                return Some(Err(format!(
+                    "Error: {} requiere polinomios y variables no vacíos",
+                    cmd.command
+                )));
+            }
+            for poly in &polys {
+                if let Err(error) = check_w1_budget(&cmd.command, "polinomio", poly) {
+                    return Some(Err(format!("Error: {error}")));
                 }
-                grafito_geometry::outcome::MathResult::DomainError(err) => {
-                    Some(Err(format!("Groebner error de dominio: {err:?}")))
+            }
+            for var in &vars {
+                if let Err(error) = check_w1_budget(&cmd.command, "variable", var) {
+                    return Some(Err(format!("Error: {error}")));
                 }
-                grafito_geometry::outcome::MathResult::Unsupported(err) => {
-                    Some(Err(format!("Groebner no soportado: {err:?}")))
+                if !is_math_identifier(var) {
+                    return Some(Err(format!(
+                        "Error: {} requiere variables válidas ('{var}')",
+                        cmd.command
+                    )));
                 }
-                grafito_geometry::outcome::MathResult::NotConverged(err) => {
-                    Some(Err(format!("Groebner no convergió: {err:?}")))
-                }
+            }
+            match cas_gate::cas_groebner_ordered(&polys, &vars, order) {
+                Ok(out) => Some(Ok(out)),
+                Err(error) => Some(Err(format!("{}: {error}", cmd.command))),
             }
         }
         // Frente W1: puerta simbólica al motor (`grafito_core::cas_motor`).
@@ -18919,6 +19041,15 @@ fn execute_cas_command_typed(
                     return Some(Err(format!("ReducedRowEchelonForm: {e}")));
                 }
             };
+            // Ola 2.5: RREF exacta si las entradas son decimales exactos.
+            if let Some(exact) = exact_matrix_from_numeric(&matriz) {
+                if let Ok(rref) = exact.rref() {
+                    return Some(Ok(format!(
+                        "ReducedRowEchelonForm:\n{} (exacto)",
+                        rref.to_display_string()
+                    )));
+                }
+            }
             match grafito_geometry::poly_tools::rref(&matriz) {
                 Ok(r) => Some(Ok(format!("ReducedRowEchelonForm:\n{r}"))),
                 Err(e) => Some(Err(format!("ReducedRowEchelonForm: {e}"))),
@@ -21120,14 +21251,12 @@ fn execute_cas_command_typed(
         }
         "AxisStepX" => {
             if cmd.args.len() != 1 {
-                return Some(Err(
-                    "Error: AxisStepX requiere AxisStepX[paso] (se guarda en __view_axis_step_x para P3c)".into(),
-                ));
+                return Some(Err("Error: AxisStepX requiere AxisStepX[paso]".into()));
             }
             match crate::ggbscript::parse_axis_step(&cmd.args[0], &document.variables) {
                 Ok(v) => match document.try_set_variable("__view_axis_step_x".to_string(), v) {
                     Ok(()) => Some(Ok(format!(
-                        "AxisStepX = {v} (guardado; sin pasos por eje en ViewTransform, P3c)"
+                        "AxisStepX = {v} (el lienzo 2D lo usa como paso de grilla)"
                     ))),
                     Err(e) => Some(Err(format!("AxisStepX: {e}"))),
                 },
@@ -21136,14 +21265,12 @@ fn execute_cas_command_typed(
         }
         "AxisStepY" => {
             if cmd.args.len() != 1 {
-                return Some(Err(
-                    "Error: AxisStepY requiere AxisStepY[paso] (se guarda en __view_axis_step_y para P3c)".into(),
-                ));
+                return Some(Err("Error: AxisStepY requiere AxisStepY[paso]".into()));
             }
             match crate::ggbscript::parse_axis_step(&cmd.args[0], &document.variables) {
                 Ok(v) => match document.try_set_variable("__view_axis_step_y".to_string(), v) {
                     Ok(()) => Some(Ok(format!(
-                        "AxisStepY = {v} (guardado; sin pasos por eje en ViewTransform, P3c)"
+                        "AxisStepY = {v} (el lienzo 2D lo usa como paso de grilla)"
                     ))),
                     Err(e) => Some(Err(format!("AxisStepY: {e}"))),
                 },
@@ -21152,17 +21279,13 @@ fn execute_cas_command_typed(
         }
         "ShowAxes" => {
             if cmd.args.len() != 1 {
-                return Some(Err(
-                    "Error: ShowAxes requiere ShowAxes[bool] (se guarda en __view_show_axes para P3c)".into(),
-                ));
+                return Some(Err("Error: ShowAxes requiere ShowAxes[bool]".into()));
             }
             match crate::ggbscript::parse_toggle_bool(&cmd.args[0]) {
                 Ok(b) => {
                     let v = if b { 1.0 } else { 0.0 };
                     match document.try_set_variable("__view_show_axes".to_string(), v) {
-                        Ok(()) => Some(Ok(format!(
-                            "ShowAxes = {b} (guardado; el render usa show_grid/number_plane_labels hoy, P3c)"
-                        ))),
+                        Ok(()) => Some(Ok(format!("ShowAxes = {b} (el lienzo 2D lo aplica)"))),
                         Err(e) => Some(Err(format!("ShowAxes: {e}"))),
                     }
                 }
@@ -21171,16 +21294,14 @@ fn execute_cas_command_typed(
         }
         "ShowGrid" => {
             if cmd.args.len() != 1 {
-                return Some(Err(
-                    "Error: ShowGrid requiere ShowGrid[bool] (se guarda en __view_show_grid para P3c)".into(),
-                ));
+                return Some(Err("Error: ShowGrid requiere ShowGrid[bool]".into()));
             }
             match crate::ggbscript::parse_toggle_bool(&cmd.args[0]) {
                 Ok(b) => {
                     let v = if b { 1.0 } else { 0.0 };
                     match document.try_set_variable("__view_show_grid".to_string(), v) {
                         Ok(()) => Some(Ok(format!(
-                            "ShowGrid = {b} (guardado; el render usa GrafitoApp.show_grid hoy, P3c)"
+                            "ShowGrid = {b} (el lienzo 2D lo aplica; sin flag vale el interruptor de la app)"
                         ))),
                         Err(e) => Some(Err(format!("ShowGrid: {e}"))),
                     }
@@ -27570,6 +27691,16 @@ fn distance_point_to_object(p: Point2, obj: &GeoObject) -> Result<f64, String> {
     }
 }
 
+/// Ola 2.5: proyección a matriz exacta cuando cada entrada es decimal exacto.
+fn exact_matrix_from_numeric(
+    matrix: &Matrix,
+) -> Option<grafito_geometry::exact_linalg::ExactMatrix> {
+    let rows: Vec<Vec<f64>> = (0..matrix.rows)
+        .map(|r| (0..matrix.cols).map(|c| matrix.get(r, c)).collect())
+        .collect();
+    grafito_geometry::exact_linalg::ExactMatrix::from_f64_rows(&rows)
+}
+
 fn parse_matrix_arg_strict(s: &str, variables: &BTreeMap<String, f64>) -> Result<Matrix, String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') {
@@ -32544,6 +32675,53 @@ mod coverage_sweep_handlers {
         }
     }
     #[test]
+    fn ola25_exact_linear_algebra_paths() {
+        // Determinante exacto de enteros: "det = -2 (exacto)".
+        let (_, out) = run_fresh("Determinant[[[1, 2], [3, 4]]]");
+        match out {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("det = -2"), "det exacto: {message}");
+                assert!(message.contains("exacto"), "vía exacta: {message}");
+            }
+            other => panic!("Determinant: {other:?}"),
+        }
+        // Inversa exacta con fracciones.
+        let (_, out) = run_fresh("Inverse[[[1, 2], [3, 4]]]");
+        match out {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("3/2"), "fracción exacta: {message}");
+                assert!(message.contains("-1/2"), "fracción exacta: {message}");
+            }
+            other => panic!("Inverse: {other:?}"),
+        }
+        // RREF exacta.
+        let (_, out) = run_fresh("ReducedRowEchelonForm[[[1, 2, 3], [4, 5, 6]]]");
+        match out {
+            CommandOutcome::Message(message) => {
+                assert!(
+                    message.contains("{{1, 0, -1}}") || message.contains("1, 0, -1"),
+                    "rref: {message}"
+                );
+            }
+            other => panic!("RREF: {other:?}"),
+        }
+        // Singular exacta: error honesto, sin tocar la vía numérica.
+        let (_, out) = run_fresh("Inverse[[[1, 2], [2, 4]]]");
+        assert!(matches!(out, CommandOutcome::Error(_)), "singular: {out:?}");
+        // Decimales exactos: 0.5 entra por la vía exacta.
+        let (_, out) = run_fresh("Determinant[[[0.5, 0], [0, 2]]]");
+        match out {
+            CommandOutcome::Message(message) => {
+                assert!(
+                    message.contains("det = 1 (exacto)"),
+                    "decimal exacto: {message}"
+                );
+            }
+            other => panic!("Determinant decimal: {other:?}"),
+        }
+    }
+
+    #[test]
     fn barrido_consultas_devuelven_mensaje() {
         let consultas = [
             ("Derivative[x^2, x]", "2"),
@@ -32678,14 +32856,18 @@ mod coverage_sweep_handlers {
             "Intersect rectas: {out:?}"
         );
         assert_sano(&doc3, "Intersect");
-        // Delete no existe en Grafito: el borrado real es Erase[etiqueta].
-        let mut t = format!("Delete[{}]", pts[0]);
-        assert!(
-            matches!(process_input(&mut doc2, &mut t), CommandOutcome::Error(_)),
-            "Delete es stub honesto"
-        );
+        // Ola 0.3: Delete[objeto] es el nombre GeoGebra de Erase[etiqueta].
         let antes = doc2.objects_iter().count();
-        let mut t = format!("Erase[{}]", pts[0]);
+        let mut t = format!("Delete[{}]", pts[0]);
+        let out = process_input(&mut doc2, &mut t);
+        assert!(!matches!(out, CommandOutcome::Error(_)), "Delete: {out:?}");
+        assert!(
+            doc2.objects_iter().count() < antes,
+            "Delete quita el punto y sus dependientes en cascada"
+        );
+        assert_sano(&doc2, "Delete");
+        let antes = doc2.objects_iter().count();
+        let mut t = format!("Erase[{}]", pts[1]);
         let out = process_input(&mut doc2, &mut t);
         assert!(!matches!(out, CommandOutcome::Error(_)), "Erase: {out:?}");
         assert!(

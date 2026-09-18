@@ -271,7 +271,7 @@ fn assistant_pending_indicator_uses_the_native_thinking_orb() {
     assert!(assistant_source.contains("ThinkingOrbState::Solving"));
     assert!(assistant_source.contains("ThinkingOrbState::Cancelling"));
     assert!(assistant_source.contains("Consulta remota autorizada..."));
-    assert!(assistant_source.contains("Cancelando..."));
+    assert!(assistant_source.contains("assistant.pending.cancelling"));
 }
 
 // ── Toolbar / Tool ────────────────────────────────────────────────────────
@@ -384,12 +384,12 @@ fn stable_toolbar_groups_do_not_expose_unavailable_placeholder_tools() {
 
     for group in groups {
         let (_, tools) = group.def();
-        for unavailable in [Tool::Button, Tool::Image] {
-            assert!(
-                tools.iter().all(|(tool, _, _)| *tool != unavailable),
-                "{unavailable:?} must stay out of stable toolbar group {group:?}"
-            );
-        }
+        // Ola 1.6: Button ya es real (GROUP_DYNAMICS); solo Image sigue fuera.
+        let unavailable = Tool::Image;
+        assert!(
+            tools.iter().all(|(tool, _, _)| *tool != unavailable),
+            "{unavailable:?} must stay out of stable toolbar group {group:?}"
+        );
     }
     let (_, curve_tools) = ToolGroupId::Curve.def();
     assert!(
@@ -504,8 +504,8 @@ fn compact_chrome_keeps_panel_navigation_and_theme_owned_slider_colors() {
     let ui_source = include_str!("../../grafito-app/src/ui.rs");
     let algebra_source = include_str!("../../grafito-app/src/algebra.rs");
 
-    assert!(ui_source.contains("menu_button(ui, \"Paneles\""));
-    assert!(ui_source.contains("menu_button(ui, \"Más\""));
+    assert!(ui_source.contains("t(\"menu.panels.title\", locale)"));
+    assert!(ui_source.contains("t(\"menu.more\", app.config_locale())"));
     assert!(ui_source.contains("top_chrome_uses_overflow"));
     assert!(algebra_source.contains("visuals.selection.bg_fill = theme.accent"));
     assert!(!algebra_source.contains("Color32::from_rgb(48, 52, 62)"));
@@ -565,7 +565,7 @@ fn assistant_is_a_permanent_docked_panel_without_a_launcher() {
     assert!(pending_source.contains("conversation_turn_appearance"));
     assert!(pending_source.contains("egui::Frame::none()"));
     assert!(assistant_source.contains("RetryProposalCorrection"));
-    assert!(assistant_source.contains("Adjuntar imagen"));
+    assert!(assistant_source.contains("assistant.composer.attach"));
     let proposal_start = assistant_source
         .find("fn draw_verified_assistant_proposal")
         .expect("verified proposal renderer");
@@ -607,7 +607,7 @@ fn assistant_uses_contextual_remote_interaction_without_transcription_or_local_c
     assert!(assistant_source.contains("ProviderProfile::OpenCodeGo"));
     assert!(assistant_source.contains("ComboBox::from_id_salt(\"assistant_model\")"));
     assert!(assistant_source.contains("Función seleccionada"));
-    assert!(assistant_source.contains("Adjuntar imagen"));
+    assert!(assistant_source.contains("assistant.composer.attach"));
     assert!(!assistant_source.contains("Shift+Enter agrega una línea."));
     assert!(assistant_source.contains("AssistantUiAction::InsertCommand"));
     assert!(assistant_source.contains("AssistantUiAction::ApplyProposal"));

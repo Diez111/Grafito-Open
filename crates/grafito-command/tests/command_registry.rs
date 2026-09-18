@@ -475,6 +475,11 @@ fn w1_symbolic_gate_specs_resolve_and_match_handlers() {
             &["groebner_basis", "basegroebner"][..],
             &[2][..],
         ),
+        // Ola 0.2: los tres nombres GeoGebra son specs propios, uno por orden
+        // (resolve/canonicalize ya son case-insensitive: sin alias).
+        ("Groebner", &[][..], &[1, 2][..]),
+        ("GroebnerLex", &[][..], &[1, 2][..]),
+        ("GroebnerDegRevLex", &[][..], &[1, 2][..]),
     ] {
         let spec = command_registry::resolve(canonical)
             .unwrap_or_else(|| panic!("{canonical} must have stable metadata"));

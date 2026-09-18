@@ -1298,11 +1298,41 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
+        "cas.groebner",
+        "Groebner",
+        [],
+        "CAS",
+        "Base de Groebner por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios; orden por defecto como GroebnerBasis): Groebner[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate.",
+        ReadOnly,
+        Low,
+        true,
+        "Groebner",
+        [
+            signature!("Groebner[polinomios]"; "polinomios": Expression required),
+            signature!("Groebner[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList optional)
+        ]
+    ),
+    command!(
+        "cas.groebner-lex",
+        "GroebnerLex",
+        [],
+        "CAS",
+        "Base de Groebner en orden lexicográfico por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios): GroebnerLex[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate.",
+        ReadOnly,
+        Low,
+        true,
+        "GroebnerLex",
+        [
+            signature!("GroebnerLex[polinomios]"; "polinomios": Expression required),
+            signature!("GroebnerLex[polinomios, variables]"; "polinomios": Expression required, "variables": ParameterList optional)
+        ]
+    ),
+    command!(
         "cas.groebner-degrevlex",
         "GroebnerDegRevLex",
-        ["groebner", "groebnerlex"],
+        [],
         "CAS",
-        "Base de Groebner degrevlex: exacta para 2 polinomios lineales en 2 variables; con mas de 2x2 devuelve error honesto, usa Eliminate o GroebnerBasis.",
+        "Base de Groebner en orden grevlex por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios): GroebnerDegRevLex[polinomios, variables]. Fuera de cota da error honesto que deriva a Eliminate.",
         ReadOnly,
         Low,
         true,
@@ -1317,7 +1347,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Factor",
         ["factorizar"],
         "CAS",
-        "Factoriza polinomios equivalentes.",
+        "Factoriza polinomios por raíces racionales y Kronecker acotado (enteros hasta grado 6); irreducible sobre Q se devuelve tal cual.",
         ReadOnly,
         Low,
         true,
@@ -1796,7 +1826,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Determinant",
         ["det"],
         "Matrices",
-        "Calcula un determinante.",
+        "Calcula el determinante; con entradas decimales exactas y hasta 32×32 usa aritmética racional exacta.",
         ReadOnly,
         Medium,
         true,
@@ -1808,7 +1838,7 @@ const COMMANDS: &[CommandSpec] = &[
         "Inverse",
         ["inversa"],
         "Matrices",
-        "Calcula una matriz inversa.",
+        "Calcula la inversa; con entradas decimales exactas y hasta 32×32 usa aritmética racional exacta.",
         ReadOnly,
         Medium,
         true,
@@ -2458,6 +2488,30 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "ZTest",
         [signature!("ZTest[{datos}, mu0, sigma]"; "datos": Data required, "mu0": Number required, "sigma": Number required)]
+    ),
+    command!(
+        "statistics.z-test-two-sample",
+        "ZTest2",
+        ["z_test2", "prueba_z2"],
+        "Estadística",
+        "Prueba z de dos muestras con sigmas poblacionales conocidos: ZTest2[{a}, {b}, sigma1, sigma2].",
+        ReadOnly,
+        Low,
+        true,
+        "ZTest2",
+        [signature!("ZTest2[{a}, {b}, sigma1, sigma2]"; "a": Data required, "b": Data required, "sigma1": Number required, "sigma2": Number required)]
+    ),
+    command!(
+        "statistics.f-test",
+        "FTest",
+        ["f_test", "prueba_f"],
+        "Estadística",
+        "Prueba F de igualdad de varianzas (bilateral): FTest[{a}, {b}].",
+        ReadOnly,
+        Low,
+        true,
+        "FTest",
+        [signature!("FTest[{a}, {b}]"; "a": Data required, "b": Data required)]
     ),
     command!(
         "statistics.chi-squared-test",
@@ -5103,14 +5157,14 @@ const COMMANDS: &[CommandSpec] = &[
         [signature!("HideLayer[n]"; "n": Integer required)]
     ),
     command!(
-        "scripting.start-animation-stub",
+        "scripting.start-animation",
         "StartAnimation",
         ["IniciarAnimacion"],
         "Dinámica",
-        "No soportado: usa PlayPause[variable] o PlayPause[].",
-        ReadOnly,
+        "Pone en marcha la animación de una variable o de todas si no se indica (semántica set: repetir no alterna, a diferencia de PlayPause).",
+        TransformsObject,
         Low,
-        false,
+        true,
         "StartAnimation",
         [
             signature!("StartAnimation[]";),
@@ -5118,14 +5172,14 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
-        "scripting.stop-animation-stub",
+        "scripting.stop-animation",
         "StopAnimation",
         ["DetenerAnimacion"],
         "Dinámica",
-        "No soportado: usa PlayPause[variable] o PlayPause[].",
-        ReadOnly,
+        "Pausa la animación de una variable o de todas si no se indica (idempotente: pausar lo pausado es no-op honesto).",
+        TransformsObject,
         Low,
-        false,
+        true,
         "StopAnimation",
         [
             signature!("StopAnimation[]";),
@@ -5133,14 +5187,14 @@ const COMMANDS: &[CommandSpec] = &[
         ]
     ),
     command!(
-        "scripting.delete-stub",
+        "scripting.delete",
         "Delete",
         ["Eliminar", "Borrar"],
         "Dinámica",
-        "No soportado: usa Erase[etiqueta] o EraseAll[].",
-        ReadOnly,
+        "Borra el objeto con la etiqueta dada (nombre GeoGebra de Erase[etiqueta]).",
+        TransformsObject,
         Low,
-        false,
+        true,
         "Delete",
         [signature!("Delete[objeto]"; "objeto": ObjectLabel required)]
     ),
@@ -5353,7 +5407,7 @@ const COMMANDS: &[CommandSpec] = &[
         "GroebnerBasis",
         ["groebner_basis", "basegroebner"],
         "CAS",
-        "Calculá la base de Groebner por Buchberger acotado (hasta 8 polinomios en 4 variables, 128 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate.",
+        "Calculá la base de Groebner por Buchberger acotado (hasta 12 polinomios en 6 variables, 384 S-polinomios; 3x3 lineal verificado): GroebnerBasis[polinomios, variables]. Fuera de cota o no polinómico da error honesto que deriva a Eliminate.",
         ReadOnly,
         Low,
         true,
@@ -6550,7 +6604,7 @@ const COMMANDS: &[CommandSpec] = &[
         "ReducedRowEchelonForm",
         ["reduced_row_echelon_form", "forma_escalonada", "rref"],
         "Matrices",
-        "Forma escalonada reducida por filas (Gauss-Jordan numérico).",
+        "Forma escalonada reducida por filas; exacta si las entradas son decimales exactos (≤32×32), numérica si no.",
         ReadOnly,
         Low,
         true,
@@ -7989,7 +8043,7 @@ const COMMANDS: &[CommandSpec] = &[
         "AxisStepX",
         [],
         "Dinámica",
-        "Guarda el paso del eje X en __view_axis_step_x; sin pasos por eje hoy, P3c.",
+        "Fija el paso de grilla del eje X en el lienzo 2D: AxisStepX[paso].",
         TransformsObject,
         Low,
         true,
@@ -8001,7 +8055,7 @@ const COMMANDS: &[CommandSpec] = &[
         "AxisStepY",
         [],
         "Dinámica",
-        "Guarda el paso del eje Y en __view_axis_step_y; sin pasos por eje hoy, P3c.",
+        "Fija el paso de grilla del eje Y en el lienzo 2D: AxisStepY[paso].",
         TransformsObject,
         Low,
         true,
@@ -8013,7 +8067,7 @@ const COMMANDS: &[CommandSpec] = &[
         "ShowAxes",
         [],
         "Dinámica",
-        "Guarda mostrar ejes en __view_show_axes; el render usa sus flags hoy, P3c.",
+        "Muestra u oculta los ejes del lienzo 2D: ShowAxes[bool].",
         TransformsObject,
         Low,
         true,
@@ -8025,7 +8079,7 @@ const COMMANDS: &[CommandSpec] = &[
         "ShowGrid",
         [],
         "Dinámica",
-        "Guarda mostrar grilla en __view_show_grid; el render usa su flag hoy, P3c.",
+        "Muestra u oculta la grilla del lienzo 2D: ShowGrid[bool] (sin flag vale el interruptor de la app).",
         TransformsObject,
         Low,
         true,
@@ -8915,6 +8969,8 @@ mod registry_tests {
             "LimitBelow",
             "ParametricDerivative",
             "Asymptote",
+            "Groebner",
+            "GroebnerLex",
             "GroebnerDegRevLex",
             "Factor",
             "Expand",
@@ -8988,6 +9044,8 @@ mod registry_tests {
             "ResidualPlot",
             "TTest",
             "TTest2",
+            "ZTest2",
+            "FTest",
             "TTestPaired",
             "ZTest",
             "ChiSqTest",
@@ -9822,11 +9880,15 @@ mod registry_tests {
         // Frente P4: +105 visibles S (20 CAS + 15 listas/texto + 22 geometría +
         // 6 stats/prob + 8 distribuciones huérfanas con brazo existente + 34
         // scripting/display; Payment/PresentValue/FutureValue SKIP: PV/FV/Pmt ya existen).
-        assert_eq!(all().len(), 639, "COMMANDS registrados (docs §8)");
+        // Ola 0.2: +2 visibles S (Groebner/GroebnerLex parten el spec único
+        // GroebnerDegRevLex: un orden real por nombre, motor Buchberger).
+        // Ola 0.3: +3 visibles S (StartAnimation/StopAnimation/Delete dejan de
+        // ser stub oculto: semántica real GeoGebra).
+        assert_eq!(all().len(), 643, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            599,
-            "comandos visibles en paleta (docs §8: 599 + 15 UI = 614)"
+            606,
+            "comandos visibles en paleta (docs §8: 606 + 15 UI = 621)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

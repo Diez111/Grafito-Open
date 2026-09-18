@@ -33,6 +33,7 @@ pub mod dd;
 pub mod derivation;
 pub mod discrete;
 pub mod exact;
+pub mod exact_linalg;
 pub mod expr;
 pub mod fractals;
 pub mod function_sampling;

@@ -255,6 +255,29 @@ fn derivative(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> f64 {
     derivative_var(expr, "x", x, vars)
 }
 
+/// Ola 2.1: derivada exacta por CAS (`symbolic::derivative`) para el análisis
+/// de y = f(x). `None` cuando el CAS no puede derivar: el llamador cae a la
+/// vía numérica histórica de diferencias finitas.
+fn symbolic_derivative_expr(expr: &str) -> Option<String> {
+    let derivative = crate::symbolic::derivative(expr, "x").ok()?;
+    let clean = derivative.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    Some(clean.to_string())
+}
+
+/// Evaluador de una derivada (simbólica si existe, numérica si no).
+fn derivative_evaluator<'a>(
+    expr: &'a str,
+    symbolic: &'a Option<String>,
+) -> impl Fn(f64, &BTreeMap<String, f64>) -> f64 + 'a {
+    move |x: f64, vars: &BTreeMap<String, f64>| match symbolic {
+        Some(d) => f64_or_nan(d, x, vars),
+        None => derivative(expr, x, vars),
+    }
+}
+
 fn second_derivative(expr: &str, x: f64, vars: &BTreeMap<String, f64>) -> f64 {
     second_derivative_var(expr, "x", x, vars)
 }
@@ -308,6 +331,8 @@ fn extract_roots(
     _opts: &AnalysisOptions,
 ) -> Vec<AnalysisResult> {
     let mut roots = Vec::new();
+    let symbolic_df = symbolic_derivative_expr(expr);
+    let df_eval = derivative_evaluator(expr, &symbolic_df);
     for i in 1..xs.len() {
         let x0 = xs[i - 1];
         let x1 = xs[i];
@@ -319,7 +344,7 @@ fn extract_roots(
         } else if (y0.is_finite() && y1.is_finite()) && (y0 * y1 <= 0.0 && (y0 != 0.0 || y1 != 0.0))
         {
             let f = |x: f64| f64_or_nan(expr, x, vars);
-            let df = |x: f64| derivative(expr, x, vars);
+            let df = |x: f64| df_eval(x, vars);
             let root = newton_refine(x1, f, df, DEFAULT_REFINE_ITER)
                 .or_else(|| bisect(f, x0, x1, DEFAULT_REFINE_ITER))
                 .unwrap_or(x1);
@@ -350,7 +375,19 @@ fn extract_extrema(
     _opts: &AnalysisOptions,
 ) -> Vec<AnalysisResult> {
     let mut extrema = Vec::new();
-    let df = |x: f64| derivative(expr, x, vars);
+    let symbolic_df = symbolic_derivative_expr(expr);
+    let df_eval = derivative_evaluator(expr, &symbolic_df);
+    let df = |x: f64| df_eval(x, vars);
+    // Clasificación por segunda derivada exacta cuando el CAS puede (más
+    // robusta que el signo del bracket, que falla si la muestra cae justo
+    // sobre la raíz); si no, segunda derivada numérica.
+    let symbolic_d2 = symbolic_df
+        .as_ref()
+        .and_then(|d1| symbolic_derivative_expr(d1));
+    let d2_at = |x: f64| match &symbolic_d2 {
+        Some(d2) => f64_or_nan(d2, x, vars),
+        None => second_derivative(expr, x, vars),
+    };
 
     for i in 1..xs.len() {
         let x0 = xs[i - 1];
@@ -359,17 +396,17 @@ fn extract_extrema(
         let d1 = df(x1);
 
         if d0.is_finite() && d1.is_finite() && d0 * d1 <= 0.0 && (d0 != 0.0 || d1 != 0.0) {
-            let root = newton_refine(
-                x1,
-                df,
-                |x| second_derivative(expr, x, vars),
-                DEFAULT_REFINE_ITER,
-            )
-            .or_else(|| bisect(df, x0, x1, DEFAULT_REFINE_ITER))
-            .unwrap_or(x1);
+            let root = newton_refine(x1, df, d2_at, DEFAULT_REFINE_ITER)
+                .or_else(|| bisect(df, x0, x1, DEFAULT_REFINE_ITER))
+                .unwrap_or(x1);
             if let Ok(y) = eval_function_with_vars(expr, root, vars) {
                 if y.is_finite() {
-                    let feature = if d0 > 0.0 {
+                    let second = d2_at(root);
+                    let feature = if second < 0.0 {
+                        AnalysisFeature::LocalMaximum
+                    } else if second > 0.0 {
+                        AnalysisFeature::LocalMinimum
+                    } else if d0 > 0.0 {
                         AnalysisFeature::LocalMaximum
                     } else {
                         AnalysisFeature::LocalMinimum
@@ -413,8 +450,20 @@ fn extract_inflections(
     _opts: &AnalysisOptions,
 ) -> Vec<AnalysisResult> {
     let mut inflections = Vec::new();
-    let d2f = |x: f64| second_derivative(expr, x, vars);
+    // Ola 2.1: segunda y tercera derivada exactas cuando el CAS puede;
+    // fallback numérico idéntico al histórico si no.
+    let symbolic_d2 = symbolic_derivative_expr(expr).and_then(|d1| symbolic_derivative_expr(&d1));
+    let symbolic_d3 = symbolic_d2
+        .as_ref()
+        .and_then(|d2| symbolic_derivative_expr(d2));
+    let d2f = |x: f64| match &symbolic_d2 {
+        Some(d2) => f64_or_nan(d2, x, vars),
+        None => second_derivative(expr, x, vars),
+    };
     let d3f = |x: f64| {
+        if let Some(d3) = &symbolic_d3 {
+            return f64_or_nan(d3, x, vars);
+        }
         let h = (x.abs().max(1.0) * EPS).max(1e-12);
         let v0 = d2f(x - 2.0 * h);
         let v1 = d2f(x - h);
@@ -2486,6 +2535,44 @@ mod tests {
             .find(|r| r.feature == AnalysisFeature::Inflection);
         assert!(infl.is_some(), "se esperaba al menos un punto de inflexión");
         assert!(infl.unwrap().point.x.abs() < 1e-3);
+    }
+
+    /// Ola 2.1: la derivada simbólica del CAS se usa cuando existe y la
+    /// clasificación de extremos sigue siendo correcta.
+    #[test]
+    fn ola21_symbolic_derivative_is_used_for_analysis() {
+        // Derivada exacta: d/dx (x³ − 3x) = 3x² − 3 → en 2 vale 9.
+        let symbolic = symbolic_derivative_expr("x^3 - 3*x").expect("CAS deriva el polinomio");
+        assert!(
+            (f64_or_nan(&symbolic, 2.0, &empty_vars()) - 9.0).abs() < 1e-9,
+            "derivada exacta en 2: {symbolic}"
+        );
+        // Expresión no derivable: fallback numérico (None), sin pánico.
+        assert!(symbolic_derivative_expr("desconocida(x)").is_none());
+        // Análisis real: extremos en ±1 para x³ − 3x.
+        let options = AnalysisOptions {
+            find_roots: false,
+            find_extrema: true,
+            find_inflections: false,
+            ..AnalysisOptions::default()
+        };
+        let results = analyze_function("x^3 - 3*x", &empty_vars(), &options);
+        let mut extrema: Vec<(f64, AnalysisFeature)> = results
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.feature,
+                    AnalysisFeature::LocalMaximum | AnalysisFeature::LocalMinimum
+                )
+            })
+            .map(|r| (r.point.x, r.feature))
+            .collect();
+        extrema.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        assert_eq!(extrema.len(), 2, "dos extremos: {extrema:?}");
+        assert!((extrema[0].0 + 1.0).abs() < 1e-4, "máximo en -1");
+        assert_eq!(extrema[0].1, AnalysisFeature::LocalMaximum);
+        assert!((extrema[1].0 - 1.0).abs() < 1e-4, "mínimo en 1");
+        assert_eq!(extrema[1].1, AnalysisFeature::LocalMinimum);
     }
 
     #[test]

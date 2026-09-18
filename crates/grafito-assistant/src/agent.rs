@@ -3572,6 +3572,15 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
                         name: call.name.clone(),
                         args_summary: summarize_responses_args(&call.arguments),
                     });
+                    if call.name == "ask_user" {
+                        if let Ok(request) = grafito_agent::tools::parse_ask_user_request(call) {
+                            on_event(AgentEvent::Clarification {
+                                call_id: call.id.clone(),
+                                question: request.question,
+                                options: request.options,
+                            });
+                        }
+                    }
                     if cancellation.is_cancelled() {
                         return Err("assistant agent request was cancelled".into());
                     }

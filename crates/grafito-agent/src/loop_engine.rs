@@ -90,12 +90,36 @@ pub trait ToolDispatcher {
 pub enum AgentEvent {
     /// Empezó la ejecución de una herramienta.
     ToolStarted { name: String, args_summary: String },
-    /// Terminó la ejecución de una herramienta.
+    /// Terminó la ejecución de la herramienta.
     ToolFinished { name: String, ok: bool },
+    /// El agente pidió una aclaración al usuario (`ask_user`) con el
+    /// `call_id` REAL del wire: la UI responde con ese id y el loop la
+    /// retoma como `function_call_output`/mensaje sin heurísticas.
+    Clarification {
+        call_id: String,
+        question: String,
+        options: Vec<String>,
+    },
     /// El agente produjo su respuesta final.
     Finalized { text: String },
     /// Estado de tarea (ledger J-Space) al comienzo de la ejecución.
     Ledger { render: String },
+}
+
+/// Construye el evento de aclaración desde una llamada `ask_user` válida.
+///
+/// `None` si la llamada no es `ask_user`, si no parsea, o si viene sin
+/// `id`/pregunta: la UI nunca inventa una aclaración.
+fn clarification_event(call: &ToolCall) -> Option<AgentEvent> {
+    if call.name != "ask_user" {
+        return None;
+    }
+    let request = crate::tools::parse_ask_user_request(call).ok()?;
+    Some(AgentEvent::Clarification {
+        call_id: call.id.clone(),
+        question: request.question,
+        options: request.options,
+    })
 }
 
 /// Resultado terminal del loop del agente.
@@ -275,6 +299,9 @@ where
                         name: call.name.clone(),
                         args_summary: summarize_args(&call.arguments),
                     });
+                    if let Some(clarification) = clarification_event(call) {
+                        on_event(clarification);
+                    }
                     if cancellation.is_cancelled() {
                         return Err("assistant agent request was cancelled".into());
                     }

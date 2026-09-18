@@ -50,6 +50,10 @@ pub(crate) struct AppConfig {
     /// Buscar en internet: pre-flight web + tool `web_search` del agente.
     #[serde(default)]
     pub(crate) assistant_web_search_enabled: bool,
+    /// Tutor socrático: repreguntas y repair antes de la solución directa.
+    /// Apagado = respuestas directas. Default true (pedagogía del producto).
+    #[serde(default = "default_socratic_enabled")]
+    pub(crate) assistant_socratic_enabled: bool,
     /// Onboarding 30s ya visto (Scandinavian, sin laberinto).
     #[serde(default)]
     pub(crate) onboarding_completed: bool,
@@ -63,6 +67,10 @@ pub(crate) struct AppConfig {
 }
 
 fn default_full_permission() -> bool {
+    true
+}
+
+const fn default_socratic_enabled() -> bool {
     true
 }
 
@@ -219,6 +227,7 @@ impl Default for AppConfig {
             assistant_agent_mode: false,
             assistant_reasoning_enabled: false,
             assistant_web_search_enabled: false,
+            assistant_socratic_enabled: default_socratic_enabled(),
             onboarding_completed: false,
             advanced_red_opt_in: false,
             locale: AppLocale::resolve(),

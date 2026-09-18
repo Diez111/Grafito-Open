@@ -12,6 +12,7 @@
 
 use crate::controllers::{AssistantController, DocumentController, ViewController};
 use crate::utils::{load_config, save_config, AppConfig, AppLocale, AutosaveDebouncer};
+use crate::view_flags::view_bg_color;
 use crate::{Perspective, ViewMode};
 use egui::Pos2;
 use grafito_core::{
@@ -532,6 +533,21 @@ pub(crate) const DEFAULT_4D_ROTATION_RADIANS_PER_SECOND: f64 = 0.55;
 pub(crate) const MIN_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 0.25;
 pub(crate) const DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 1.0;
 pub(crate) const MAX_MULTIDIMENSIONAL_MOTION_SPEED: f32 = 2.0;
+/// Ola 2.7: tope de guiones `OnUpdate` ejecutados por commit mutante.
+pub(crate) const MAX_ON_UPDATE_SCRIPTS_PER_COMMIT: usize = 16;
+
+/// Ola 2.7: comandos que solo guardan guiones; no disparan `OnUpdate` al
+/// almacenarse (GeoGebra tampoco los ejecuta al definir).
+pub(crate) fn is_script_store_command(cmd: &str) -> bool {
+    let head = cmd
+        .trim()
+        .split(['[', '('])
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(head.as_str(), "onload" | "onupdate" | "onclick" | "script")
+}
 
 // ── F17 Repaint coalesce + Ola 2 presupuesto único ──────────────────────────
 // El scheduler unificado de `GrafitoApp::update` (ver `update`) es la única
@@ -1846,6 +1862,12 @@ pub struct GrafitoApp {
     pub(crate) transient_render_state: TransientRenderState,
     /// Activa una orbita de camara 3D y una rotacion de proyecciones 4D por defecto.
     pub(crate) multidimensional_motion_enabled: bool,
+    /// Velocidad de giro explícita de `SetSpinSpeed[grados]` (0 = quieto).
+    /// `None` = manda el interruptor/velocidad de la app. Se sincroniza del
+    /// documento cada frame (`__view_spin_speed`).
+    pub(crate) explicit_spin_speed_dps: Option<f32>,
+    /// Guard de reentrada de guiones `OnUpdate` (Ola 2.7): evita cascadas.
+    pub(crate) on_update_running: bool,
     /// Multiplicador transitorio compartido por la órbita 3D y la fase 4D.
     pub(crate) multidimensional_motion_speed: f32,
     /// Vista 3D del canvas (dueño canvas.rs): la escribe el selector del
@@ -1915,6 +1937,8 @@ pub struct GrafitoApp {
     pub autocomplete: InputAutocomplete,
     /// Visibilidad de la ventana modal "Acerca de Grafito".
     pub show_about: bool,
+    /// Visibilidad de la hoja de atajos de teclado (claves `cheat.*` i18n).
+    pub show_cheat_sheet: bool,
     /// Visibilidad del panel de animación trigonométrica (círculo unitario).
     pub show_trig_animation: bool,
     /// Ángulo actual para la animación trigonométrica (en radianes).
@@ -2209,6 +2233,7 @@ impl GrafitoApp {
     fn gpu_scene_2d_readiness(&self) -> crate::canvas::Scene2DReadiness {
         let key = crate::canvas::Cache2DKey {
             version: self.document.version,
+            nonce: self.document.cache_nonce,
             view: *self.document.view(),
             render_quality: self.document.render_quality,
             dark_mode: self.dark_mode,
@@ -2241,7 +2266,7 @@ impl GrafitoApp {
             })
     }
 
-    fn replace_document(&mut self, document: Document, path: Option<PathBuf>) {
+    pub(crate) fn replace_document(&mut self, document: Document, path: Option<PathBuf>) {
         // R1: el reemplazo + limpieza de historial vive en
         // `DocumentController::replace_document`.
         let mut doc_ctl = DocumentController::from_parts(
@@ -2276,6 +2301,8 @@ impl GrafitoApp {
         if let Some(readiness) = &self.gpu_scene_readiness {
             readiness.clear();
         }
+        // Ola 2.7: el OnLoad corre al abrir/importar, nunca en cada frame.
+        self.run_on_load_script_if_present();
     }
 
     /// Limpia el estado de UI cuyos valores pertenecen al documento reemplazado.
@@ -2440,6 +2467,7 @@ impl GrafitoApp {
         assistant.agent_mode = config.assistant_agent_mode;
         assistant.reasoning_enabled = config.assistant_reasoning_enabled;
         assistant.web_search_enabled = config.assistant_web_search_enabled;
+        assistant.socratic_enabled = config.assistant_socratic_enabled;
 
         let snapshot_version = document.version;
         let snapshot_render_quality = document.render_quality;
@@ -2550,6 +2578,8 @@ impl GrafitoApp {
             gpu_scene_readiness,
             transient_render_state: TransientRenderState::default(),
             multidimensional_motion_enabled: true,
+            explicit_spin_speed_dps: None,
+            on_update_running: false,
             multidimensional_motion_speed: DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
             view3d: crate::canvas::View3D::default(),
             camera_travelling: None,
@@ -2594,6 +2624,7 @@ impl GrafitoApp {
             statistics_input_error: None,
             autocomplete: InputAutocomplete::default(),
             show_about: false,
+            show_cheat_sheet: false,
             show_trig_animation: false,
             trig_angle: 0.0,
             trig_animating: false,
@@ -3226,6 +3257,7 @@ impl GrafitoApp {
             assistant_agent_mode: self.assistant.agent_mode,
             assistant_reasoning_enabled: self.assistant.reasoning_enabled,
             assistant_web_search_enabled: self.assistant.web_search_enabled,
+            assistant_socratic_enabled: self.assistant.socratic_enabled,
             onboarding_completed: false,
             enabled_plugins: Vec::new(),
             disabled_plugins: Vec::new(),
@@ -3283,8 +3315,129 @@ impl GrafitoApp {
         true
     }
 
-    fn advance_multidimensional_motion(&mut self, dt: f64) -> bool {
+    /// Ola 1.7: lee `__view_spin_speed` (grados/s, `SetSpinSpeed`) y lo
+    /// aplica al campo explícito. La variable ausente deja la conducta de la
+    /// app; `0` estaciona la órbita aunque el interruptor esté encendido.
+    pub(crate) fn sync_spin_speed_from_document(&mut self) {
+        let value = self
+            .document
+            .variables
+            .get("__view_spin_speed")
+            .copied()
+            .filter(|value| value.is_finite())
+            .map(|value| (value as f32).clamp(0.0, 360.0));
+        self.explicit_spin_speed_dps = value;
+    }
+
+    /// Ola 2.7: ejecuta el `OnLoad` del documento recién reemplazado (una vez
+    /// por carga) y después los `OnUpdate` que correspondan. Best-effort: un
+    /// error se notifica y no aborta la carga.
+    pub(crate) fn run_on_load_script_if_present(&mut self) {
+        if self.document.on_load_script.is_none() {
+            return;
+        }
+        use grafito_command::commands::CommandOutcome;
+        let before = self.document.clone();
+        let outcome = match grafito_command::ggbscript::run_load_script(&mut self.document) {
+            Ok(steps) => CommandOutcome::Message(format!("OnLoad: {steps} pasos")),
+            Err(error) => CommandOutcome::Error(format!("OnLoad: {error}")),
+        };
+        let mutated = crate::lifecycle::command_mutated_document(&outcome, &before, &self.document);
+        save_command_snapshot_if_mutated(
+            &outcome,
+            before,
+            &self.document,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+        );
+        if mutated {
+            self.mark_autosave_dirty();
+        }
+        let updates = self.run_on_update_scripts();
+        match outcome {
+            CommandOutcome::Error(message) => {
+                self.notify(message, grafito_ui::toast::ToastKind::Error);
+            }
+            CommandOutcome::Message(message) if mutated || updates > 0 => {
+                self.notify(message, grafito_ui::toast::ToastKind::Info);
+            }
+            _ => {}
+        }
+    }
+
+    /// Ola 2.7: corre los guiones `OnUpdate` una vez por commit con tope y
+    /// guard de reentrada. Devuelve cuántos corrieron. El primer error se
+    /// notifica y corta (los guiones siguientes no se ejecutan sobre un
+    /// documento posiblemente inconsistente).
+    pub(crate) fn run_on_update_scripts(&mut self) -> usize {
+        if self.on_update_running {
+            return 0;
+        }
+        use grafito_command::commands::CommandOutcome;
+        let labels = grafito_command::ggbscript::on_update_script_labels(&self.document);
+        if labels.is_empty() {
+            return 0;
+        }
+        self.on_update_running = true;
+        let mut ran = 0usize;
+        for label in labels.into_iter().take(MAX_ON_UPDATE_SCRIPTS_PER_COMMIT) {
+            let before = self.document.clone();
+            let outcome =
+                match grafito_command::ggbscript::run_update_script(&mut self.document, &label) {
+                    Ok(steps) => {
+                        ran = ran.saturating_add(1);
+                        CommandOutcome::Message(format!("OnUpdate[{label}]: {steps} pasos"))
+                    }
+                    Err(error) => CommandOutcome::Error(format!("OnUpdate[{label}]: {error}")),
+                };
+            let mutated =
+                crate::lifecycle::command_mutated_document(&outcome, &before, &self.document);
+            save_command_snapshot_if_mutated(
+                &outcome,
+                before,
+                &self.document,
+                &mut self.undo_stack,
+                &mut self.redo_stack,
+            );
+            if mutated {
+                self.mark_autosave_dirty();
+            }
+            if let CommandOutcome::Error(message) = &outcome {
+                self.notify(message.clone(), grafito_ui::toast::ToastKind::Error);
+                break;
+            }
+        }
+        self.on_update_running = false;
+        ran
+    }
+
+    pub(crate) fn advance_multidimensional_motion(&mut self, dt: f64) -> bool {
         self.assert_view_invariant();
+        if let Some(dps) = self.explicit_spin_speed_dps {
+            // Giro comandado: la órbita de cámara responde al ángulo exacto
+            // (0 = quieto) sin depender del interruptor ambiental. El 4D
+            // sigue gobernado por la velocidad de la app.
+            let visible = self.has_visible_multidimensional_object();
+            let camera_advanced = dps > 0.0
+                && visible
+                && crate::canvas::tick_view3d_ambient(
+                    self.view3d,
+                    &mut self.camera,
+                    dt.min(0.1) as f32,
+                    dps.to_radians(),
+                );
+            let four_d_advanced = visible
+                && self.multidimensional_motion_enabled
+                && self.has_visible_four_d_projection()
+                && self.transient_render_state.advance_four_d_phase(
+                    DEFAULT_4D_ROTATION_RADIANS_PER_SECOND
+                        * normalize_multidimensional_motion_speed(
+                            self.multidimensional_motion_speed,
+                        ) as f64
+                        * dt.min(0.1),
+                );
+            return camera_advanced || four_d_advanced;
+        }
         if !should_animate_multidimensional_scene(
             self.current_view,
             self.multidimensional_motion_enabled,
@@ -3762,6 +3915,12 @@ impl GrafitoApp {
         }
         self.handle_command_outcome(outcome.clone(), time, cmd);
         self.record_step_from_diff(cmd, &before, mutated_document);
+        // Ola 2.7: los guiones OnUpdate corren tras un commit mutante real,
+        // salvo cuando el propio comando solo guarda scripts (no se
+        // auto-ejecutan al almacenarse).
+        if mutated_document && !is_script_store_command(cmd) {
+            self.run_on_update_scripts();
+        }
         outcome
     }
 
@@ -6335,6 +6494,19 @@ impl GrafitoApp {
             self.document.render_quality = grafito_core::RenderQuality::High;
         }
     }
+
+    /// Zoom por pasos (botones +/−, pinch): mismo efecto colateral que el zoom
+    /// por rueda (calidad Preview durante el gesto). `factor` se clamp-ea al
+    /// rango del gesto de rueda; `ViewTransform::zoom` ignora no-finitos.
+    /// `local` en píxeles relativos al canvas (como el handler de scroll).
+    pub(crate) fn zoom_stepped_view(&mut self, factor: f32, local: glam::Vec2) {
+        self.is_view_changing = true;
+        self.last_interaction_time = std::time::Instant::now();
+        self.document.render_quality = RenderQuality::Preview;
+        self.document
+            .view_mut()
+            .zoom(factor.clamp(0.8, 1.25), local);
+    }
 }
 
 #[cfg(test)]
@@ -6810,9 +6982,9 @@ impl eframe::App for GrafitoApp {
                 grafito_ui::assistant::assistant_uses_bottom_sheet(ctx.available_rect().width());
             let assistant_limits_status_bar = self.assistant_visible && !assistant_bottom_sheet;
             if !assistant_limits_status_bar {
-                // La barra «Entrada…» inferior se quitó del layout: los comandos
-                // matemáticos se cargan por la sección algebraica.
-                crate::ui::draw_bottom_bar(self, ctx, false);
+                // Ola 1.1: la barra «Entrada…» vuelve al layout, gobernada por
+                // ShellLayout (visible salvo que el drawer ya muestre entrada).
+                crate::ui::draw_bottom_bar(self, ctx, shell.show_bottom_input);
             }
 
             // Los drawers laterales reservan toda la altura antes del teclado.
@@ -6871,7 +7043,7 @@ impl eframe::App for GrafitoApp {
                 // Modo side-panel visible: la barra inferior va acá (después
                 // del asistente y los drawers) para quedar limitada a la
                 // columna central, sin pisar el composer.
-                crate::ui::draw_bottom_bar(self, ctx, false);
+                crate::ui::draw_bottom_bar(self, ctx, shell.show_bottom_input);
             }
             if keyboard_layout != crate::keyboard::MathKeyboardLayout::Hidden {
                 crate::keyboard::draw_math_keyboard(self, ctx, keyboard_layout);
@@ -6938,6 +7110,40 @@ impl eframe::App for GrafitoApp {
                             self.zoom_to_fit();
                             ui.ctx().request_repaint();
                         }
+                        // Ola 0.6: zoom por pasos +/− (mismo gesto que la rueda,
+                        // anclado al centro del canvas). Debajo del [].
+                        let canvas_center =
+                            glam::Vec2::new(canvas_rect.width() / 2.0, canvas_rect.height() / 2.0);
+                        for (dy, glyph, tip, factor) in [
+                            (44.0, "+", "Acercar (×1.25)", 1.25f32),
+                            (80.0, "−", "Alejar (÷1.25)", 1.0f32 / 1.25f32),
+                        ] {
+                            let btn_rect = egui::Rect::from_min_size(
+                                egui::pos2(
+                                    canvas_rect.right() - 44.0,
+                                    canvas_rect.top() + 8.0 + dy,
+                                ),
+                                egui::vec2(38.0, 28.0),
+                            );
+                            let btn = egui::Button::new(
+                                egui::RichText::new(glyph)
+                                    .size(grafito_ui::tokens::TYPE_SM)
+                                    .color(theme.text_primary),
+                            )
+                            .wrap_mode(egui::TextWrapMode::Extend)
+                            .fill(theme.toolbar_bg)
+                            .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                            .rounding(4.0);
+                            let resp = ui.put(btn_rect, btn);
+                            let resp = resp.on_hover_text(tip);
+                            resp.widget_info(|| {
+                                egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip)
+                            });
+                            if resp.clicked() {
+                                self.zoom_stepped_view(factor, canvas_center);
+                                ui.ctx().request_repaint();
+                            }
+                        }
 
                         let scene_plan = crate::canvas::plan_2d_scene(
                             self.use_gpu,
@@ -6954,6 +7160,11 @@ impl eframe::App for GrafitoApp {
                         {
                             #[cfg(feature = "profile")]
                             puffin::profile_scope_if!(canvas_resize_preview, "resize_cpu_grid_2d");
+                            // Ola 0.5: `SetBackgroundColor[color]` guarda `__view_bg`;
+                            // vale en CPU y GPU (el callback usa clear transparente).
+                            if let Some(bg) = view_bg_color(&self.document) {
+                                painter.rect_filled(canvas_rect, 0.0, bg);
+                            }
                             self.draw_grid(&painter, canvas_rect);
                             self.draw_axes(&painter, canvas_rect, !canvas_resize_preview);
                         }
@@ -7081,6 +7292,7 @@ impl eframe::App for GrafitoApp {
                         puffin::profile_scope!("input");
                         self.handle_canvas_3d_input(ui, canvas_rect, input_typed_four_d_phase);
                     }
+                    self.sync_spin_speed_from_document();
                     let automatic_motion_active = self.advance_multidimensional_motion(dt);
                     if automatic_motion_active {
                         // F17: redundante con el scheduler unificado (animating),
@@ -7417,6 +7629,10 @@ impl eframe::App for GrafitoApp {
         if self.show_about {
             self.draw_about_window(ctx);
         }
+        // Ola 0.6: hoja de atajos (Ayuda > Atajos de teclado).
+        if self.show_cheat_sheet {
+            self.draw_cheat_sheet_window(ctx);
+        }
         // Onboarding 30s — gating `onboarding_completed` (utils.rs:46-48) con Window 420px
         if self.show_onboarding {
             self.draw_onboarding_window(ctx);
@@ -7430,6 +7646,7 @@ impl eframe::App for GrafitoApp {
         // de otros diálogos (onboarding/about/custom-tool van primero).
         if !self.show_onboarding
             && !self.show_about
+            && !self.show_cheat_sheet
             && !self.show_custom_tool_dialog
             && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
         {
@@ -8582,6 +8799,57 @@ impl GrafitoApp {
             self.show_about = false;
         }
     }
+
+    /// Ola 0.6: hoja de atajos de teclado (Ayuda > Atajos de teclado). Usa las
+    /// claves `cheat.*` localizadas, que hasta ahora no tenían caller.
+    pub(crate) fn draw_cheat_sheet_window(&mut self, ctx: &egui::Context) {
+        use grafito_ui::i18n::{cheat_sheet_msg, CHEAT_KEYS};
+        let theme = grafito_ui::theme::current_theme(ctx);
+        let locale = self.config_locale();
+        egui::Window::new(cheat_sheet_msg("title", locale))
+            .id(egui::Id::new("cheat_sheet_window"))
+            .collapsible(false)
+            .resizable(false)
+            .default_width(420.0)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .frame(
+                egui::Frame::window(&ctx.style())
+                    .fill(theme.toolbar_bg)
+                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+            )
+            .show(ctx, |ui| {
+                for key in CHEAT_KEYS.iter().skip(1) {
+                    ui.label(
+                        egui::RichText::new(cheat_sheet_msg(key, locale))
+                            .size(grafito_ui::tokens::TYPE_SM)
+                            .color(theme.text_primary),
+                    );
+                    ui.add_space(grafito_ui::tokens::SPACE_XS);
+                }
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.separator();
+                ui.add_space(grafito_ui::tokens::SPACE_SM);
+                ui.vertical_centered(|ui| {
+                    if ui
+                        .add(
+                            egui::Button::new(
+                                egui::RichText::new(cheat_sheet_msg("close", locale))
+                                    .size(grafito_ui::tokens::TYPE_SM),
+                            )
+                            .min_size(egui::vec2(96.0, 30.0)),
+                        )
+                        .clicked()
+                    {
+                        self.show_cheat_sheet = false;
+                    }
+                });
+            });
+        // A11Y (D1): Esc cierra igual que [Cerrar].
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            self.show_cheat_sheet = false;
+        }
+    }
 }
 
 /// Resumen histórico de cambios — conservado para referencia, no mostrado en UI resumida.
@@ -9170,6 +9438,8 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         gpu_scene_readiness: None,
         transient_render_state: TransientRenderState::default(),
         multidimensional_motion_enabled: true,
+        explicit_spin_speed_dps: None,
+        on_update_running: false,
         multidimensional_motion_speed: DEFAULT_MULTIDIMENSIONAL_MOTION_SPEED,
         view3d: crate::canvas::View3D::default(),
         camera_travelling: None,
@@ -9207,6 +9477,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         statistics_input_error: None,
         autocomplete: InputAutocomplete::default(),
         show_about: false,
+        show_cheat_sheet: false,
         show_trig_animation: false,
         trig_angle: 0.0,
         trig_animating: false,

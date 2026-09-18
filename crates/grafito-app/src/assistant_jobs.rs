@@ -46,8 +46,8 @@
 use crate::assistant::{
     accepts_model_result, accepts_remote_context, accepts_remote_result,
     apply_local_assistant_plan, attachment_error_message, is_session_or_account_error,
-    is_socratic_repair_error, parse_agent_ask_user_pending, pop_provisional_stream_turn,
-    remote_error_message, send_agent_msg_nonblocking, should_fallback_agent_spark_to_deepseek,
+    is_socratic_repair_error, pop_provisional_stream_turn, remote_error_message,
+    send_agent_msg_nonblocking, should_fallback_agent_spark_to_deepseek,
     should_fallback_remote_spark_to_deepseek, socratic_guard_context, AssistantRuntime,
 };
 use crate::assistant_preflight::{
@@ -65,7 +65,7 @@ use grafito_assistant_types::{
     ImmutableDocumentContext, ProviderCapabilities, ProviderProfile, ReasoningEffort,
     REMOTE_CONTEXT_PROMPT_OVERHEAD_BYTES, REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES,
     REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES, REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES,
-    REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES,
+    REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES, REMOTE_WEB_CONTEXT_PROMPT_OVERHEAD_BYTES,
 };
 use grafito_core::{ChangeSet, Document, ObjectId};
 use grafito_geometry::Camera3D;
@@ -268,6 +268,9 @@ pub(crate) struct AssistantRemoteJob {
     pub(crate) document_revision: u64,
     pub(crate) document_digest: String,
     pub(crate) focus: Option<AssistantFocus>,
+    /// Caracteres del prompt real enviado al proveedor (telemetría de tokens;
+    /// 0 si el prompt no se pudo armar en el momento del conteo).
+    pub(crate) input_chars: usize,
     pub(crate) cancellation: CancellationToken,
     pub(crate) receiver: Receiver<Result<RemoteCompletion, String>>,
     /// Deltas de streaming SSE tipados (razonamiento / texto; protocolos
@@ -306,9 +309,14 @@ pub(crate) struct AssistantProposalJob {
     pub(crate) question: String,
     pub(crate) correction_attempt: u8,
     pub(crate) repair_target_turn: Option<usize>,
-    pub(crate) document_revision: u64,
-    pub(crate) document_digest: String,
-    pub(crate) focus: Option<AssistantFocus>,
+    /// Revisión/huella del documento contra el que el worker verificó las
+    /// propuestas (capturada al lanzar el preflight, no al pedir la
+    /// respuesta): si el documento cambia durante la verificación, las
+    /// propuestas se descartan con aviso honesto pero el TEXTO se publica.
+    pub(crate) preflight_revision: u64,
+    pub(crate) preflight_digest: String,
+    /// Foco seleccionado al lanzar el preflight (contexto de corrección).
+    pub(crate) preflight_focus: Option<AssistantFocus>,
     pub(crate) text: String,
     pub(crate) cancellation: CancellationToken,
     pub(crate) receiver: Receiver<Result<RemoteProposalVerification, String>>,
@@ -341,6 +349,11 @@ pub(crate) struct AssistantRepairRequest {
 }
 
 /// Lanzamiento de verificación de propuesta (movido verbatim).
+///
+/// El contexto contra el que se verifica lo captura `start_remote_proposal`
+/// al clonar el documento vivo: la base del preflight es SIEMPRE el estado
+/// actual, nunca la del pedido original (el texto ya no se descarta cuando
+/// el documento cambió mientras el proveedor pensaba).
 pub(crate) struct AssistantProposalLaunch {
     pub(crate) id: u64,
     pub(crate) provider: ProviderProfile,
@@ -350,9 +363,6 @@ pub(crate) struct AssistantProposalLaunch {
     pub(crate) question: String,
     pub(crate) correction_attempt: u8,
     pub(crate) repair_target_turn: Option<usize>,
-    pub(crate) document_revision: u64,
-    pub(crate) document_digest: String,
-    pub(crate) focus: Option<AssistantFocus>,
     pub(crate) text: String,
 }
 
@@ -404,6 +414,10 @@ pub(crate) struct FinishedRemoteJob {
     pub(crate) document_revision: u64,
     pub(crate) document_digest: String,
     pub(crate) focus: Option<AssistantFocus>,
+    /// Caracteres del prompt enviado (telemetría; espejo del job).
+    pub(crate) input_chars: usize,
+    /// Duración total del turno remoto en milisegundos (telemetría).
+    pub(crate) elapsed_ms: u64,
     pub(crate) cancelled: bool,
     pub(crate) result: Result<RemoteCompletion, String>,
     /// El job dejó una burbuja provisional que el poll debe limpiar antes de
@@ -425,9 +439,11 @@ pub(crate) struct FinishedProposalJob {
     pub(crate) question: String,
     pub(crate) correction_attempt: u8,
     pub(crate) repair_target_turn: Option<usize>,
-    pub(crate) document_revision: u64,
-    pub(crate) document_digest: String,
-    pub(crate) focus: Option<AssistantFocus>,
+    /// Base contra la que se verificaron las propuestas (ver
+    /// [`AssistantProposalJob`]).
+    pub(crate) preflight_revision: u64,
+    pub(crate) preflight_digest: String,
+    pub(crate) preflight_focus: Option<AssistantFocus>,
     pub(crate) text: String,
     pub(crate) cancelled: bool,
     pub(crate) result: Result<RemoteProposalVerification, String>,
@@ -501,6 +517,12 @@ pub(crate) struct BuildRemoteParams {
 pub(crate) struct AssistantJobsController;
 
 impl AssistantJobsController {
+    /// Slug estable del proveedor para la telemetría local (sin claves ni
+    /// secretos: sólo la identidad del perfil).
+    fn provider_slug(provider: ProviderProfile) -> String {
+        format!("{provider:?}").to_ascii_lowercase()
+    }
+
     /// Réplica exacta de `GrafitoApp::object_labels_snapshot` (`app.rs:3374`,
     /// intocable): etiquetas no vacías del documento como conjunto.
     fn labels_snapshot(document: &Document) -> HashSet<String> {
@@ -569,6 +591,10 @@ impl AssistantJobsController {
         profile: &StudentProfile,
         question: &str,
     ) -> Option<SocraticGuardContext> {
+        // Tutor desactivado en ajustes: respuestas directas, sin guard.
+        if !panel.socratic_enabled {
+            return None;
+        }
         // Es demo, no evaluación: se salta el telling.
         if is_exploratory_request(question) {
             return None;
@@ -803,11 +829,14 @@ impl AssistantJobsController {
             } else {
                 REMOTE_PLUGIN_INSTRUCTIONS_OVERHEAD_BYTES
             };
+        // Cuentas sobre los ADJUNTOS REALES del envío: el request todavía no
+        // los tiene asignados (se asignan abajo), así que se miden desde el
+        // parámetro. Sin esto, una transcripción de adjunto grande pasaba el
+        // presupuesto sin restar y `validate` fallaba al final.
         let transcription_bytes = request.transcription.text.len()
-            + request
-                .attachments
+            + attachments
                 .iter()
-                .map(|a| a.transcription.text.len())
+                .map(|attachment| attachment.transcription.text.len())
                 .sum::<usize>();
         // Presupuesto equitativo: garantiza catálogo útil incluso con historia larga
         let raw_catalog = request
@@ -826,7 +855,10 @@ impl AssistantJobsController {
             .saturating_sub(REMOTE_TOOL_CATALOG_PROMPT_OVERHEAD_BYTES)
             .saturating_sub(repair_feedback_bytes)
             .saturating_sub(system_bytes)
-            .saturating_sub(transcription_bytes);
+            .saturating_sub(transcription_bytes)
+            // El pre-flight web (opt-in) agrega el prefijo DESPUÉS de validar:
+            // se reservan sus 70B siempre para que el prompt final no rebalse.
+            .saturating_sub(REMOTE_WEB_CONTEXT_PROMPT_OVERHEAD_BYTES);
         // Garantiza mínimo 1K para herramientas relevantes (evita catálogo vacío que deja al LLM ciego)
         let catalog_budget = raw_catalog.clamp(1024, 32_000);
         request.tool_catalog =
@@ -853,7 +885,10 @@ impl AssistantJobsController {
             .saturating_sub(catalog_overhead)
             .saturating_sub(repair_feedback_bytes)
             .saturating_sub(system_bytes)
-            .saturating_sub(transcription_bytes);
+            .saturating_sub(transcription_bytes)
+            // Reserva del prefijo web (ver `raw_catalog`): el pre-flight lo
+            // agrega después de validar.
+            .saturating_sub(REMOTE_WEB_CONTEXT_PROMPT_OVERHEAD_BYTES);
         request.conversation = match history_before_turn {
             Some(target_turn) => {
                 panel.conversation_before_turn_within_budget(target_turn, history_budget)
@@ -863,10 +898,91 @@ impl AssistantJobsController {
         request.attachments = attachments;
         request.image_upload_consent = image_upload_consent;
         request.repair_feedback = repair_feedback;
-        request.validate(&AttachmentLimits::default())?;
+        Self::force_fit_remote_request(&mut request, &AttachmentLimits::default())?;
         Ok(request)
     }
 
+    /// Piso del catálogo en el ajuste forzado: 256 bytes alcanzan para un
+    /// puñado de firmas relevantes sin dejar al modelo ciego.
+    const MIN_REMOTE_CATALOG_BYTES: usize = 256;
+
+    /// Desglose de tamaños del request en bytes (SIN contenido): diagnóstico
+    /// honesto cuando el presupuesto no alcanza ni en el piso.
+    fn request_size_breakdown(request: &AssistantRequest) -> String {
+        format!(
+            "pregunta={} sistema={} catalogo={} historial={} foco={} reparacion={} transcripcion={} adjuntos={} web={}",
+            request.problem.len(),
+            request.system_instructions.len(),
+            request.tool_catalog.len(),
+            request
+                .conversation
+                .iter()
+                .map(|turn| turn.content.len())
+                .sum::<usize>(),
+            request
+                .focus
+                .as_ref()
+                .map(|focus| focus.summary.len())
+                .unwrap_or_default(),
+            request
+                .repair_feedback
+                .as_ref()
+                .map(|feedback| feedback.prompt_text().len())
+                .unwrap_or_default(),
+            request.transcription.text.len(),
+            request
+                .attachments
+                .iter()
+                .map(|attachment| attachment.transcription.text.len())
+                .sum::<usize>(),
+            request.web_context.as_ref().map(|web| web.len()).unwrap_or_default(),
+        )
+    }
+
+    /// Ajuste forzado determinista del request contra el presupuesto.
+    ///
+    /// La historia y el catálogo ceden ante `max_input_chars`; la pregunta y
+    /// el sistema jamás se truncan en silencio. Si ni el piso (sin historial
+    /// y catálogo mínimo) entra, el error trae el desglose de tamaños SIN
+    /// contenido para diagnosticar en una línea.
+    fn force_fit_remote_request(
+        request: &mut AssistantRequest,
+        limits: &AttachmentLimits,
+    ) -> Result<(), String> {
+        // (1) tal cual, (2) sin historial.
+        // El historial es lo primero que cede: el turno actual siempre entra.
+        if request.validate(limits).is_ok() {
+            return Ok(());
+        }
+        request.conversation.clear();
+        if request.validate(limits).is_ok() {
+            return Ok(());
+        }
+        // (3) catálogo cada vez más chico, con entradas enteras (nunca a
+        // mitad de línea: se reconstruye con presupuesto menor).
+        let mut budget = request.tool_catalog.len().min(1_024);
+        while budget >= Self::MIN_REMOTE_CATALOG_BYTES {
+            request.tool_catalog = grafito_command::assistant_context::assistant_tool_catalog(
+                &request.problem,
+                budget,
+            );
+            if request.validate(limits).is_ok() {
+                return Ok(());
+            }
+            if budget == Self::MIN_REMOTE_CATALOG_BYTES {
+                break;
+            }
+            budget = (budget / 2).max(Self::MIN_REMOTE_CATALOG_BYTES);
+        }
+        request.tool_catalog.clear();
+        // (4) última palabra honesta con desglose de tamaños (sin contenido).
+        request.validate(limits).map_err(|error| {
+            format!(
+                "{error} [tamaños: {}]",
+                Self::request_size_breakdown(request)
+            )
+        })
+    }
     /// Lanza el job remoto con streaming (movido verbatim de
     /// `start_remote_assistant_job`; el lockdown de examen lo aplica el shim).
     pub(crate) fn start_remote(
@@ -903,6 +1019,10 @@ impl AssistantJobsController {
         } = launch;
         ctx.runtime.next_request_id = ctx.runtime.next_request_id.wrapping_add(1);
         let id = ctx.runtime.next_request_id;
+        // Telemetría de tokens: largo real del prompt antes de mover el request.
+        let input_chars = grafito_assistant::assistant_remote_prompt(&request)
+            .map(|prompt| prompt.len())
+            .unwrap_or(0);
         let cancellation = CancellationToken::default();
         // Canal acotado de deltas SSE tipados (128, best-effort): el worker de
         // streaming lo alimenta y `poll_assistant_jobs` lo drena a la burbuja
@@ -948,6 +1068,7 @@ impl AssistantJobsController {
             document_revision,
             document_digest,
             focus,
+            input_chars,
             cancellation,
             receiver,
             stream_rx: Some(stream_rx),
@@ -1053,14 +1174,23 @@ impl AssistantJobsController {
                     Ok(event) => {
                         // S2 `ask_user` real vía evento: reenvía el pendiente al
                         // canal lateral sin bloquear (try_send) para que la UI
-                        // lo muestre como botones. Nunca bloquea threads.
-                        if let grafito_agent::AgentEvent::ToolStarted { name, args_summary } =
-                            &event
+                        // lo muestre como botones. El `call_id` es el REAL del
+                        // wire (lo emite el loop junto al ToolStarted): sin
+                        // heurísticas de longitud que rompían la respuesta.
+                        if let grafito_agent::AgentEvent::Clarification {
+                            call_id,
+                            question,
+                            options,
+                        } = &event
                         {
-                            if name == "ask_user" {
-                                if let Some(pending) = parse_agent_ask_user_pending(args_summary) {
-                                    let _ = clarification_sender.try_send(pending);
-                                }
+                            if let Ok(pending) =
+                                grafito_ui::assistant::PendingClarification::try_new(
+                                    call_id,
+                                    question,
+                                    options.clone(),
+                                )
+                            {
+                                let _ = clarification_sender.try_send(pending);
                             }
                         }
                         // R2-V1: `try_send` + `CancellationToken` (jamás `send` bloqueante).
@@ -1149,11 +1279,16 @@ impl AssistantJobsController {
             question,
             correction_attempt,
             repair_target_turn,
-            document_revision,
-            document_digest,
-            focus,
             text,
         } = launch;
+        // Base del preflight: el estado ACTUAL del documento (el worker clona
+        // exactamente esto). Si cambia durante la verificación, las propuestas
+        // se descartan con aviso honesto, pero el texto se publica igual.
+        let preflight_context = grafito_command::assistant_context::document_context(ctx.document);
+        let preflight_focus = grafito_command::assistant_context::selected_function_focus(
+            ctx.document,
+            ctx.selected_object,
+        );
         let document = ctx.document.detached_clone_for_staging();
         let camera = ctx.camera;
         let response_text = text.clone();
@@ -1186,9 +1321,9 @@ impl AssistantJobsController {
             question,
             correction_attempt,
             repair_target_turn,
-            document_revision,
-            document_digest,
-            focus,
+            preflight_revision: preflight_context.revision,
+            preflight_digest: preflight_context.digest,
+            preflight_focus,
             text: response_text,
             cancellation,
             receiver,
@@ -1578,6 +1713,13 @@ impl AssistantJobsController {
                     grafito_agent::AgentEvent::Ledger { render } => {
                         ctx.panel.set_agent_ledger(Some(render));
                     }
+                    // El pendiente ya viajó por el canal lateral
+                    // (`Clarification` → `PendingClarification`): acá solo se
+                    // deja rastro en la actividad del agente.
+                    grafito_agent::AgentEvent::Clarification { question, .. } => {
+                        ctx.panel
+                            .push_agent_activity(format!("pregunta: {question}"));
+                    }
                     grafito_agent::AgentEvent::Finalized { .. } => {}
                 },
                 Ok(AgentChannelMsg::Done(result)) => {
@@ -1676,6 +1818,8 @@ impl AssistantJobsController {
                 document_revision,
                 document_digest,
                 focus,
+                input_chars,
+                elapsed_ms,
                 cancelled,
                 result,
                 stream_preview_active,
@@ -1715,156 +1859,169 @@ impl AssistantJobsController {
                     ctx.document,
                     ctx.selected_object,
                 );
-                if !accepts_remote_context(
+                // Rediseño del gate: el texto NUNCA se descarta por contexto
+                // rancio (el fail-closed sigue vivo en el Apply, vía
+                // `PlanBasis`). Si el documento cambió mientras el proveedor
+                // pensaba, se avisa en una línea y las propuestas se verifican
+                // contra el estado ACTUAL en el preflight.
+                let context_matches = accepts_remote_context(
                     &current_context,
                     current_focus.as_ref(),
                     document_revision,
                     &document_digest,
                     focus.as_ref(),
-                ) {
-                    Self::fail_request(
-                        ctx,
-                        "La respuesta quedó obsoleta porque cambió el documento o el foco; no se aceptó ni se verificaron sus propuestas.",
+                );
+                if !context_matches {
+                    (ctx.notify)(
+                        "El documento o la selección cambió mientras pensaba; te muestro la respuesta y verifico las propuestas contra el estado actual.".to_string(),
+                        ToastKind::Info,
                     );
-                    ctx.panel.invalidate_proposal_correction();
-                } else {
-                    match result {
-                        Ok(completion) => {
-                            if completion.truncated {
-                                (ctx.notify)(
-                                    "La respuesta alcanzó el límite de la consulta; pedí que continúe desde el último punto.".to_string(),
-                                    ToastKind::Info,
-                                );
-                            }
-                            // Tokens reales de la wire (se ocultan si no vinieron).
-                            ctx.panel.attach_pending_usage(completion.usage);
-                            let text = completion.text;
-                            // Guard socrático post-respuesta: un pedido
-                            // exploratorio ("mostrame un ejemplo…") cuya
-                            // respuesta trae matemática ($..$, `=` numérico)
-                            // es telling igual y exige repair ANTES de
-                            // publicar (cierra el bypass demo, ver
-                            // `SocraticFsm::requires_repair_despite_exploratory`).
-                            // NO toca el guard pre-respuesta del worker.
-                            if SocraticFsm::requires_repair_despite_exploratory(
+                }
+                match result {
+                    Ok(completion) => {
+                        if completion.truncated {
+                            (ctx.notify)(
+                                "La respuesta alcanzó el límite de la consulta; pedí que continúe desde el último punto.".to_string(),
+                                ToastKind::Info,
+                            );
+                        }
+                        // Tokens reales de la wire (se ocultan si no vinieron).
+                        ctx.panel.attach_pending_usage(completion.usage);
+                        // Telemetría local opt-in (`GRAFITO_USAGE_LOG`): mide
+                        // prompt/tokens/tiempo reales por turno, sin contenido.
+                        crate::usage_log::record(crate::usage_log::UsageEvent {
+                            kind: "chat",
+                            provider: Self::provider_slug(provider),
+                            model: model.clone(),
+                            question_chars: question.chars().count(),
+                            input_chars,
+                            output_chars: completion.text.chars().count(),
+                            usage: completion.usage,
+                            elapsed_ms,
+                            stale_context: !context_matches,
+                        });
+                        let text = completion.text;
+                        // Guard socrático post-respuesta (salteable en
+                        // ajustes): un pedido exploratorio cuya respuesta trae
+                        // matemática exige repair ANTES de publicar, SALVO
+                        // pedido explícito de ejemplo/demo (ver
+                        // `is_explicit_demo_request`) o tutor desactivado.
+                        // NO toca el guard pre-respuesta del worker.
+                        if ctx.panel.socratic_enabled
+                            && SocraticFsm::requires_repair_despite_exploratory(
                                 &question,
                                 SocraticFsm::response_brings_math(&text),
-                            ) {
-                                if correction_attempt > 0 {
-                                    ctx.panel.restore_proposal_correction();
-                                }
-                                eprintln!(
-                                    "grafito: socratic repair post-respuesta (no al transcript)"
-                                );
-                                let student = Self::session_guard(ctx.panel, ctx.profile, &question)
-                                    .map(|guard| {
-                                        guard.fsm.repair_student_message(&guard.scaffold)
-                                    })
-                                    .unwrap_or_else(|| {
-                                        "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
-                                    });
-                                ctx.panel.complete_request(student);
-                                (ctx.notify)(
-                                    "El tutor repregunta antes de mostrar la solución directa."
-                                        .to_string(),
-                                    ToastKind::Info,
-                                );
-                            } else {
-                                Self::start_remote_proposal(
-                                    ctx,
-                                    egui_ctx,
-                                    AssistantProposalLaunch {
-                                        id,
-                                        provider,
-                                        model,
-                                        route,
-                                        fusion_fallback_allowed,
-                                        question,
-                                        correction_attempt,
-                                        repair_target_turn,
-                                        document_revision,
-                                        document_digest,
-                                        focus,
-                                        text,
-                                    },
-                                );
+                            )
+                        {
+                            if correction_attempt > 0 {
+                                ctx.panel.restore_proposal_correction();
                             }
+                            eprintln!("grafito: socratic repair post-respuesta (no al transcript)");
+                            let student = Self::session_guard(ctx.panel, ctx.profile, &question)
+                                .map(|guard| {
+                                    guard.fsm.repair_student_message(&guard.scaffold)
+                                })
+                                .unwrap_or_else(|| {
+                                    "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
+                                });
+                            ctx.panel.complete_request(student);
+                            (ctx.notify)(
+                                "El tutor repregunta antes de mostrar la solución directa."
+                                    .to_string(),
+                                ToastKind::Info,
+                            );
+                        } else {
+                            Self::start_remote_proposal(
+                                ctx,
+                                egui_ctx,
+                                AssistantProposalLaunch {
+                                    id,
+                                    provider,
+                                    model,
+                                    route,
+                                    fusion_fallback_allowed,
+                                    question,
+                                    correction_attempt,
+                                    repair_target_turn,
+                                    text,
+                                },
+                            );
                         }
-                        Err(error) => {
-                            // Reparación socrática: el guard detectó telling
-                            // con attempts<2 en el worker (streaming o no).
-                            // El `error` es diagnóstico interno con jerga
-                            // (`GUARD TELLING...`, solo para detección y logs):
-                            // JAMÁS se publica crudo vía `complete_request`
-                            // (ese fue el bug P0). Se convierte a voz de Mili
-                            // vía `repair_student_message` (sin `GUARD`/
-                            // `attempts`/`estado`/`Re-preguntá`). No hay
-                            // fallback de modelo ni cartel de error aquí.
-                            if is_socratic_repair_error(&error) {
-                                if correction_attempt > 0 {
-                                    ctx.panel.restore_proposal_correction();
-                                }
-                                // Jerga solo en logs/eventos internos.
-                                eprintln!(
-                                    "grafito: socratic repair interno (no al transcript): {error}"
-                                );
-                                // Convierte a voz de Mili; si no hay guard
-                                // (no debería pasar si hubo repair), fallback
-                                // humano sin jerga ni eco crudo.
-                                let student = Self::session_guard(ctx.panel, ctx.profile, &question)
+                    }
+                    Err(error) => {
+                        // Reparación socrática: el guard detectó telling
+                        // con attempts<2 en el worker (streaming o no).
+                        // El `error` es diagnóstico interno con jerga
+                        // (`GUARD TELLING...`, solo para detección y logs):
+                        // JAMÁS se publica crudo vía `complete_request`
+                        // (ese fue el bug P0). Se convierte a voz de Mili
+                        // vía `repair_student_message` (sin `GUARD`/
+                        // `attempts`/`estado`/`Re-preguntá`). No hay
+                        // fallback de modelo ni cartel de error aquí.
+                        if ctx.panel.socratic_enabled && is_socratic_repair_error(&error) {
+                            if correction_attempt > 0 {
+                                ctx.panel.restore_proposal_correction();
+                            }
+                            // Jerga solo en logs/eventos internos.
+                            eprintln!(
+                                "grafito: socratic repair interno (no al transcript): {error}"
+                            );
+                            // Convierte a voz de Mili; si no hay guard
+                            // (no debería pasar si hubo repair), fallback
+                            // humano sin jerga ni eco crudo.
+                            let student = Self::session_guard(ctx.panel, ctx.profile, &question)
                                     .map(|guard| {
                                         guard.fsm.repair_student_message(&guard.scaffold)
                                     })
                                     .unwrap_or_else(|| {
                                         "Antes de mostrarte la solución, ¿qué forma te imaginás? Contame qué probaste y lo vemos juntos.".to_owned()
                                     });
-                                ctx.panel.complete_request(student);
+                            ctx.panel.complete_request(student);
+                            (ctx.notify)(
+                                "El tutor repregunta antes de mostrar la solución directa."
+                                    .to_string(),
+                                ToastKind::Info,
+                            );
+                        } else if should_fallback_remote_spark_to_deepseek(
+                            // OJO bucle: acá va el modelo INTENTADO (`model`
+                            // del job), no la preferencia. Con la preferencia
+                            // (siempre spark), el fallo del reintento en
+                            // deepseek re-disparaba el fallback al infinito.
+                            &error,
+                            provider,
+                            &model,
+                            correction_attempt,
+                        ) {
+                            if is_session_or_account_error(&error) {
+                                eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
                                 (ctx.notify)(
-                                    "El tutor repregunta antes de mostrar la solución directa."
-                                        .to_string(),
-                                    ToastKind::Info,
-                                );
-                            } else if should_fallback_remote_spark_to_deepseek(
-                                // OJO bucle: acá va el modelo INTENTADO (`model`
-                                // del job), no la preferencia. Con la preferencia
-                                // (siempre spark), el fallo del reintento en
-                                // deepseek re-disparaba el fallback al infinito.
-                                &error,
-                                provider,
-                                &model,
-                                correction_attempt,
-                            ) {
-                                if is_session_or_account_error(&error) {
-                                    eprintln!("grafito: session-fallback muse-spark 400-sesion [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
-                                    (ctx.notify)(
                                         "Muse Spark rechazó la sesión Go (el header viaja solo; reintentá en un rato y si persiste verificá tu región o re-conectá tu clave Go). Sigo con DeepSeek Flash sin cambiar tu modelo.".to_string(),
                                         ToastKind::Info,
                                     );
-                                } else {
-                                    eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
-                                    (ctx.notify)(
+                            } else {
+                                eprintln!("grafito: session-fallback muse-spark [{error}] -> deepseek-v4-flash + retry (preferencia intacta)");
+                                (ctx.notify)(
                                         "Muse Spark no respondió, reintentando con DeepSeek Flash; tu modelo sigue siendo Muse Spark.".to_string(),
                                         ToastKind::Info,
                                     );
-                                }
-                                // Reintentar la misma pregunta con el fallback, sin mostrar error.
-                                // El razonamiento parcial del intento fallido NO se
-                                // hereda: si se pegara al turno de deepseek, el
-                                // usuario vería el "pensamiento" de Spark junto a
-                                // una respuesta ajena.
-                                ctx.panel.pending_stream_trace = None;
-                                Self::start_remote_for(
-                                    ctx,
-                                    egui_ctx,
-                                    question.clone(),
-                                    Some("deepseek-v4-flash"),
-                                );
-                                return;
-                            } else if correction_attempt > 0 {
-                                Self::fail_repair_request(ctx, error);
-                            } else {
-                                Self::fail_request(ctx, error);
                             }
+                            // Reintentar la misma pregunta con el fallback, sin mostrar error.
+                            // El razonamiento parcial del intento fallido NO se
+                            // hereda: si se pegara al turno de deepseek, el
+                            // usuario vería el "pensamiento" de Spark junto a
+                            // una respuesta ajena.
+                            ctx.panel.pending_stream_trace = None;
+                            Self::start_remote_for(
+                                ctx,
+                                egui_ctx,
+                                question.clone(),
+                                Some("deepseek-v4-flash"),
+                            );
+                            return;
+                        } else if correction_attempt > 0 {
+                            Self::fail_repair_request(ctx, error);
+                        } else {
+                            Self::fail_request(ctx, error);
                         }
                     }
                 }
@@ -1881,13 +2038,12 @@ impl AssistantJobsController {
                 question,
                 correction_attempt,
                 repair_target_turn,
-                document_revision,
-                document_digest,
-                focus,
+                preflight_revision,
+                preflight_digest,
+                preflight_focus,
                 text,
                 cancelled,
                 result,
-                ..
             } = completion;
             if cancelled
                 || !accepts_remote_result(
@@ -1911,61 +2067,80 @@ impl AssistantJobsController {
             } else {
                 let current_context =
                     grafito_command::assistant_context::document_context(ctx.document);
-                let current_focus = grafito_command::assistant_context::selected_function_focus(
-                    ctx.document,
-                    ctx.selected_object,
-                );
-                if !accepts_remote_context(
-                    &current_context,
-                    current_focus.as_ref(),
-                    document_revision,
-                    &document_digest,
-                    focus.as_ref(),
-                ) {
-                    Self::fail_request(
-                        ctx,
-                        "La respuesta quedó obsoleta porque cambió el documento o el foco; no se aceptó ni se verificaron sus propuestas.",
-                    );
-                    ctx.panel.invalidate_proposal_correction();
-                } else {
-                    match result {
-                        Ok(proposal_check) => {
-                            let repair_feedback = proposal_check.repair_feedback.clone();
-                            let rejected_count = proposal_check
-                                .candidate_count
-                                .saturating_sub(proposal_check.verified.len());
-                            let can_offer_correction = can_offer_assistant_proposal_correction(
+                // La verificación corrió contra el clon de `preflight_revision`:
+                // si el documento cambió desde entonces, las propuestas quedan
+                // desactualizadas (el Apply las rechazaría igual por
+                // `PlanBasis`), pero el TEXTO se publica con aviso honesto.
+                let proposals_stale = current_context.revision != preflight_revision
+                    || current_context.digest != preflight_digest;
+                match result {
+                    Ok(proposal_check) => {
+                        let repair_feedback = proposal_check.repair_feedback.clone();
+                        let rejected_count = proposal_check
+                            .candidate_count
+                            .saturating_sub(proposal_check.verified.len());
+                        let can_offer_correction = !proposals_stale
+                            && can_offer_assistant_proposal_correction(
                                 correction_attempt,
                                 proposal_check.action_candidate_count,
                                 proposal_check.verified_action_count,
                                 repair_feedback.as_ref(),
                             );
+                        if proposals_stale {
+                            // Propuestas fuera de base: se conserva el conteo
+                            // de candidatas para que la UI muestre los bloques
+                            // como no verificados, sin habilitar Apply.
+                            ctx.panel.set_proposal_preflight_results(
+                                Vec::new(),
+                                proposal_check.candidate_count,
+                                proposal_check.candidate_code_block_indices,
+                            );
+                            ctx.panel.invalidate_proposal_correction();
+                        } else {
                             ctx.panel.set_proposal_preflight_results(
                                 proposal_check.verified,
                                 proposal_check.candidate_count,
                                 proposal_check.candidate_code_block_indices,
                             );
-                            if correction_attempt > 0 {
-                                let Some(target_turn) = repair_target_turn else {
-                                    Self::fail_request(
-                                        ctx,
-                                        "La corrección perdió el turno que debía reemplazar.",
-                                    );
-                                    return;
-                                };
-                                if !ctx
-                                    .panel
-                                    .complete_proposal_correction_at(target_turn, text.clone())
-                                {
-                                    Self::fail_request(
-                                        ctx,
-                                        "La corrección no pudo reemplazar su respuesta original.",
-                                    );
-                                    return;
-                                }
-                            } else {
-                                ctx.panel.complete_request(text.clone());
+                        }
+                        if correction_attempt > 0 {
+                            let Some(target_turn) = repair_target_turn else {
+                                Self::fail_request(
+                                    ctx,
+                                    "La corrección perdió el turno que debía reemplazar.",
+                                );
+                                return;
+                            };
+                            if !ctx
+                                .panel
+                                .complete_proposal_correction_at(target_turn, text.clone())
+                            {
+                                Self::fail_request(
+                                    ctx,
+                                    "La corrección no pudo reemplazar su respuesta original.",
+                                );
+                                return;
                             }
+                        } else {
+                            ctx.panel.complete_request(text.clone());
+                        }
+                        crate::usage_log::record(crate::usage_log::UsageEvent {
+                            kind: "proposal",
+                            provider: Self::provider_slug(provider),
+                            model: model.clone(),
+                            question_chars: question.chars().count(),
+                            input_chars: 0,
+                            output_chars: text.chars().count(),
+                            usage: None,
+                            elapsed_ms: 0,
+                            stale_context: proposals_stale,
+                        });
+                        if proposals_stale {
+                            (ctx.notify)(
+                                "El documento cambió mientras verificaba las propuestas, así que las descarté; la respuesta queda igual. Si querés aplicar algo, pedilo de nuevo.".to_string(),
+                                ToastKind::Info,
+                            );
+                        } else {
                             if can_offer_correction {
                                 if let Some(feedback) = repair_feedback {
                                     let target_turn = repair_target_turn
@@ -1976,9 +2151,9 @@ impl AssistantJobsController {
                                         target_turn,
                                         correction_attempt,
                                         AssistantCorrectionContext {
-                                            document_revision,
-                                            document_digest: document_digest.clone(),
-                                            focus: focus.clone(),
+                                            document_revision: preflight_revision,
+                                            document_digest: preflight_digest.clone(),
+                                            focus: preflight_focus.clone(),
                                         },
                                     );
                                 }
@@ -2003,12 +2178,12 @@ impl AssistantJobsController {
                                 );
                             }
                         }
-                        Err(error) => {
-                            if correction_attempt > 0 {
-                                Self::fail_repair_request(ctx, error);
-                            } else {
-                                Self::fail_request(ctx, error);
-                            }
+                    }
+                    Err(error) => {
+                        if correction_attempt > 0 {
+                            Self::fail_repair_request(ctx, error);
+                        } else {
+                            Self::fail_request(ctx, error);
                         }
                     }
                 }
@@ -2092,6 +2267,7 @@ mod tests {
             document_revision: 0,
             document_digest: String::new(),
             focus: None,
+            input_chars: 0,
             cancellation: CancellationToken::default(),
             receiver,
             stream_rx: Some(stream_rx),
@@ -2274,6 +2450,13 @@ mod tests {
     // ── Harness B2: contexto mínimo sin GrafitoApp ──
 
     fn with_test_ctx(f: impl FnOnce(&mut AssistantJobsContext<'_>, &egui::Context)) {
+        with_test_ctx_notify(|ctx, egui_ctx, _avisos| f(ctx, egui_ctx));
+    }
+
+    /// Variante que captura los avisos (`notify`) para asertarlos.
+    fn with_test_ctx_notify(
+        f: impl FnOnce(&mut AssistantJobsContext<'_>, &egui::Context, &std::cell::RefCell<Vec<String>>),
+    ) {
         let mut runtime = AssistantRuntime::default();
         let mut panel = AssistantPanelState::default();
         let mut document = Document::default();
@@ -2281,7 +2464,10 @@ mod tests {
         let mut redo_stack: VecDeque<ChangeSet> = VecDeque::new();
         let mut profile = StudentProfile::default();
         let registry: Option<grafito_plugins::PluginRegistry> = None;
-        let mut notify = |_: String, _: ToastKind| {};
+        let avisos = std::cell::RefCell::new(Vec::new());
+        let mut notify = |message: String, _kind: ToastKind| {
+            avisos.borrow_mut().push(message);
+        };
         let egui_ctx = egui::Context::default();
         let mut ctx = AssistantJobsContext {
             runtime: &mut runtime,
@@ -2296,7 +2482,7 @@ mod tests {
             current_view: ViewMode::D2,
             notify: &mut notify,
         };
-        f(&mut ctx, &egui_ctx);
+        f(&mut ctx, &egui_ctx, &avisos);
     }
 
     fn dummy_model_job() -> AssistantModelJob {
@@ -2338,9 +2524,9 @@ mod tests {
             question: "q".to_string(),
             correction_attempt: 0,
             repair_target_turn: None,
-            document_revision: 0,
-            document_digest: String::new(),
-            focus: None,
+            preflight_revision: 0,
+            preflight_digest: String::new(),
+            preflight_focus: None,
             text: "Plot[x]".to_string(),
             cancellation: CancellationToken::default(),
             receiver,
@@ -2496,9 +2682,6 @@ mod tests {
                 question: "q".to_string(),
                 correction_attempt: 0,
                 repair_target_turn: None,
-                document_revision: 0,
-                document_digest: String::new(),
-                focus: None,
                 text: "Plot[y]".to_string(),
             };
             AssistantJobsController::start_remote_proposal(ctx, egui_ctx, launch);
@@ -2573,5 +2756,470 @@ mod tests {
             .preview_active = true;
         assert!(AssistantTurnState::is_auxiliary(&runtime, &panel));
         assert_eq!(derive(&runtime, &panel), AssistantTurnState::Thinking);
+    }
+
+    // ── Rediseño del gate de contexto: el texto nunca se descarta ──
+
+    fn remote_job_with_context(
+        context: &grafito_assistant_types::ImmutableDocumentContext,
+        receiver: std::sync::mpsc::Receiver<Result<grafito_assistant::RemoteCompletion, String>>,
+    ) -> AssistantRemoteJob {
+        let (_, stream_rx) = sync_channel::<StreamDelta>(128);
+        AssistantRemoteJob {
+            id: 3,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "deepseek-v4-flash".to_string(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "haceme un ejemplo".to_string(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            document_revision: context.revision,
+            document_digest: context.digest.clone(),
+            focus: None,
+            input_chars: 0,
+            cancellation: CancellationToken::default(),
+            receiver,
+            stream_rx: Some(stream_rx),
+            stream_text: String::new(),
+            stream_reasoning: String::new(),
+            stream_truncated: false,
+            preview_active: false,
+            started_at: std::time::Instant::now(),
+            first_delta_at: None,
+            first_reasoning_at: None,
+            stream_status: None,
+        }
+    }
+
+    #[test]
+    fn texto_remoto_se_publica_aunque_cambie_el_documento() {
+        // Regresión del bug reportado: cambiar el documento (o la selección)
+        // mientras el proveedor pensaba descartaba la respuesta entera con
+        // "Cambió el documento o la selección…". Ahora el texto se publica y
+        // el aviso es informativo (el fail-closed sigue en el Apply).
+        with_test_ctx_notify(|ctx, egui_ctx, avisos| {
+            let launch = grafito_command::assistant_context::document_context(ctx.document);
+            let (tx, rx) = sync_channel(1);
+            ctx.runtime.remote_job = Some(remote_job_with_context(&launch, rx));
+            // El documento cambia mientras el proveedor piensa.
+            ctx.document.bump_version();
+            tx.send(Ok(grafito_assistant::RemoteCompletion {
+                text: "respuesta vigente".into(),
+                truncated: false,
+                usage: None,
+            }))
+            .expect("envío del completado");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            // El texto todavía no se publica: primero verifica propuestas
+            // contra el documento ACTUAL (aviso informativo, sin error).
+            assert!(
+                ctx.panel.error.is_none(),
+                "sin cartel de error: {:?}",
+                ctx.panel.error
+            );
+            assert!(
+                avisos
+                    .borrow()
+                    .iter()
+                    .any(|message| message.contains("cambió mientras pensaba")),
+                "aviso honesto presente: {:?}",
+                avisos.borrow()
+            );
+            let job = ctx
+                .runtime
+                .proposal_job
+                .as_mut()
+                .expect("preflight lanzado");
+            // La base del preflight es el estado ACTUAL, no el del pedido.
+            assert_eq!(job.preflight_revision, launch.revision + 1);
+            let (ptx, prx) = sync_channel(1);
+            job.receiver = prx;
+            // El documento vuelve a cambiar durante la verificación.
+            ctx.document.bump_version();
+            ptx.send(Ok(crate::assistant_preflight::RemoteProposalVerification {
+                verified: vec![verified_proposal()],
+                candidate_count: 1,
+                candidate_code_block_indices: vec![0],
+                action_candidate_count: 1,
+                verified_action_count: 1,
+                repair_feedback: None,
+            }))
+            .expect("envío de la verificación");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            let last = ctx.panel.conversation.last().expect("turno publicado");
+            assert_eq!(
+                last.role,
+                grafito_assistant_types::ConversationRole::Assistant
+            );
+            assert_eq!(last.content, "respuesta vigente");
+            assert!(
+                ctx.panel.verified_proposals.is_empty(),
+                "propuestas rancias fuera"
+            );
+            assert!(ctx.runtime.remote_job.is_none());
+            assert!(ctx.runtime.proposal_job.is_none());
+        });
+    }
+
+    #[test]
+    fn texto_remoto_sin_cambios_no_avisa_nada() {
+        with_test_ctx_notify(|ctx, egui_ctx, avisos| {
+            let launch = grafito_command::assistant_context::document_context(ctx.document);
+            let (tx, rx) = sync_channel(1);
+            ctx.runtime.remote_job = Some(remote_job_with_context(&launch, rx));
+            tx.send(Ok(grafito_assistant::RemoteCompletion {
+                text: "respuesta limpia".into(),
+                truncated: false,
+                usage: None,
+            }))
+            .expect("envío del completado");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+            assert!(ctx.panel.error.is_none());
+            assert!(avisos.borrow().is_empty(), "{:?}", avisos.borrow());
+
+            // Preflight del mismo documento (sin mutaciones): publica texto y
+            // habilita la propuesta verificada.
+            let job = ctx
+                .runtime
+                .proposal_job
+                .as_mut()
+                .expect("preflight lanzado");
+            let (ptx, prx) = sync_channel(1);
+            job.receiver = prx;
+            ptx.send(Ok(crate::assistant_preflight::RemoteProposalVerification {
+                verified: vec![verified_proposal()],
+                candidate_count: 1,
+                candidate_code_block_indices: vec![0],
+                action_candidate_count: 1,
+                verified_action_count: 1,
+                repair_feedback: None,
+            }))
+            .expect("envío de la verificación");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            assert_eq!(
+                ctx.panel.conversation.last().expect("turno").content,
+                "respuesta limpia"
+            );
+            assert_eq!(ctx.panel.verified_proposals.len(), 1);
+            assert!(avisos.borrow().is_empty(), "{:?}", avisos.borrow());
+        });
+    }
+
+    fn verified_proposal() -> grafito_ui::assistant::VerifiedAssistantProposal {
+        let invocation =
+            grafito_command::assistant_proposals::parse_assistant_command("Function[sin(x)]")
+                .expect("comando catalogado parsea");
+        grafito_ui::assistant::VerifiedAssistantProposal {
+            candidate_index: 0,
+            proposal: grafito_command::assistant_proposals::AssistantProposal::Command(invocation),
+            prerequisite_parameters: Vec::new(),
+        }
+    }
+
+    fn proposal_job_with_base(
+        revision: u64,
+        digest: String,
+        receiver: std::sync::mpsc::Receiver<
+            Result<crate::assistant_preflight::RemoteProposalVerification, String>,
+        >,
+    ) -> AssistantProposalJob {
+        AssistantProposalJob {
+            id: 4,
+            provider: ProviderProfile::OpenCodeGo,
+            model: "deepseek-v4-flash".to_string(),
+            route: AssistantRemoteRoute::SelectedModel,
+            fusion_fallback_allowed: false,
+            question: "graficá".to_string(),
+            correction_attempt: 0,
+            repair_target_turn: None,
+            preflight_revision: revision,
+            preflight_digest: digest,
+            preflight_focus: None,
+            text: "```grafito\nFunction[sin(x)]\n```".to_string(),
+            cancellation: CancellationToken::default(),
+            receiver,
+        }
+    }
+
+    #[test]
+    fn consulta_trivial_con_estado_fresco_siempre_entra() {
+        // Regresión del reporte real: una pregunta corta con documento vacío
+        // y sin historial debe armarse sin error de presupuesto.
+        let document = Document::default();
+        let context = grafito_command::assistant_context::document_context(&document);
+        let panel = AssistantPanelState::default();
+        let profile = StudentProfile::default();
+
+        let request = AssistantJobsController::build_remote_request(
+            &panel,
+            &profile,
+            String::new(),
+            BuildRemoteParams {
+                question: "a ver dame un ejemplo con numeros complejos".into(),
+                document_context: context,
+                focus: None,
+                attachments: Vec::new(),
+                image_upload_consent: false,
+                repair: None,
+            },
+        )
+        .expect("consulta trivial entra en presupuesto");
+        request
+            .validate(&grafito_assistant_types::AttachmentLimits::default())
+            .expect("wire validate");
+    }
+
+    #[test]
+    fn presupuesto_apretado_ajusta_historial_y_catalogo_sin_fallar() {
+        // Foco largo + historial lleno + catálogo grande: el ajuste forzado
+        // vacía el historial y achica el catálogo en vez de fallar. El turno
+        // actual entra siempre.
+        use grafito_assistant_types::{AssistantFocus, AttachmentLimits};
+        let document = Document::default();
+        let context = grafito_command::assistant_context::document_context(&document);
+        let mut request = grafito_assistant_types::AssistantRequest::remote("y ahora?", context);
+        request.focus = Some(AssistantFocus::function(
+            "f",
+            "x".repeat(3_900),
+            None,
+            None,
+            false,
+        ));
+        for index in 0..3 {
+            request
+                .conversation
+                .push(grafito_assistant_types::ConversationTurn::user(format!(
+                    "pregunta {index} {}",
+                    "a".repeat(4_000)
+                )));
+            request
+                .conversation
+                .push(grafito_assistant_types::ConversationTurn::assistant(
+                    format!("respuesta {index} {}", "b".repeat(4_000)),
+                ));
+        }
+        request.tool_catalog = "z".repeat(8_000);
+        let limits = AttachmentLimits::default();
+        assert!(
+            request.validate(&limits).is_err(),
+            "el estado apretado debe fallar antes del ajuste"
+        );
+
+        AssistantJobsController::force_fit_remote_request(&mut request, &limits)
+            .expect("ajuste forzado");
+
+        // Sin historial (cedió) y catálogo recortado, pero pregunta intacta.
+        assert!(request.conversation.is_empty(), "historial cedido");
+        assert_eq!(request.problem, "y ahora?");
+        assert!(
+            request.tool_catalog.len() <= 1_024,
+            "catálogo recortado: {}",
+            request.tool_catalog.len()
+        );
+        request.validate(&limits).expect("wire validate");
+    }
+
+    #[test]
+    fn historial_y_documento_densos_no_rompen_el_presupuesto() {
+        // Regresión del hallazgo de auditoría: 6 turnos de 4 KiB + doc con
+        // 100 objetos superaban los 8192 chars y la consulta fallaba entera.
+        // Ahora el request se arma acotado (historial/contexto/catálogo) y
+        // valida para el wire.
+        use grafito_core::{GeoObject, PointObj};
+        let mut document = Document::default();
+        for index in 0..100 {
+            document.add_object(GeoObject::Point(PointObj::new(
+                grafito_geometry::Point2::new(f64::from(index), 0.0),
+            )));
+        }
+        let context = grafito_command::assistant_context::document_context(&document);
+        let mut panel = AssistantPanelState::default();
+        for index in 0..3 {
+            panel
+                .conversation
+                .push(grafito_assistant_types::ConversationTurn::user(format!(
+                    "pregunta {index} {}",
+                    "a".repeat(4_000)
+                )));
+            panel
+                .conversation
+                .push(grafito_assistant_types::ConversationTurn::assistant(
+                    format!("respuesta {index} {}", "b".repeat(4_000)),
+                ));
+        }
+        let profile = StudentProfile::default();
+
+        let request = AssistantJobsController::build_remote_request(
+            &panel,
+            &profile,
+            String::new(),
+            BuildRemoteParams {
+                question: "y ahora?".into(),
+                document_context: context,
+                focus: None,
+                attachments: Vec::new(),
+                image_upload_consent: false,
+                repair: None,
+            },
+        )
+        .expect("request acotado al presupuesto");
+        request
+            .validate(&grafito_assistant_types::AttachmentLimits::default())
+            .expect("wire validate");
+        let prompt = grafito_assistant::assistant_remote_prompt(&request).expect("prompt acotado");
+        assert!(
+            prompt.len() <= request.budget.max_input_chars,
+            "prompt {} <= {}",
+            prompt.len(),
+            request.budget.max_input_chars
+        );
+    }
+
+    #[test]
+    fn tutor_apagado_no_repregunta_publica_directo() {
+        // Con el tutor socrático desactivado en ajustes, una respuesta con
+        // matemática NO se convierte en repregunta: se publica directo.
+        with_test_ctx_notify(|ctx, egui_ctx, avisos| {
+            ctx.panel.socratic_enabled = false;
+            let launch = grafito_command::assistant_context::document_context(ctx.document);
+            let (tx, rx) = sync_channel(1);
+            ctx.runtime.remote_job = Some(remote_job_with_context(&launch, rx));
+            tx.send(Ok(grafito_assistant::RemoteCompletion {
+                text: "miralo: $x^2$".into(),
+                truncated: false,
+                usage: None,
+            }))
+            .expect("envío del completado");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            assert!(
+                !avisos
+                    .borrow()
+                    .iter()
+                    .any(|message| message.contains("repregunta")),
+                "{:?}",
+                avisos.borrow()
+            );
+            // Sin repair: el texto va al preflight de propuestas.
+            assert!(
+                ctx.runtime.proposal_job.is_some(),
+                "publica directo sin repregunta"
+            );
+        });
+    }
+
+    #[test]
+    fn tutor_encendido_repara_pedido_exploratorio_con_math() {
+        // Con el tutor activo (default), un pedido exploratorio genérico cuya
+        // respuesta trae matemática sí se convierte en repregunta.
+        with_test_ctx_notify(|ctx, egui_ctx, _avisos| {
+            assert!(ctx.panel.socratic_enabled, "default encendido");
+            let launch = grafito_command::assistant_context::document_context(ctx.document);
+            let (tx, rx) = sync_channel(1);
+            let mut job = remote_job_with_context(&launch, rx);
+            job.question = "mostrame las capacidades de graficacion".into();
+            ctx.runtime.remote_job = Some(job);
+            tx.send(Ok(grafito_assistant::RemoteCompletion {
+                text: "miralo: $x^2$".into(),
+                truncated: false,
+                usage: None,
+            }))
+            .expect("envío del completado");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            assert!(
+                ctx.runtime.proposal_job.is_none(),
+                "no publica directo: repregunta"
+            );
+            let last = ctx.panel.conversation.last().expect("turno repregunta");
+            assert!(
+                last.content.contains("Antes de mostrarte"),
+                "repregunta socrática: {}",
+                last.content
+            );
+        });
+    }
+
+    #[test]
+    fn propuestas_rancias_se_descartan_sin_perder_el_texto() {
+        // El documento cambió entre el clon del preflight y el cierre: las
+        // propuestas ya no son aplicables (el Apply las rechazaría), pero el
+        // texto se publica con aviso y sin habilitar Apply.
+        with_test_ctx_notify(|ctx, egui_ctx, avisos| {
+            let (tx, rx) = sync_channel(1);
+            // Base declarada distinta de la versión actual (1 vs 0).
+            ctx.runtime.proposal_job =
+                Some(proposal_job_with_base(1, "fnv1a64:otra-base".into(), rx));
+            tx.send(Ok(crate::assistant_preflight::RemoteProposalVerification {
+                verified: vec![verified_proposal()],
+                candidate_count: 1,
+                candidate_code_block_indices: vec![0],
+                action_candidate_count: 1,
+                verified_action_count: 1,
+                repair_feedback: None,
+            }))
+            .expect("envío de la verificación");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            assert!(
+                ctx.panel.verified_proposals.is_empty(),
+                "sin propuestas aplicables"
+            );
+            assert_eq!(
+                ctx.panel.conversation.last().expect("turno").content,
+                "```grafito\nFunction[sin(x)]\n```"
+            );
+            assert!(
+                avisos
+                    .borrow()
+                    .iter()
+                    .any(|message| message.contains("descarté")),
+                "{:?}",
+                avisos.borrow()
+            );
+        });
+    }
+
+    #[test]
+    fn propuestas_vigentes_se_publican_con_su_base() {
+        with_test_ctx_notify(|ctx, egui_ctx, _avisos| {
+            let base = grafito_command::assistant_context::document_context(ctx.document);
+            let (tx, rx) = sync_channel(1);
+            ctx.runtime.proposal_job = Some(proposal_job_with_base(
+                base.revision,
+                base.digest.clone(),
+                rx,
+            ));
+            tx.send(Ok(crate::assistant_preflight::RemoteProposalVerification {
+                verified: vec![verified_proposal()],
+                candidate_count: 1,
+                candidate_code_block_indices: vec![0],
+                action_candidate_count: 1,
+                verified_action_count: 1,
+                repair_feedback: None,
+            }))
+            .expect("envío de la verificación");
+
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+
+            assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
+            assert_eq!(ctx.panel.verified_proposals.len(), 1, "propuesta vigente");
+        });
     }
 }

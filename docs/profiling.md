@@ -178,6 +178,27 @@ instanciado). Binario release: 44.8 MB; smoke E2E con ventana real OK.
 Sin delta de tamaño A/B exacto (el baseline no-PGO previo era de otro
 commit); el argumento es de árbol de dependencias, no de MB.
 
+## 2.10 Tokens de contexto (F24 2026-09-17): harness y producto
+
+> Medición con `wc -c/4` sobre los archivos reales (estimador conservador
+> chars/4) y `opencode debug config` para verificar el payload inyectado.
+
+| Payload por request | Antes | Después | Cómo |
+|---|---|---|---|
+| Instructions opencode (5 archivos) | 20 049 tok | **3 543 tok** | `instructions` = AGENTS.md + `.jspace/WORKSPACE.md` + MEMORY.md; `docs/architecture.md` (10.7k) y `docs/SKILLS-CATALOG.md` pasan a on-demand (skill `grafito-architecture`, router `skills-catalog`); ledger comprimido (20 305 → 3 911 chars) con historial archivado en `docs/ledger-archive-2026-09.md`; MEMORY.md deduplicado (5 473 → 3 440 chars) |
+| Tool schemas MCP | 6 servers (~40 tools) | 5 servers (~26 tools) | `filesystem` MCP `enabled:false` (redundante con read/write/glob/grep) |
+| `small_model` (títulos/tareas livianas) | muse-spark-1.3-contributor (razonador) | `deepseek-v4.1-flash` | `opencode.json` + agentes `plan/token-saver/memory-keeper/orchestrator` |
+| Watcher | `.opencode/skills/**` vigilado (67 MB) | ignorado | `watcher.ignore` con `.opencode/**` |
+
+Producto (asistente de Grafito):
+
+| Payload por request | Antes | Después | Cómo |
+|---|---|---|---|
+| System prompt remoto | ~1.7k tok | ~1.8k tok | +directiva de datos no confiables (`UNTRUSTED_DATA_DIRECTIVE`); sigue siendo prefix estable (cacheable por DeepSeek: hit ≈30× más barato, `api.deepseek.com/guides/kv_cache`) |
+| Contexto de documento (200 objetos) | error `input exceeds` (fallaba la consulta) | **≤ 8 192 chars** con nota "… y N objetos omitidos" | `bounded_context_prompt` trunca por presupuesto ranking estable (test `documento_denso_se_recorta_por_presupuesto_sin_fallar`) |
+| Historial 6×4096 + doc denso | `wire validate` fallaba | request válido acotado | test `historial_y_documento_densos_no_rompen_el_presupuesto` |
+| Telemetría real | invisible | JSONL opt-in `GRAFITO_USAGE_LOG` | chars in/out + tokens reales (in/out/reasoning/cached) + ms + stale_context por turno |
+
 ## 3. Simd (`wide`) — decisión diferida
 
 `wide 0.7.33` está en el lock solo como transitiva (simba/alkahest-cas);

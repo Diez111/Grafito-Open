@@ -47,7 +47,7 @@ struct LayerPanelState {
 const PANEL_NARROW_WIDTH: f32 = 280.0;
 /// Ancho máximo real de Datos/Prob: evita que 45% del viewport en
 /// pantallas anchas estire el panel a 800+ px (reporte "muy ancho").
-/// 360 = múltiplo de base 4, deja hoja 6×8 legible sin muro.
+/// 360 = múltiplo de base 4, deja hoja de 8 columnas legible sin muro.
 const PANEL_DATA_MAX_WIDTH: f32 = 360.0;
 /// Alto de botones de panel (≥ `HIT_TARGET_MIN` 24, WCAG 2.5.8).
 const PANEL_BUTTON_H: f32 = 28.0;
@@ -5491,6 +5491,67 @@ fn construction_log_to_latex(log: &[crate::app::ConstructionStep]) -> String {
     s
 }
 
+/// Navegación view-only del protocolo de construcción (Ola 1.5): paso actual
+/// y reproducción. No reordena ni desactiva nada: solo selecciona el objeto
+/// del paso en el lienzo y resalta la tarjeta. Vive en `ctx.data`.
+#[derive(Debug, Clone, Copy, Default)]
+struct ProtocolNavState {
+    /// Índice 0-based sobre `construction_log` (None = sin paso activo).
+    cursor: Option<usize>,
+    playing: bool,
+    last_advance: f64,
+}
+
+/// Intervalo de avance del play (segundos por paso).
+const PROTOCOL_PLAY_INTERVAL_SECS: f64 = 1.0;
+
+/// Avanza la reproducción si corresponde. Pura sobre el estado (testeable con
+/// tiempos sintéticos): arranca en el paso 0, avanza de a uno y frena al final.
+fn protocol_advance(state: &mut ProtocolNavState, len: usize, time: f64) {
+    if !state.playing || len == 0 {
+        return;
+    }
+    if time - state.last_advance < PROTOCOL_PLAY_INTERVAL_SECS {
+        return;
+    }
+    state.last_advance = time;
+    match state.cursor {
+        None => state.cursor = Some(0),
+        Some(cursor) if cursor + 1 >= len => {
+            state.cursor = Some(len - 1);
+            state.playing = false;
+        }
+        Some(cursor) => state.cursor = Some(cursor + 1),
+    }
+}
+
+/// Selecciona en el documento el objeto de salida del paso `index`.
+/// Devuelve `false` si el paso no existe o su salida no es un objeto
+/// etiquetado (p. ej. pasos de comandos sin geometría).
+fn select_protocol_step(app: &mut GrafitoApp, index: usize) -> bool {
+    let Some(step) = app.construction_log.get(index) else {
+        return false;
+    };
+    let label = step.output.clone();
+    if label.is_empty() || label.starts_with("__") {
+        return false;
+    }
+    let target = app
+        .document
+        .objects_iter()
+        .find(|(_, object)| !object.label().is_empty() && object.label() == label)
+        .map(|(id, _)| *id);
+    match target {
+        Some(id) => {
+            app.document.clear_selection();
+            app.document.select(id);
+            app.selected_object = Some(id);
+            true
+        }
+        None => false,
+    }
+}
+
 pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Context) {
     if !app.show_construction_protocol {
         return;
@@ -5589,6 +5650,87 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                 }
                             });
 
+                            // Navegación view-only (Ola 1.5): ◀ ▶ y play
+                            // seleccionan el objeto del paso sin tocar el
+                            // documento (el reorden real sigue sin existir).
+                            let nav_id = egui::Id::new("gc_protocol_nav_state");
+                            let mut nav: ProtocolNavState = ctx
+                                .data_mut(|data| data.get_temp::<ProtocolNavState>(nav_id))
+                                .unwrap_or_default();
+                            let nav_time = ctx.input(|i| i.time);
+                            if nav.playing {
+                                ctx.request_repaint_after(std::time::Duration::from_millis(
+                                    (PROTOCOL_PLAY_INTERVAL_SECS * 1_000.0) as u64,
+                                ));
+                            }
+                            if has_steps {
+                                let before = nav.cursor;
+                                protocol_advance(&mut nav, app.construction_log.len(), nav_time);
+                                if nav.cursor != before {
+                                    if let Some(index) = nav.cursor {
+                                        let _ = select_protocol_step(app, index);
+                                    }
+                                }
+                                let total = app.construction_log.len();
+                                let current = nav.cursor.map_or(0, |c| c + 1);
+                                ui.horizontal(|ui| {
+                                    ui.spacing_mut().item_spacing.x = SPACE_XS;
+                                    ui.spacing_mut().interact_size.y = SHEET_CONTROL_H;
+                                    let nav_button = |ui: &mut egui::Ui,
+                                                      glyph: &str,
+                                                      tip: &str|
+                                     -> bool {
+                                        ui.add_sized(
+                                            [36.0, SHEET_CONTROL_H],
+                                            egui::Button::new(
+                                                egui::RichText::new(glyph).size(TYPE_XS),
+                                            )
+                                            .wrap_mode(egui::TextWrapMode::Extend)
+                                            .rounding(RADIUS_SM),
+                                        )
+                                        .on_hover_text(tip)
+                                        .clicked()
+                                    };
+                                    if nav_button(ui, "◀", "Paso anterior") {
+                                        nav.cursor = Some(
+                                            nav.cursor
+                                                .map_or(total.saturating_sub(1), |c| {
+                                                    c.saturating_sub(1)
+                                                }),
+                                        );
+                                        nav.playing = false;
+                                        if let Some(index) = nav.cursor {
+                                            let _ = select_protocol_step(app, index);
+                                        }
+                                    }
+                                    let playing = nav.playing;
+                                    if nav_button(ui, if playing { "⏸" } else { "▶" }, "Reproducir el protocolo paso a paso") {
+                                        nav.playing = !playing;
+                                        if nav.playing {
+                                            nav.last_advance = nav_time;
+                                            if nav.cursor.is_none() {
+                                                nav.cursor = Some(0);
+                                                let _ = select_protocol_step(app, 0);
+                                            }
+                                        }
+                                    }
+                                    if nav_button(ui, "▶|", "Último paso") {
+                                        nav.cursor = Some(total.saturating_sub(1));
+                                        nav.playing = false;
+                                        let _ = select_protocol_step(app, total.saturating_sub(1));
+                                    }
+                                    let _ = ui.label(
+                                        egui::RichText::new(format!("{current}/{total}"))
+                                            .color(txt_dim)
+                                            .size(TYPE_XS)
+                                            .monospace(),
+                                    );
+                                });
+                            }
+                            // Persistencia única por frame (después de fila y
+                            // tarjetas: el click de tarjeta también cuenta).
+                            ctx.data_mut(|data| data.insert_temp(nav_id, nav));
+
                             // El protocolo es una vista fiel del historial.
                             // Reordenar o desactivar sólo su texto no modifica
                             // restricciones reales: esos controles no existen.
@@ -5643,9 +5785,18 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                             } else {
                                                 output
                                             };
-                                            egui::Frame::none()
-                                                .fill(theme.input_bg)
-                                                .stroke(theme.hairline_stroke())
+                                            let is_current = nav.cursor == Some(i);
+                                            let card = egui::Frame::none()
+                                                .fill(if is_current {
+                                                    theme.accent_muted
+                                                } else {
+                                                    theme.input_bg
+                                                })
+                                                .stroke(if is_current {
+                                                    egui::Stroke::new(1.0, accent)
+                                                } else {
+                                                    theme.hairline_stroke()
+                                                })
                                                 .rounding(egui::Rounding::same(RADIUS_SM))
                                                 .inner_margin(egui::Margin::symmetric(
                                                     SPACE_SM,
@@ -5694,6 +5845,23 @@ pub(crate) fn draw_construction_protocol(app: &mut GrafitoApp, ctx: &egui::Conte
                                                         });
                                                     });
                                                 });
+                                            let card_resp = ui.interact(
+                                                card.response.rect,
+                                                egui::Id::new(("gc_protocol_card", i)),
+                                                egui::Sense::click(),
+                                            );
+                                            if card_resp.clicked() {
+                                                nav.cursor = Some(i);
+                                                nav.playing = false;
+                                                let _ = select_protocol_step(app, i);
+                                            }
+                                            if is_current {
+                                                ui.painter().rect_stroke(
+                                                    card.response.rect.expand(1.0),
+                                                    RADIUS_SM,
+                                                    egui::Stroke::new(1.0, accent),
+                                                );
+                                            }
                                             ui.add_space(SPACE_XS);
                                         }
                                     },
@@ -7544,15 +7712,15 @@ pub(crate) fn draw_probability_section(
 /// Ventana visible de la hoja vinculada (F3b). La hoja real vive en el
 /// documento (`Document::MAX_SPREADSHEET_ROWS/COLS = 400×400`,
 /// `MAX_SPREADSHEET_RECOMPUTE_CELLS = 10_000`): la UI solo muestra esta
-/// ventana navegable de hasta 6×8 por rendimiento (`SheetViewState` guarda
+/// ventana navegable de hasta 8×14 por rendimiento (`SheetViewState` guarda
 /// el origen; las columnas visibles bajan a 3..=4 si el panel es angosto
 /// para que nunca se corten); el resto se alcanza con las flechas, con
 /// `Ir a A1` o con `FillColumn`/`FillCells`/`FillRow` y la serie de abajo
 /// (`FillSeries`, mismo motor). No es infinita como Excel a propósito: el
 /// presupuesto 400×400/10k del core mantiene la recomputación acotada y
 /// honesta.
-const SHEET_VIEW_COLS: usize = 6;
-const SHEET_VIEW_ROWS: usize = 8;
+const SHEET_VIEW_COLS: usize = 8;
+const SHEET_VIEW_ROWS: usize = 14;
 
 /// Origen (esquina superior izquierda) de la ventana navegable de la hoja.
 /// Vive en `ctx.data` como `SheetEditState`: cero campos nuevos en
@@ -7591,7 +7759,7 @@ impl SheetViewState {
     }
 
     /// Mueve la ventana para que la celda `(row, col)` quede en la página
-    /// visible (esquina superior izquierda del bloque de `cols`×8), con el
+    /// visible (esquina superior izquierda del bloque de `cols`×14), con el
     /// mismo clamp que la navegación con flechas.
     fn focus_cell(&mut self, row: usize, col: usize, cols: usize) {
         let cols = cols.clamp(1, SHEET_VIEW_COLS);
@@ -7661,7 +7829,7 @@ fn sheet_nav_metrics(available: f32) -> SheetNavMetrics {
 }
 
 /// Grilla editable sobre `Document.spreadsheet` (F3b) con ventana navegable
-/// de 6×8. Cada celda edita su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el
+/// de 8×14. Cada celda edita su fuente (`=A1+B1`, `=x(A)`, `(A1, B1*2)`); el
 /// commit es por celda vía `stage_spreadsheet_cell_edits` (atómico, con undo)
 /// y el error queda en esa celda sin voltear la hoja (una fórmula rota
 /// muestra `—`). Ventana acotada por rendimiento; los presupuestos reales
@@ -7686,7 +7854,7 @@ fn draw_sheet_editable_grid(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let cols = visible_sheet_cols(ui.available_width());
 
     // Navegación de la ventana: la hoja es 400×400, la grilla muestra
-    // `cols`×8. Toolbar única (misma estructura en todo ancho): rango visible
+    // `cols`×14. Toolbar única (misma estructura en todo ancho): rango visible
     // a la izquierda, flechas agrupadas y reset a la derecha, sin textos que
     // envuelvan. La fila "Ir a" salta directo a una celda con el parser
     // del cerebro (`parse_cell_reference`).
@@ -9392,23 +9560,23 @@ mod coverage_sweep_panels_pure {
             Some((2, 2))
         );
         assert!(grafito_core::symbolic::series::parse_cell_reference("ZZZ").is_none());
-        // Navegación por celda: K10 con 4 columnas visibles abre I9:L16.
+        // Navegación por celda: K10 cae en la página 1..14 con 4 columnas (I1:L14).
         let mut view = SheetViewState::default();
         view.focus_cell(9, 10, 4);
-        assert_eq!(view.origin_row, 8);
+        assert_eq!(view.origin_row, 0);
         assert_eq!(view.origin_col, 8);
-        assert_eq!(view.window_label(4), "I9:L16");
-        // Con 6 columnas visibles la página cambia (K10 → G9:L16).
+        assert_eq!(view.window_label(4), "I1:L14");
+        // Con 6 columnas visibles la columna de página cambia (K10 → G1:L14).
         view.focus_cell(9, 10, 6);
         assert_eq!(view.origin_col, 6);
-        assert_eq!(view.window_label(6), "G9:L16");
-        // Cota dura del borde de la hoja 400×400 (clamp a la ventana de 6).
+        assert_eq!(view.window_label(6), "G1:L14");
+        // Cota dura del borde de la hoja 400×400 (clamp a la ventana de 8 cols).
         view.focus_cell(399, 399, 4);
-        assert_eq!(view.origin_row, 392);
-        assert_eq!(view.origin_col, 394);
+        assert_eq!(view.origin_row, 386);
+        assert_eq!(view.origin_col, 392);
         assert_eq!(
             view.window_label(4),
-            format!("{}393:{}400", sheet_col_label(394), sheet_col_label(397))
+            format!("{}387:{}400", sheet_col_label(392), sheet_col_label(395))
         );
     }
 
@@ -9475,5 +9643,72 @@ mod coverage_sweep_panels_pure {
         // no excede el presupuesto de recomputación del core.
         assert!(MAX_SUMMARY_CELLS >= Document::MAX_SPREADSHEET_ROWS);
         assert!(MAX_SUMMARY_CELLS <= Document::MAX_SPREADSHEET_RECOMPUTE_CELLS);
+    }
+}
+
+#[cfg(test)]
+mod protocol_nav_tests {
+    use super::{
+        protocol_advance, select_protocol_step, ProtocolNavState, PROTOCOL_PLAY_INTERVAL_SECS,
+    };
+
+    #[test]
+    fn play_avanza_de_a_un_paso_y_frena_al_final() {
+        assert_eq!(PROTOCOL_PLAY_INTERVAL_SECS, 1.0);
+        let mut state = ProtocolNavState {
+            playing: true,
+            ..Default::default()
+        };
+        // Primer tick: arranca en el paso 0.
+        protocol_advance(&mut state, 3, 2.0);
+        assert_eq!(state.cursor, Some(0));
+        // Antes del intervalo no avanza.
+        protocol_advance(&mut state, 3, 2.5);
+        assert_eq!(state.cursor, Some(0));
+        protocol_advance(&mut state, 3, 3.1);
+        assert_eq!(state.cursor, Some(1));
+        protocol_advance(&mut state, 3, 4.2);
+        assert_eq!(state.cursor, Some(2));
+        // Al llegar al final, frena solo.
+        protocol_advance(&mut state, 3, 5.3);
+        assert_eq!(state.cursor, Some(2));
+        assert!(!state.playing);
+        // Pausado no avanza aunque pase el tiempo.
+        state.playing = false;
+        protocol_advance(&mut state, 3, 99.0);
+        assert_eq!(state.cursor, Some(2));
+    }
+
+    #[test]
+    fn play_con_log_vacio_no_hace_nada() {
+        let mut state = ProtocolNavState {
+            playing: true,
+            ..Default::default()
+        };
+        protocol_advance(&mut state, 0, 5.0);
+        assert_eq!(state.cursor, None);
+        assert!(state.playing);
+    }
+
+    #[test]
+    fn click_de_paso_selecciona_el_objeto_del_documento() {
+        let mut app = crate::app::dummy_grafito_app();
+        app.execute_command_and_record("A=(1,2)", 0.0);
+        // El comando ya registra su propio paso: acá controlamos el log a mano.
+        app.construction_log.clear();
+        app.record_construction_step("Punto", vec![], "A");
+        assert!(select_protocol_step(&mut app, 0), "paso 0 selecciona A");
+        let selected = app.selected_object.expect("selección viva");
+        assert_eq!(
+            app.document
+                .get_object(selected)
+                .map(|object| object.label().to_string())
+                .as_deref(),
+            Some("A")
+        );
+        // Paso inexistente o salida no etiquetada: false sin pánico.
+        assert!(!select_protocol_step(&mut app, 9));
+        app.record_construction_step("Comando", vec![], "");
+        assert!(!select_protocol_step(&mut app, 1));
     }
 }

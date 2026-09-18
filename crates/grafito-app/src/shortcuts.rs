@@ -188,6 +188,17 @@ impl GrafitoApp {
                 self.command_palette.search.clear();
                 self.command_palette.selected_index = 0;
             }
+            // Ola 1.1: "/" enfoca la entrada de comandos (barra inferior o
+            // drawer). Dentro del guard !wants_keyboard_input: nunca roba "/"
+            // al editar texto. Se acepta SHIFT porque en layout ES "/" es
+            // Shift+7 (y en US "?" no se escribe en ningún lado sin foco).
+            if ctx.input(|i| {
+                i.key_pressed(Key::Slash)
+                    && (i.modifiers == egui::Modifiers::NONE
+                        || i.modifiers == egui::Modifiers::SHIFT)
+            }) {
+                self.command_input_focus_requested = true;
+            }
             // Ctrl+T: alternar tema claro/oscuro (mismo efecto que Vista > Modo oscuro).
             if ctx.input(|i| i.key_pressed(Key::T) && i.modifiers.ctrl && !i.modifiers.shift) {
                 self.dark_mode = !self.dark_mode;

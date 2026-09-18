@@ -111,8 +111,8 @@ const ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT: f32 = 160.0;
 // externo limita a max_composer = (available*0.38).clamp(88,260). No envolver en
 // ScrollArea para que input+botones queden siempre visibles; la barra solo aparece
 // para attachments si exceden el máximo.
-// BASE cubre el contenido DENTRO del panel anidado: tarjeta 94 (marco 16 +
-// editor 44 + espacio 4 + botones 30) + fila de estado 24 (espacio 4 + línea
+// BASE cubre el contenido DENTRO del panel anidado: tarjeta 108 (marco 16 +
+// editor 44 + espacio 4 + botones 32) + fila de estado 24 (espacio 4 + línea
 // ~20: "Escribí algo…"/"Estoy pensando…"/límite) + caption 18 (espacio 4 +
 // línea ~14 "Enter envía…") + 16 del marco propio del panel + 6 de aire
 // (respiro del anillo de foco 2px + crecimiento HiDPI) = 158. La fila de
@@ -122,24 +122,27 @@ const ASSISTANT_COMPACT_MIN_CANVAS_HEIGHT: f32 = 160.0;
 // de abajo (caption) y el anillo de foco queda oculto contra el borde
 // inferior — en pantalla completa (panel alto, no colapsado) es donde más
 // se nota porque la tarjeta ocupa todo el alto reservado.
+/// Lado de los botones de acción del composer (adjuntar/buscar/razonar/
+/// enviar): cuadrados compactos y uniformes para una fila estructurada.
+const ASSISTANT_COMPOSER_ACTION_SIZE: f32 = 32.0;
 const ASSISTANT_COMPOSER_BASE_HEIGHT: f32 = 16.0
     + ASSISTANT_COMPOSER_EDITOR_HEIGHT
     + 4.0
-    + 30.0
+    + ASSISTANT_COMPOSER_ACTION_SIZE
     + 16.0
     + ASSISTANT_COMPOSER_STATUS_HEIGHT
     + ASSISTANT_COMPOSER_CAPTION_HEIGHT
-    + 6.0; // = 158.0: tarjeta + estado + caption + marcos + aire foco/HiDPI
-           // Piso del composer colapsado (editor 1 línea): tarjeta 78 (16 + 28 + 4 +
-           // 30) + estado 24 + caption 18 + marco 16 = 136. Por debajo se recortan
+    + 6.0; // = 160.0: tarjeta + estado + caption + marcos + aire foco/HiDPI
+           // Piso del composer colapsado (editor 1 línea): tarjeta 80 (16 + 28 + 4 +
+           // 32) + estado 24 + caption 18 + marco 16 = 138. Por debajo se recortan
            // caption y anillo de foco.
 const ASSISTANT_COMPOSER_COLLAPSED_FLOOR: f32 = 16.0
     + ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT
     + 4.0
-    + 30.0
+    + ASSISTANT_COMPOSER_ACTION_SIZE
     + 16.0
     + ASSISTANT_COMPOSER_STATUS_HEIGHT
-    + ASSISTANT_COMPOSER_CAPTION_HEIGHT; // = 136.0
+    + ASSISTANT_COMPOSER_CAPTION_HEIGHT; // = 138.0
 const ASSISTANT_COMPOSER_EDITOR_HEIGHT: f32 = 44.0;
 const ASSISTANT_COMPOSER_FOCUS_HEIGHT: f32 = 32.0;
 const ASSISTANT_COMPOSER_BUDGET_HEIGHT: f32 = 20.0;
@@ -321,6 +324,8 @@ const MAX_TOOL_NAME_CHARS: usize = 64;
 #[derive(Debug, Clone, Copy, Default)]
 pub struct AssistantVisuals {
     pub mora_texture: Option<egui::TextureId>,
+    /// Ola 1.3: idioma para las cadenas del panel (`i18n::t`). Default ES.
+    pub locale: crate::i18n::Locale,
 }
 
 /// Cache de bloques parseados de las respuestas del transcript, direccionado
@@ -1654,17 +1659,23 @@ pub enum RemoteStage {
 }
 
 impl RemoteStage {
+    /// Texto localizado de la etapa (puro, sin I/O). Ola 1.3.
+    pub fn label_locale(self, locale: crate::i18n::Locale) -> String {
+        let key = match self {
+            Self::Autorizada => "assistant.stage.authorized",
+            Self::Conectando => "assistant.stage.connecting",
+            Self::EsperandoPrimerToken => "assistant.stage.thinking",
+            Self::Recibiendo { .. } => "assistant.stage.writing",
+        };
+        crate::i18n::t(key, locale).to_string()
+    }
+
     /// Texto rioplatense corto de la etapa (puro, sin I/O).
     ///
     /// Profesional y sin jerga de red: nunca se nombra el "token" ni se
     /// muestran KiB (el texto en vivo ya es el feedback).
     pub fn label(self) -> String {
-        match self {
-            Self::Autorizada => "Conectando…".into(),
-            Self::Conectando => "Conectando…".into(),
-            Self::EsperandoPrimerToken => "Pensando…".into(),
-            Self::Recibiendo { .. } => "Escribiendo respuesta…".into(),
-        }
+        self.label_locale(crate::i18n::Locale::Es)
     }
 }
 
@@ -1708,6 +1719,9 @@ pub struct AssistantPanelState {
     /// Buscar en internet: habilita la tool `web_search` y el pre-flight de
     /// contexto web en las consultas.
     pub web_search_enabled: bool,
+    /// Tutor socrático: repregunta antes de mostrar la solución directa.
+    /// Apagado, el asistente responde sin pedagogía (ver `SocraticModeChanged`).
+    pub socratic_enabled: bool,
     /// Perfil de proveedor seleccionado por el usuario.
     pub provider: ProviderProfile,
     /// Identificador del modelo configurado para el proveedor actual.
@@ -2007,6 +2021,7 @@ impl Default for AssistantPanelState {
             next_turn_id: 0,
             reasoning_enabled: false,
             web_search_enabled: false,
+            socratic_enabled: true,
             is_pending: false,
             pending_remote_authorization: None,
             pending_clarification: None,
@@ -2072,12 +2087,20 @@ impl AssistantPanelState {
     /// "tardando más de lo normal, podés cancelar". La app actualiza
     /// `remote_stage` + `remote_stage_elapsed_secs` cada frame.
     pub fn remote_stage_text(&self) -> String {
+        self.remote_stage_text_locale(crate::i18n::Locale::Es)
+    }
+
+    /// Variante localizada de [`Self::remote_stage_text`] (Ola 1.3).
+    pub fn remote_stage_text_locale(&self, locale: crate::i18n::Locale) -> String {
         if let Some(note) = self.remote_stage_note.as_deref() {
             return note.to_string();
         }
-        let base = self.remote_stage.label();
+        let base = self.remote_stage.label_locale(locale);
         if self.remote_stage_elapsed_secs >= REMOTE_SLOW_STAGE_SECS {
-            format!("{base} tardando más de lo normal, podés cancelar.")
+            format!(
+                "{base} {}",
+                crate::i18n::t("assistant.stage.slow_suffix", locale)
+            )
         } else {
             base
         }
@@ -3946,32 +3969,16 @@ fn parse_assistant_blocks_spanned(content: &str) -> Vec<SpannedBlock> {
             continue;
         }
 
-        if index + 1 < lines.len() {
-            if let (Some(header), Some(separator)) = (
-                parse_markdown_table_row(trimmed),
-                parse_markdown_table_row(lines[index + 1].trim()),
-            ) {
-                if markdown_table_separator(&separator, header.len()) {
-                    flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
-                    let mut rows = vec![header];
-                    index += 2;
-                    while index < lines.len() {
-                        let Some(row) = parse_markdown_table_row(lines[index].trim()) else {
-                            break;
-                        };
-                        if row.len() != rows[0].len() {
-                            break;
-                        }
-                        rows.push(row);
-                        index += 1;
-                    }
-                    blocks.push(SpannedBlock {
-                        block: AssistantMessageBlock::Table(rows),
-                        start_line: block_start,
-                    });
-                    continue;
-                }
-            }
+        // Tablas markdown (clásicas con separador, o tolerantes sin él):
+        // el helper nunca deja pipes crudos de filas que parecían tabla.
+        if let Some((consumed, rows)) = try_parse_table_block(&lines, index) {
+            flush_assistant_paragraph(&mut blocks, &mut paragraph, &mut paragraph_start);
+            blocks.push(SpannedBlock {
+                block: AssistantMessageBlock::Table(rows),
+                start_line: block_start,
+            });
+            index += consumed;
+            continue;
         }
 
         let heading_level = trimmed
@@ -4332,6 +4339,127 @@ pub fn media_preview_rect(full_rect: egui::Rect, img_w: f32, img_h: f32) -> egui
     )
 }
 
+/// ¿La línea parece un intento de separador de tabla (`| --- |`, aunque
+/// sea con columnas de más/menos)? Sólo pipes, guiones, dos puntos y espacios.
+fn looks_like_table_separator_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|character| matches!(character, '|' | '-' | ':' | ' ' | '\t'))
+        && trimmed.contains('-')
+}
+
+/// Normaliza una fila al ancho del encabezado (estilo GFM): se truncan las
+/// celdas de más y se rellenan las que faltan con "". Así una fila ragged del
+/// modelo jamás deja pipes crudos en pantalla; la tabla termina en la primera
+/// línea sin `|` (o vacía).
+fn normalize_table_row(mut cells: Vec<String>, width: usize) -> Vec<String> {
+    cells.truncate(width);
+    while cells.len() < width {
+        cells.push(String::new());
+    }
+    cells
+}
+
+/// Intenta parsear una tabla markdown desde `lines[index]`.
+///
+/// Estrategias en orden (la primera que calce gana):
+/// 1. Cabecera + separador válido (`| --- |`): clásico.
+/// 2. Sin separador válido: 2+ líneas consecutivas delimitadas por pipes en
+///    ambos extremos con el mismo ancho (≥2 celdas); la primera es cabecera.
+///    (Sin separador se exige evidencia fuerte para no tragar prosa como
+///    `|x| = 3`, que no termina en pipe.)
+///
+/// Las filas del cuerpo se normalizan estilo GFM y `||` parte filas
+/// colapsadas (ver `split_collapsed_table_row`). Devuelve (líneas
+/// consumidas, filas) con al menos 1 fila de cuerpo; si no, `None`.
+fn try_parse_table_block(lines: &[&str], index: usize) -> Option<(usize, Vec<Vec<String>>)> {
+    let header = parse_markdown_table_row(lines[index].trim())?;
+    let width = header.len();
+    if width == 0 {
+        return None;
+    }
+    let mut cursor = index + 1;
+    let mut separator_ok = false;
+    if cursor < lines.len() {
+        if let Some(separator) = parse_markdown_table_row(lines[cursor].trim()) {
+            if markdown_table_separator(&separator, width) {
+                separator_ok = true;
+                cursor += 1;
+            }
+        }
+    }
+    // Sin separador válido: sólo tablas con pipes en ambos extremos (evita
+    // prosa matemática) y ancho ≥ 2. Un intento de separador roto (`|---|`
+    // con columnas de más/menos) se salta sin tomarlo como dato.
+    if !separator_ok {
+        if width < 2 {
+            return None;
+        }
+        let delimited = |line: &str| {
+            let line = line.trim();
+            line.starts_with('|') && line.ends_with('|')
+        };
+        if !delimited(lines[index]) {
+            return None;
+        }
+        if looks_like_table_separator_line(lines[index].trim()) {
+            return None;
+        }
+        while cursor < lines.len() && looks_like_table_separator_line(lines[cursor].trim()) {
+            cursor += 1;
+        }
+        // La primera fila de cuerpo debe ser válida y del mismo ancho,
+        // también delimitada (no prosa como `|x| = 3`, que no termina en pipe).
+        let next = lines.get(cursor).map(|line| line.trim())?;
+        if !delimited(next) {
+            return None;
+        }
+        let body = parse_markdown_table_row(next)?;
+        if body.len() != width {
+            return None;
+        }
+    }
+    let mut rows = vec![header];
+    while cursor < lines.len() {
+        let trimmed_row = lines[cursor].trim();
+        if trimmed_row.is_empty() || !trimmed_row.contains('|') {
+            break;
+        }
+        // Intentos de separador en el medio (columnas rotas del modelo): se
+        // consumen sin agregar fila de datos.
+        if looks_like_table_separator_line(trimmed_row) {
+            cursor += 1;
+            continue;
+        }
+        if let Some(collapsed) = split_collapsed_table_row(trimmed_row, width) {
+            rows.extend(collapsed);
+            cursor += 1;
+            continue;
+        }
+        let Some(cells) = parse_markdown_table_row(trimmed_row) else {
+            break;
+        };
+        // Sin separador clásico, las filas también deben venir delimitadas
+        // en ambos extremos (si no, se termina la tabla acá).
+        if !separator_ok {
+            let delimited = trimmed_row.starts_with('|') && trimmed_row.ends_with('|');
+            if !delimited {
+                break;
+            }
+        }
+        rows.push(normalize_table_row(cells, width));
+        cursor += 1;
+    }
+    // Con separador clásico vale tabla de sólo-encabezado (paridad con el
+    // comportamiento anterior); sin separador se exigen ≥1 fila de cuerpo.
+    if rows.len() < 2 && !separator_ok {
+        return None;
+    }
+    Some((cursor - index, rows))
+}
+
 fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
     let line = line.trim();
     if !line.contains('|') {
@@ -4344,6 +4472,32 @@ fn parse_markdown_table_row(line: &str) -> Option<Vec<String>> {
         .map(|cell| cell.trim().to_owned())
         .collect::<Vec<_>>();
     (!cells.is_empty()).then_some(cells)
+}
+
+/// Parte una línea de tabla en filas lógicas por `||` (filas colapsadas).
+///
+/// El modelo a veces junta dos filas en una sola línea
+/// (`| a | b || c | d |`). Devuelve las filas sólo si TODAS las piezas
+/// parsean con exactamente `width` celdas; si no, `None` y la línea se
+/// procesa normal (entra entera o corta la tabla como antes). Así `$a || b$`
+/// u `||x||` dentro de una celda jamás se rompen.
+fn split_collapsed_table_row(line: &str, width: usize) -> Option<Vec<Vec<String>>> {
+    if !line.contains("||") {
+        return None;
+    }
+    let mut rows = Vec::new();
+    for piece in line.split("||") {
+        let piece = piece.trim();
+        if piece.is_empty() {
+            continue;
+        }
+        let cells = parse_markdown_table_row(piece)?;
+        if cells.len() != width {
+            return None;
+        }
+        rows.push(cells);
+    }
+    (!rows.is_empty()).then_some(rows)
 }
 
 fn markdown_table_separator(cells: &[String], expected_columns: usize) -> bool {
@@ -4486,6 +4640,9 @@ pub enum AssistantUiAction {
     ReasoningModeChanged(bool),
     /// Buscar en internet: pre-flight web + tool `web_search` en el agente.
     WebSearchChanged(bool),
+    /// Tutor socrático: repreguntas y repair antes de mostrar soluciones.
+    /// Apagado = el asistente responde directo, sin pedagogía entrometida.
+    SocraticModeChanged(bool),
     /// Generar una animación del objeto/expresión y reproducirla en el chat.
     RunAnimation,
     /// Abrir el diálogo Exportar de la animación visible en la card.
@@ -6234,6 +6391,19 @@ fn draw_assistant_settings_contents(
         action = Some(AssistantUiAction::WebSearchChanged(web_search_enabled));
     }
 
+    ui.add_space(SPACE_XS);
+    let mut socratic_enabled = state.socratic_enabled;
+    let socratic_changed = ui
+        .checkbox(&mut socratic_enabled, "Tutor socrático (repreguntar antes de resolver)")
+        .on_hover_text(
+            "Si está activo, Mili repregunta y evita mostrar la solución directa al primer intento. Apagalo para respuestas directas siempre.",
+        )
+        .changed();
+    if socratic_changed {
+        state.socratic_enabled = socratic_enabled;
+        action = Some(AssistantUiAction::SocraticModeChanged(socratic_enabled));
+    }
+
     if state.use_api_key() {
         ui.add_space(crate::tokens::SPACE_SM);
         ui.separator();
@@ -6492,7 +6662,7 @@ fn draw_panel_contents(
             // y los botones quedan siempre visibles; la barra del panel no desborda el card.
             retain_first_assistant_action(
                 &mut action,
-                draw_assistant_composer(ui, state, collapsed_composer),
+                draw_assistant_composer(ui, state, collapsed_composer, visuals.locale),
             );
         });
 
@@ -6507,7 +6677,7 @@ fn draw_panel_contents(
         .show(ui, |ui| {
             if let Some(error) = state.error.clone() {
                 // El apoyo se calcula antes de mover `error` al label.
-                let secondary_hint = error_secondary_hint(&error);
+                let secondary_hint = error_secondary_hint_locale(&error, visuals.locale);
                 egui::Frame::none()
                     .fill(theme.danger.gamma_multiply(0.08))
                     .stroke(egui::Stroke::new(1.0, theme.danger.gamma_multiply(0.2)))
@@ -6535,7 +6705,12 @@ fn draw_panel_contents(
                                 .size(crate::tokens::TYPE_XS),
                         );
                         if state.proposal_correction_available
-                            && ui.small_button("Pedir una corrección").clicked()
+                            && ui
+                                .small_button(crate::i18n::t(
+                                    "assistant.apply.ask_correction",
+                                    visuals.locale,
+                                ))
+                                .clicked()
                         {
                             retain_first_assistant_action(
                                 &mut action,
@@ -6588,7 +6763,7 @@ fn draw_panel_contents(
             if state.has_pending_clarification() {
                 retain_first_assistant_action(
                     &mut action,
-                    draw_pending_clarification_card(ui, state),
+                    draw_pending_clarification_card(ui, state, visuals.locale),
                 );
                 ui.add_space(SPACE_SM);
             }
@@ -9041,6 +9216,7 @@ fn draw_remote_authorization_card(
 fn draw_pending_clarification_card(
     ui: &mut egui::Ui,
     state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
     let pending = state.pending_clarification()?;
     let theme = current_theme(ui.ctx());
@@ -9056,7 +9232,7 @@ fn draw_pending_clarification_card(
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width());
             ui.label(
-                egui::RichText::new("Necesito una aclaración")
+                egui::RichText::new(crate::i18n::t("assistant.turn.clarify", locale))
                     .color(theme.accent_strong)
                     .size(TYPE_SM)
                     .strong(),
@@ -9290,8 +9466,10 @@ fn mora_avatar_scale(active: bool, time: f64) -> f32 {
 fn draw_assistant_empty_state(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
-    _visuals: AssistantVisuals,
+    visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
+    use crate::i18n::t;
+    let locale = visuals.locale;
     let theme = current_theme(ui.ctx());
     let time = ui.input(|i| i.time);
     let hover_pos = ui.input(|i| i.pointer.hover_pos());
@@ -9335,7 +9513,7 @@ fn draw_assistant_empty_state(
                 .strong(),
         );
         ui.label(
-            egui::RichText::new("Asistente matemático")
+            egui::RichText::new(t("assistant.empty.role", locale))
                 .color(theme.text_secondary)
                 .size(crate::tokens::TYPE_XS),
         );
@@ -9348,8 +9526,10 @@ fn draw_assistant_header(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     theme: &crate::theme::Theme,
-    _visuals: AssistantVisuals,
+    visuals: AssistantVisuals,
 ) -> Option<AssistantUiAction> {
+    use crate::i18n::{t, Locale};
+    let locale: Locale = visuals.locale;
     let mut action = None;
     // Configuración ahora solo vía barra superior (header minimalista sin duplicado)
     let _ = Icon::Settings; // retenido para test: la configuración sigue accesible globalmente
@@ -9390,7 +9570,8 @@ fn draw_assistant_header(
                     let greeting = if state.user_name.trim().is_empty() {
                         assistant_name.clone()
                     } else {
-                        format!("Hola, {}", state.user_name.trim())
+                        t("assistant.header.greeting", locale)
+                            .replace("{name}", state.user_name.trim())
                     };
                     ui.label(
                         egui::RichText::new(greeting)
@@ -9399,9 +9580,12 @@ fn draw_assistant_header(
                             .strong(),
                     );
                     ui.label(
-                        egui::RichText::new(format!("{assistant_name} · Asistente matemático"))
-                            .color(theme.text_secondary.gamma_multiply(0.60))
-                            .size(crate::tokens::TYPE_XS),
+                        egui::RichText::new(
+                            t("assistant.header.subtitle", locale)
+                                .replace("{assistant_name}", &assistant_name),
+                        )
+                        .color(theme.text_secondary.gamma_multiply(0.60))
+                        .size(crate::tokens::TYPE_XS),
                     );
                 });
                 // Consumo acumulado de la sesión (sólo si el proveedor
@@ -9410,14 +9594,14 @@ fn draw_assistant_header(
                 if session_tokens > 0 {
                     ui.add_space(crate::tokens::SPACE_SM);
                     ui.label(
-                        egui::RichText::new(format!(
-                            "· {} tokens",
-                            format_token_count(session_tokens)
-                        ))
+                        egui::RichText::new(
+                            t("assistant.header.tokens", locale)
+                                .replace("{n}", &format_token_count(session_tokens)),
+                        )
                         .color(theme.text_tertiary)
                         .size(crate::tokens::TYPE_XS),
                     )
-                    .on_hover_text("Tokens reportados por el proveedor en esta sesión");
+                    .on_hover_text(t("assistant.header.tokens_hint", locale));
                 }
                 // Centro flexible para empujar controles a la derecha
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -9425,7 +9609,7 @@ fn draw_assistant_header(
                         ui,
                         Icon::Close,
                         theme.text_secondary,
-                        "Ocultar asistente",
+                        t("assistant.header.hide", locale),
                     )
                     .clicked()
                     {
@@ -9434,7 +9618,8 @@ fn draw_assistant_header(
                     let can_clear = !state.is_pending && !state.conversation.is_empty();
                     ui.add_enabled_ui(can_clear, |ui| {
                         let btn = egui::Button::new(
-                            egui::RichText::new("Limpiar").size(crate::tokens::TYPE_XS),
+                            egui::RichText::new(t("assistant.header.clear", locale))
+                                .size(crate::tokens::TYPE_XS),
                         )
                         .rounding(crate::tokens::RADIUS_PILL)
                         .fill(theme.button_bg.gamma_multiply(0.0))
@@ -9474,15 +9659,22 @@ fn composer_icon_toggle(
     theme: &crate::theme::Theme,
     tooltip: &str,
 ) -> egui::Response {
+    // Botones de acción cuadrados compactos como Enviar: misma altura y
+    // mismo radio para una fila estructurada; el glifo va centrado en
+    // cuadrado (draw_icon hace letterbox, sin estirar). 32px (no 44 de aula):
+    // fila densa de escritorio, el táctil grande vive en el canvas.
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(30.0, crate::tokens::HIT_TARGET_AULA),
+        egui::vec2(
+            ASSISTANT_COMPOSER_ACTION_SIZE,
+            ASSISTANT_COMPOSER_ACTION_SIZE,
+        ),
         egui::Sense::click(),
     );
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         painter.rect(
             rect,
-            crate::tokens::RADIUS_PILL,
+            crate::tokens::RADIUS_MD,
             if active {
                 theme.accent_muted
             } else {
@@ -9499,7 +9691,7 @@ fn composer_icon_toggle(
         );
         crate::icons::draw_icon(
             painter,
-            rect.shrink(7.0),
+            rect.shrink(6.0),
             icon,
             if active {
                 theme.accent
@@ -9519,7 +9711,9 @@ fn draw_assistant_composer(
     ui: &mut egui::Ui,
     state: &mut AssistantPanelState,
     collapsed: bool,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
+    use crate::i18n::t;
     let theme = current_theme(ui.ctx());
     let attachment_limits = AttachmentLimits::default();
     let mut action = None;
@@ -9536,7 +9730,7 @@ fn draw_assistant_composer(
     };
     let editor_rows = if collapsed { 1 } else { 2 };
     // Hint simple y estable (pedido explícito): siempre el mismo texto.
-    let editor_hint = "Escribí tu pregunta";
+    let editor_hint = t("assistant.composer_hint", locale);
 
     if let Some(focus) = &state.focus {
         egui::Frame::none()
@@ -9546,7 +9740,7 @@ fn draw_assistant_composer(
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new("Contexto")
+                        egui::RichText::new(t("assistant.composer.context", locale))
                             .color(theme.accent)
                             .size(TYPE_XS)
                             .strong(),
@@ -9624,7 +9818,7 @@ fn draw_assistant_composer(
                                 ui,
                                 Icon::Paperclip,
                                 theme.text_secondary,
-                                "Adjuntar imagen",
+                                t("assistant.composer.attach", locale),
                             )
                         })
                         .inner;
@@ -9635,11 +9829,14 @@ fn draw_assistant_composer(
                     ui.add_space(crate::tokens::SPACE_SM);
                     if !state.attachments.is_empty() {
                         ui.label(
-                            egui::RichText::new(format!(
-                                "{}/{} imágenes",
-                                state.attachments.len(),
-                                attachment_limits.max_attachments
-                            ))
+                            egui::RichText::new(
+                                t("assistant.composer.images", locale)
+                                    .replace("{used}", &state.attachments.len().to_string())
+                                    .replace(
+                                        "{max}",
+                                        &attachment_limits.max_attachments.to_string(),
+                                    ),
+                            )
                             .color(theme.text_tertiary)
                             .size(crate::tokens::TYPE_XS),
                         );
@@ -9665,7 +9862,7 @@ fn draw_assistant_composer(
                             )
                             .truncate(),
                         )
-                        .on_hover_text("Caracteres usados del límite de entrada");
+                        .on_hover_text(t("assistant.limit_hint", locale));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if state.is_pending {
@@ -9678,7 +9875,7 @@ fn draw_assistant_composer(
                             } else if ui
                                 .add(
                                     egui::Button::new(
-                                        egui::RichText::new("Cancelar")
+                                        egui::RichText::new(t("common.cancel", locale))
                                             .size(crate::tokens::TYPE_SM),
                                     )
                                     .rounding(crate::tokens::RADIUS_PILL)
@@ -9696,11 +9893,11 @@ fn draw_assistant_composer(
                                 .add_enabled(
                                     can_submit,
                                     egui::Button::new("")
-                                        // Táctil aula 44x44 (`HIT_TARGET_AULA`);
-                                        // primario Enviar, sin compromiso de layout.
+                                        // Cuadrado compacto como los toggles
+                                        // (`ASSISTANT_COMPOSER_ACTION_SIZE`).
                                         .min_size(egui::vec2(
-                                            crate::tokens::HIT_TARGET_AULA,
-                                            crate::tokens::HIT_TARGET_AULA,
+                                            ASSISTANT_COMPOSER_ACTION_SIZE,
+                                            ASSISTANT_COMPOSER_ACTION_SIZE,
                                         ))
                                         .rounding(crate::tokens::RADIUS_MD)
                                         .fill(if can_submit {
@@ -9710,14 +9907,15 @@ fn draw_assistant_composer(
                                         })
                                         .stroke(egui::Stroke::NONE),
                                 )
-                                .on_hover_text("Enviar")
-                                .on_disabled_hover_text(
-                                    "Escribí una pregunta dentro del límite para enviar.",
-                                );
+                                .on_hover_text(t("assistant.composer.send", locale))
+                                .on_disabled_hover_text(t(
+                                    "assistant.composer.send_disabled",
+                                    locale,
+                                ));
                             if ui.is_rect_visible(send_response.rect) {
                                 crate::icons::draw_icon(
                                     ui.painter(),
-                                    send_response.rect.shrink(7.0),
+                                    send_response.rect.shrink(6.0),
                                     Icon::Send,
                                     if can_submit {
                                         egui::Color32::WHITE
@@ -9730,7 +9928,7 @@ fn draw_assistant_composer(
                                 egui::WidgetInfo::labeled(
                                     egui::WidgetType::Button,
                                     can_submit,
-                                    "Enviar".to_owned(),
+                                    t("assistant.composer.send", locale).to_owned(),
                                 )
                             });
                             if send_response.clicked() || submit_on_enter {
@@ -9746,7 +9944,7 @@ fn draw_assistant_composer(
                             Icon::Search,
                             state.web_search_enabled,
                             theme,
-                            "Buscar en internet antes de responder",
+                            t("assistant.composer.search_hint", locale),
                         );
                         if web_chip.clicked() {
                             state.web_search_enabled = !state.web_search_enabled;
@@ -9759,7 +9957,7 @@ fn draw_assistant_composer(
                             Icon::Sparkles,
                             state.reasoning_enabled,
                             theme,
-                            "Modo razonador: pensar antes de responder (plegable)",
+                            t("assistant.composer.reasoning_hint", locale),
                         );
                         if reasoning_chip.clicked() {
                             state.reasoning_enabled = !state.reasoning_enabled;
@@ -9779,11 +9977,9 @@ fn draw_assistant_composer(
         ui.add_space(crate::tokens::SPACE_XS);
         let pending_resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(
-                    "Estoy pensando… esperá que termine para mandar otra pregunta.",
-                )
-                .color(theme.text_secondary)
-                .size(crate::tokens::TYPE_XS),
+                egui::RichText::new(t("assistant.composer_pending", locale))
+                    .color(theme.text_secondary)
+                    .size(crate::tokens::TYPE_XS),
             )
             .wrap(),
         );
@@ -9793,24 +9989,23 @@ fn draw_assistant_composer(
         }
     } else if over_budget {
         ui.add_space(crate::tokens::SPACE_XS);
+        let budget_text =
+            t("assistant.composer.over_budget", locale).replace("{budget}", &budget.to_string());
         let budget_resp = ui.add(
             egui::Label::new(
-                egui::RichText::new(over_budget_hint(budget))
+                egui::RichText::new(budget_text.clone())
                     .color(theme.danger)
                     .size(crate::tokens::TYPE_XS),
             )
             .wrap(),
         );
         // A11Y live-region (D1): el límite excedido es error y anuncia.
-        crate::toolbar::tag_live_region(
-            &budget_resp,
-            format!("Asistente: error. {}", over_budget_hint(budget)),
-        );
+        crate::toolbar::tag_live_region(&budget_resp, format!("Asistente: error. {budget_text}"));
     } else if state.problem.trim().is_empty() {
         ui.add_space(crate::tokens::SPACE_XS);
         ui.add(
             egui::Label::new(
-                egui::RichText::new("Escribí algo para activar Enviar.")
+                egui::RichText::new(t("assistant.composer_empty", locale))
                     .color(theme.text_tertiary)
                     .size(crate::tokens::TYPE_XS),
             )
@@ -9828,7 +10023,7 @@ fn draw_assistant_composer(
     ui.add_space(crate::tokens::SPACE_XS);
     ui.add(
         egui::Label::new(
-            egui::RichText::new("Enter envía · Shift+Enter salto de línea")
+            egui::RichText::new(t("assistant.composer_keys", locale))
                 .color(theme.text_tertiary.gamma_multiply(0.75))
                 .size(crate::tokens::TYPE_2XS),
         )
@@ -10021,6 +10216,7 @@ fn draw_reasoning_disclosure(
     reasoning_ms: Option<u32>,
     pending: bool,
     state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
 ) {
     let theme = crate::theme::current_theme(ui.ctx());
     let open = state
@@ -10030,11 +10226,10 @@ fn draw_reasoning_disclosure(
         .copied()
         .unwrap_or(pending);
     let header = match (pending, reasoning_ms) {
-        (true, _) => "Pensando…".to_owned(),
-        (false, Some(ms)) if ms >= 1_000 => {
-            format!("Razonamiento · Pensó {:.0}s", ms as f32 / 1_000.0)
-        }
-        _ => "Razonamiento".to_owned(),
+        (true, _) => crate::i18n::t("assistant.reasoning.thinking", locale).to_owned(),
+        (false, Some(ms)) if ms >= 1_000 => crate::i18n::t("assistant.reasoning.with_time", locale)
+            .replace("{secs}", &format!("{:.0}", ms as f32 / 1_000.0)),
+        _ => crate::i18n::t("assistant.reasoning.title", locale).to_owned(),
     };
     // Mientras piensa, el header respira más (secondary); al terminar queda
     // quieto (tertiary). El cuerpo siempre en un frame input_bg con hairline.
@@ -10077,21 +10272,29 @@ fn draw_reasoning_disclosure(
 }
 
 /// Banda de métricas del turno: "Pensó Ns · N tokens" con detalle en hover.
-fn draw_turn_metrics(ui: &mut egui::Ui, turn: &ConversationTurn, theme: &crate::theme::Theme) {
+fn draw_turn_metrics(
+    ui: &mut egui::Ui,
+    turn: &ConversationTurn,
+    theme: &crate::theme::Theme,
+    locale: crate::i18n::Locale,
+) {
     let Some(usage) = turn.usage else {
         return;
     };
     ui.add_space(crate::tokens::SPACE_XS);
-    let text = egui::RichText::new(format!(
-        "{} tokens",
-        format_token_count(usage.display_total())
-    ))
+    let text = egui::RichText::new(
+        crate::i18n::t("assistant.turn.tokens", locale)
+            .replace("{n}", &format_token_count(usage.display_total())),
+    )
     .color(theme.text_tertiary)
     .size(crate::tokens::TYPE_XS);
-    ui.label(text).on_hover_text(format!(
-        "Entrada {} · Salida {} · Razonamiento {} · Caché {}",
-        usage.input_tokens, usage.output_tokens, usage.reasoning_tokens, usage.cached_input_tokens
-    ));
+    ui.label(text).on_hover_text(
+        crate::i18n::t("assistant.turn.tokens_hint", locale)
+            .replace("{input}", &usage.input_tokens.to_string())
+            .replace("{output}", &usage.output_tokens.to_string())
+            .replace("{reasoning}", &usage.reasoning_tokens.to_string())
+            .replace("{cached}", &usage.cached_input_tokens.to_string()),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -10159,10 +10362,13 @@ fn draw_conversation_turn(
             let mut copy_action = None;
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(format!("{assistant_name} · {}", origin.public_label()))
-                        .color(theme.text_secondary.gamma_multiply(0.60))
-                        .size(TYPE_XS)
-                        .strong(),
+                    egui::RichText::new(format!(
+                        "{assistant_name} · {}",
+                        origin_public_label(origin, visuals.locale)
+                    ))
+                    .color(theme.text_secondary.gamma_multiply(0.60))
+                    .size(TYPE_XS)
+                    .strong(),
                 );
                 // Copiar respuesta (estilo DeepSeek): sólo en turnos cerrados
                 // con texto; en el provisional de streaming no aplica.
@@ -10174,7 +10380,7 @@ fn draw_conversation_turn(
                             ui,
                             Icon::Copy,
                             theme.text_secondary,
-                            "Copiar la respuesta al portapapeles",
+                            crate::i18n::t("assistant.turn.copy_response_hint", visuals.locale),
                         )
                         .clicked()
                         {
@@ -10198,6 +10404,7 @@ fn draw_conversation_turn(
                     turn.reasoning_ms,
                     reasoning_pending,
                     state,
+                    visuals.locale,
                 );
                 ui.add_space(SPACE_XS);
             }
@@ -10208,10 +10415,11 @@ fn draw_conversation_turn(
                 reveal_clip,
                 turn_index,
                 cache,
+                visuals.locale,
             );
             // El "Copiar" del header no pisa la acción de la respuesta.
             retain_first_assistant_action(&mut action, copy_action);
-            draw_turn_metrics(ui, turn, theme);
+            draw_turn_metrics(ui, turn, theme, visuals.locale);
             // Integración de animación dentro del mensaje, por turno y por
             // dueño: el turno dueño del slot dibuja el player global
             // (`draw_media_card` con toolbar/slider); el resto con `media`
@@ -10279,6 +10487,7 @@ fn draw_pending_indicator(
     visuals: AssistantVisuals,
 ) {
     let theme = current_theme(ui.ctx());
+    let locale = visuals.locale;
     let _ = conversation_turn_appearance(theme, false);
     // Editorial pending — hairline, left-aligned, sin burbuja
     let pending_frame = egui::Frame::none()
@@ -10309,16 +10518,16 @@ fn draw_pending_indicator(
                 .draw(ui);
                 ui.label(
                     egui::RichText::new(match state.is_cancelling {
-                        true => "Cancelando...".to_owned(),
+                        true => crate::i18n::t("assistant.pending.cancelling", locale).to_owned(),
                         false => {
                             if state.agent_mode {
-                                "Agente trabajando...".to_owned()
+                                crate::i18n::t("assistant.pending.agent", locale).to_owned()
                             } else {
                                 // Etapas visibles con timestamp (sin feedback
                                 // intermedio era el bug): la app actualiza
                                 // `remote_stage` cada frame; acá sólo se
-                                // renderiza el texto rioplatense corto.
-                                state.remote_stage_text()
+                                // renderiza el texto corto localizado.
+                                state.remote_stage_text_locale(locale)
                             }
                         }
                     })
@@ -10396,6 +10605,7 @@ fn draw_assistant_response(
     reveal_clip: Option<RevealClip>,
     turn_index: usize,
     cache: &mut AssistantBlocksCache,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     // Cerca sin cerrar: avisar arriba sin cambiar el parseo a párrafo
@@ -10403,7 +10613,7 @@ fn draw_assistant_response(
     if has_unclosed_code_fence(content) {
         ui.add(
             egui::Label::new(
-                egui::RichText::new("Respuesta parcial…")
+                egui::RichText::new(crate::i18n::t("assistant.response.partial", locale))
                     .color(theme.text_tertiary)
                     .size(TYPE_XS)
                     .weak(),
@@ -10496,7 +10706,7 @@ fn draw_assistant_response(
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new("Expresión matemática")
+                            egui::RichText::new(crate::i18n::t("assistant.turn.math", locale))
                                 .color(theme.accent)
                                 .size(TYPE_XS)
                                 .strong(),
@@ -10546,8 +10756,8 @@ fn draw_assistant_response(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| {
                                     if ui
-                                        .small_button("Copiar")
-                                        .on_hover_text("Copiar código al portapapeles")
+                                        .small_button(crate::i18n::t("assistant.turn.copy", locale))
+                                        .on_hover_text(crate::i18n::t("assistant.turn.copy_code_hint", locale))
                                         .clicked()
                                     {
                                         ui.ctx().copy_text(text.clone());
@@ -10637,7 +10847,7 @@ fn draw_assistant_response(
                                     .rounding(crate::tokens::RADIUS_MD);
                                     if ui
                                         .add_sized(egui::vec2(ui.available_width(), 32.0), btn)
-                                        .on_hover_text("Aplica este bloque en Grafito")
+                                        .on_hover_text(crate::i18n::t("assistant.apply.block", locale))
                                         .clicked()
                                     {
                                         retain_first_assistant_action(
@@ -10656,8 +10866,8 @@ fn draw_assistant_response(
                                         ui.spacing_mut().item_spacing =
                                             egui::vec2(SPACE_SM, SPACE_XS);
                                         if ui
-                                            .small_button("Copiar código")
-                                            .on_hover_text("Copiar el código de la propuesta")
+                                            .small_button(crate::i18n::t("assistant.turn.copy_code", locale))
+                                            .on_hover_text(crate::i18n::t("assistant.turn.copy_proposal_hint", locale))
                                             .clicked()
                                         {
                                             ui.ctx().copy_text(text.clone());
@@ -10680,7 +10890,7 @@ fn draw_assistant_response(
                                     .show(ui, |ui| {
                                         ui.add(
                                             egui::Label::new(
-                                                egui::RichText::new(proposal_detail_text(verified))
+                                                egui::RichText::new(proposal_detail_text(verified, locale))
                                                     .color(theme.text_secondary)
                                                     .size(TYPE_XS),
                                             )
@@ -10765,6 +10975,7 @@ fn draw_assistant_response(
                                         draw_rejected_assistant_proposal(
                                             ui,
                                             proposal_state.correction_available,
+                                            locale,
                                         ),
                                     );
                                     // Aun si fue rechazada, ofrecer Aplicar raw para forzar ejecución
@@ -10775,8 +10986,8 @@ fn draw_assistant_response(
                                         ui.spacing_mut().item_spacing =
                                             egui::vec2(SPACE_SM, SPACE_XS);
                                         if ui
-                                            .small_button("Copiar código")
-                                            .on_hover_text("Copiar el código para revisarlo")
+                                            .small_button(crate::i18n::t("assistant.turn.copy_code", locale))
+                                            .on_hover_text(crate::i18n::t("assistant.turn.copy_review_hint", locale))
                                             .clicked()
                                         {
                                             ui.ctx().copy_text(text.clone());
@@ -10788,6 +10999,7 @@ fn draw_assistant_response(
                                     draw_unpreflighted_assistant_proposal(
                                         ui,
                                         proposal_state.preflight_candidate_count,
+                                        locale,
                                     );
                                 }
                                 None => {}
@@ -10819,7 +11031,7 @@ fn draw_assistant_response(
                             .rounding(crate::tokens::RADIUS_MD);
                             if ui
                                 .add_sized(egui::vec2(ui.available_width(), 32.0), btn)
-                                .on_hover_text("Aplica este bloque en Grafito y ajusta la vista")
+                                .on_hover_text(crate::i18n::t("assistant.apply.block_view", locale))
                                 .clicked()
                             {
                                 let raw = text.clone();
@@ -10845,13 +11057,13 @@ fn draw_assistant_response(
         &rendered_candidate_indices,
     ) {
         ui.label(
-            egui::RichText::new("Propuesta comprobada de una respuesta resumida")
+            egui::RichText::new(crate::i18n::t("assistant.apply.summarized", locale))
                 .color(theme.text_secondary)
                 .size(TYPE_XS),
         );
         retain_first_assistant_action(
             &mut action,
-            draw_verified_assistant_proposal(ui, verified, true),
+            draw_verified_assistant_proposal(ui, verified, true, locale),
         );
         ui.add_space(SPACE_XS);
     }
@@ -10864,7 +11076,7 @@ fn draw_assistant_response(
                 .color(theme.text_secondary)
                 .size(TYPE_XS),
         );
-        draw_applied_assistant_proposal(ui, applied, true);
+        draw_applied_assistant_proposal(ui, applied, true, locale);
         ui.add_space(SPACE_XS);
     }
     action
@@ -10918,6 +11130,7 @@ fn assistant_proposal_card_state<'a>(
 fn draw_rejected_assistant_proposal(
     ui: &mut egui::Ui,
     correction_available: bool,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     let mut correction_clicked = false;
@@ -10930,7 +11143,7 @@ fn draw_rejected_assistant_proposal(
             ui.set_min_width(ui.available_width());
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("Esta propuesta no superó la comprobación local.")
+                    egui::RichText::new(crate::i18n::t("assistant.apply.rejected", locale))
                         .color(theme.warning)
                         .size(TYPE_SM)
                         .strong(),
@@ -10939,25 +11152,29 @@ fn draw_rejected_assistant_proposal(
             );
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(
-                        "Sólo se habilitan acciones verificadas de la respuesta actual.",
-                    )
-                    .color(theme.text_secondary)
-                    .size(TYPE_XS),
+                    egui::RichText::new(crate::i18n::t("assistant.apply.only_verified", locale))
+                        .color(theme.text_secondary)
+                        .size(TYPE_XS),
                 )
                 .wrap(),
             );
             ui.add_space(SPACE_XS);
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
-                correction_clicked =
-                    correction_available && ui.button("Pedir una corrección").clicked();
+                correction_clicked = correction_available
+                    && ui
+                        .button(crate::i18n::t("assistant.apply.ask_correction", locale))
+                        .clicked();
             });
         });
     rejected_proposal_action(correction_available, correction_clicked)
 }
 
-fn draw_unpreflighted_assistant_proposal(ui: &mut egui::Ui, preflight_candidate_count: usize) {
+fn draw_unpreflighted_assistant_proposal(
+    ui: &mut egui::Ui,
+    preflight_candidate_count: usize,
+    locale: crate::i18n::Locale,
+) {
     let theme = current_theme(ui.ctx());
     egui::Frame::none()
         .fill(theme.input_bg)
@@ -10968,7 +11185,7 @@ fn draw_unpreflighted_assistant_proposal(ui: &mut egui::Ui, preflight_candidate_
             ui.set_min_width(ui.available_width());
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new("Propuesta sin comprobar")
+                    egui::RichText::new(crate::i18n::t("assistant.apply.unchecked", locale))
                         .color(theme.text_primary)
                         .size(TYPE_SM)
                         .strong(),
@@ -10977,9 +11194,10 @@ fn draw_unpreflighted_assistant_proposal(ui: &mut egui::Ui, preflight_candidate_
             );
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(format!(
-                        "La comprobación se limitó a las primeras {preflight_candidate_count} propuesta(s) de esta respuesta."
-                    ))
+                    egui::RichText::new(
+                        crate::i18n::t("assistant.apply.unchecked_hint", locale)
+                            .replace("{n}", &preflight_candidate_count.to_string()),
+                    )
                     .color(theme.text_secondary)
                     .size(TYPE_XS),
                 )
@@ -10992,6 +11210,7 @@ fn draw_applied_assistant_proposal(
     ui: &mut egui::Ui,
     applied: &VerifiedAssistantProposal,
     show_canonical_commands: bool,
+    locale: crate::i18n::Locale,
 ) {
     let theme = current_theme(ui.ctx());
     if show_canonical_commands {
@@ -11014,8 +11233,8 @@ fn draw_applied_assistant_proposal(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .small_button("Copiar")
-                            .on_hover_text("Copiar código al portapapeles")
+                            .small_button(crate::i18n::t("assistant.turn.copy", locale))
+                            .on_hover_text(crate::i18n::t("assistant.turn.copy_code_hint", locale))
                             .clicked()
                         {
                             ui.ctx().copy_text(commands.clone());
@@ -11043,7 +11262,7 @@ fn draw_applied_assistant_proposal(
                     .strong(),
             );
             ui.label(
-                egui::RichText::new("La propuesta ya se incorporó al documento.")
+                egui::RichText::new(crate::i18n::t("assistant.apply.already_applied", locale))
                     .color(theme.text_primary)
                     .size(TYPE_SM),
             );
@@ -11062,35 +11281,40 @@ fn rejected_proposal_action(
 ///
 /// S1: incluye la vista esperada (`Vista 2D`/`Vista 3D`) para que el Apply de
 /// 1 click anticipe qué se va a mostrar y encuadrar.
-fn proposal_detail_text(verified: &VerifiedAssistantProposal) -> String {
+fn proposal_detail_text(
+    verified: &VerifiedAssistantProposal,
+    locale: crate::i18n::Locale,
+) -> String {
     let view = verified.proposal.expected_view_label();
     let base = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                format!("Comando comprobado listo para aplicar al documento. Vista {view}.")
+                crate::i18n::t("assistant.apply.command_ready", locale).replace("{view}", view)
             } else {
-                format!("Comando comprobado con sus parámetros necesarios. Vista {view}.")
+                crate::i18n::t("assistant.apply.command_ok", locale).replace("{view}", view)
             }
         }
         AssistantProposal::Scene(_) => {
-            "Escena 3D comprobada; se aplica de forma atómica. Vista 3D.".to_string()
+            crate::i18n::t("assistant.apply.scene_ok", locale).to_string()
         }
         AssistantProposal::Parameter(_) => {
-            "Parámetro comprobado listo para aplicar. Vista 2D.".to_string()
+            crate::i18n::t("assistant.apply.param_ok", locale).to_string()
         }
     };
     if verified.prerequisite_parameters.is_empty() {
         base
     } else {
-        format!(
-            "{base} Parámetros: {}.",
-            verified
-                .prerequisite_parameters
-                .iter()
-                .map(AssistantParameterAssignment::canonical_text)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        crate::i18n::t("assistant.apply.params_fmt", locale)
+            .replace("{base}", &base)
+            .replace(
+                "{params}",
+                &verified
+                    .prerequisite_parameters
+                    .iter()
+                    .map(AssistantParameterAssignment::canonical_text)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            )
     }
 }
 
@@ -11104,6 +11328,7 @@ fn draw_verified_assistant_proposal(
     ui: &mut egui::Ui,
     verified: &VerifiedAssistantProposal,
     show_canonical_commands: bool,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     if show_canonical_commands {
@@ -11126,8 +11351,8 @@ fn draw_verified_assistant_proposal(
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui
-                            .small_button("Copiar")
-                            .on_hover_text("Copiar código al portapapeles")
+                            .small_button(crate::i18n::t("assistant.turn.copy", locale))
+                            .on_hover_text(crate::i18n::t("assistant.turn.copy_code_hint", locale))
                             .clicked()
                         {
                             ui.ctx().copy_text(commands.clone());
@@ -11148,27 +11373,28 @@ fn draw_verified_assistant_proposal(
     let description = match &verified.proposal {
         AssistantProposal::Command(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                format!("Aplicar el comando comprobado y mostrar vista {view}")
+                crate::i18n::t("assistant.apply.command_label_simple", locale)
+                    .replace("{view}", view)
             } else {
-                format!("Aplicar el comando comprobado con sus parámetros y mostrar vista {view}")
+                crate::i18n::t("assistant.apply.command_label", locale).replace("{view}", view)
             }
         }
         AssistantProposal::Scene(_) => {
             if verified.prerequisite_parameters.is_empty() {
-                "Aplicar escena 3D verificada y mostrar vista 3D".to_string()
+                crate::i18n::t("assistant.apply.scene", locale).to_string()
             } else {
-                "Aplicar escena 3D verificada con sus parámetros y mostrar vista 3D".to_string()
+                crate::i18n::t("assistant.apply.scene_params", locale).to_string()
             }
         }
-        AssistantProposal::Parameter(_) => "Aplicar parámetro verificado (vista 2D)".to_string(),
+        AssistantProposal::Parameter(_) => {
+            crate::i18n::t("assistant.apply.param_2d", locale).to_string()
+        }
     };
     let mut action = None;
     let status = match &verified.proposal {
-        AssistantProposal::Command(_) => "Comando comprobado localmente antes de mostrarse.",
-        AssistantProposal::Scene(_) => {
-            "Escena completa comprobada localmente; se aplica de forma atómica."
-        }
-        AssistantProposal::Parameter(_) => "Parámetro comprobado localmente antes de mostrarse.",
+        AssistantProposal::Command(_) => crate::i18n::t("assistant.apply.checked", locale),
+        AssistantProposal::Scene(_) => crate::i18n::t("assistant.apply.scene_all_ok", locale),
+        AssistantProposal::Parameter(_) => crate::i18n::t("assistant.apply.param_checked", locale),
     };
     let detail_commands = verified.proposal.canonical_text();
     let card = egui::Frame::none()
@@ -11221,8 +11447,8 @@ fn draw_verified_assistant_proposal(
                     }
                 }
                 if ui
-                    .small_button("Copiar")
-                    .on_hover_text("Copiar código al portapapeles")
+                    .small_button(crate::i18n::t("assistant.turn.copy", locale))
+                    .on_hover_text(crate::i18n::t("assistant.turn.copy_code_hint", locale))
                     .clicked()
                 {
                     ui.ctx().copy_text(detail_commands.clone());
@@ -11249,15 +11475,17 @@ fn draw_verified_assistant_proposal(
     if !verified.prerequisite_parameters.is_empty() {
         ui.add(
             egui::Label::new(
-                egui::RichText::new(format!(
-                    "Al aplicar también se establecerá: {}.",
-                    verified
-                        .prerequisite_parameters
-                        .iter()
-                        .map(AssistantParameterAssignment::canonical_text)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
+                egui::RichText::new(
+                    crate::i18n::t("assistant.apply.also_set", locale).replace(
+                        "{}",
+                        &verified
+                            .prerequisite_parameters
+                            .iter()
+                            .map(AssistantParameterAssignment::canonical_text)
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                )
                 .color(theme.text_secondary)
                 .size(TYPE_XS),
             )
@@ -11721,17 +11949,20 @@ enum TexFormulaEntrada {
 /// Caché viva en el `ctx` (`get_persisted`, una por contexto).
 #[derive(Clone, Default)]
 struct TexFormulaCache {
-    entradas: std::collections::HashMap<String, TexFormulaEntrada>,
+    /// Clave (fuente, tinta): el mismo LaTeX rasteriza distinto por modo
+    /// (tinta clara en oscuro, oscura en claro); sin la tinta en la clave,
+    /// cambiar de modo reutilizaría glifos invisibles.
+    entradas: std::collections::HashMap<(String, [u8; 4]), TexFormulaEntrada>,
 }
 
 impl TexFormulaCache {
     /// Guarda con desalojo total al llegar al tope (política simple y
     /// acotada: nunca más de `TEX_FORMULA_CACHE_MAX` texturas vivas).
-    fn insertar(&mut self, fuente: String, entrada: TexFormulaEntrada) {
+    fn insertar(&mut self, fuente: String, tinta: [u8; 4], entrada: TexFormulaEntrada) {
         if self.entradas.len() >= TEX_FORMULA_CACHE_MAX {
             self.entradas.clear();
         }
-        self.entradas.insert(fuente, entrada);
+        self.entradas.insert((fuente, tinta), entrada);
     }
 }
 
@@ -11748,13 +11979,26 @@ fn acortar_aviso(mensaje: &str) -> String {
 }
 
 /// Huella del `source` para nombrar la textura (FNV-1a 64, pura).
-fn huella_formula(source: &str) -> u64 {
+/// FNV-1a sobre fuente + tinta (la textura depende de ambas).
+fn huella_formula_tinta(source: &str, tinta: [u8; 4]) -> u64 {
     let mut huella: u64 = 0xcbf29ce484222325;
-    for byte in source.bytes() {
+    for byte in source.bytes().chain(tinta.iter().copied()) {
         huella ^= u64::from(byte);
         huella = huella.wrapping_mul(0x1000_0000_01b3);
     }
     huella
+}
+
+/// Tinta del raster según el modo: el bitmap hornea el color de los glifos,
+/// así que en oscuro se rasteriza claro (negro sobre negro = invisible).
+fn tinta_formula_para_tema(ui: &egui::Ui) -> [u8; 4] {
+    let tema = current_theme(ui.ctx());
+    [
+        tema.text_primary.r(),
+        tema.text_primary.g(),
+        tema.text_primary.b(),
+        255,
+    ]
 }
 
 /// Resultado del intento tex (una sola consulta a la caché por frame).
@@ -11788,9 +12032,10 @@ fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
         };
     }
     let ctx = ui.ctx().clone();
+    let tinta = tinta_formula_para_tema(ui);
     if let Some(entrada) = ctx.data_mut(|mapa| {
         mapa.get_persisted::<TexFormulaCache>(tex_cache_id())
-            .and_then(|caché| caché.entradas.get(source).cloned())
+            .and_then(|caché| caché.entradas.get(&(source.to_owned(), tinta)).cloned())
     }) {
         return match entrada {
             TexFormulaEntrada::Tex { textura, px } => TexFormulaResultado::Tex { textura, px },
@@ -11799,7 +12044,7 @@ fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
             },
         };
     }
-    let entrada = rasterizar_formula_tex(&ctx, source);
+    let entrada = rasterizar_formula_tex(&ctx, source, tinta);
     let resultado = match &entrada {
         TexFormulaEntrada::Tex { textura, px } => TexFormulaResultado::Tex {
             textura: textura.clone(),
@@ -11813,28 +12058,30 @@ fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
         let mut caché = mapa
             .get_persisted::<TexFormulaCache>(tex_cache_id())
             .unwrap_or_default();
-        caché.insertar(source.to_string(), entrada);
+        caché.insertar(source.to_string(), tinta, entrada);
         mapa.insert_persisted(tex_cache_id(), caché);
     });
     resultado
 }
 
-/// Rasteriza una fórmula con `grafito-tex` (una vez por `source` distinto).
-/// Todo `Err` → `Subset` con motivo (jamás tofu ni panic).
-fn rasterizar_formula_tex(ctx: &egui::Context, source: &str) -> TexFormulaEntrada {
+/// Rasteriza una fórmula con `grafito-tex` (una vez por (`source`, tinta)
+/// distintos). Todo `Err` → `Subset` con motivo (jamás tofu ni panic).
+fn rasterizar_formula_tex(ctx: &egui::Context, source: &str, tinta: [u8; 4]) -> TexFormulaEntrada {
     if !grafito_tex::math_font_available() {
         return TexFormulaEntrada::Subset {
             motivo: "sin fuente matemática (tabla MATH)".to_string(),
         };
     }
-    let mapa = match grafito_tex::latex_to_rgba(source, grafito_tex::TEX_DEFAULT_FONT_PX) {
-        Ok(mapa) => mapa,
-        Err(error) => {
-            return TexFormulaEntrada::Subset {
-                motivo: acortar_aviso(&error.to_string()),
-            };
-        }
-    };
+    let mapa =
+        match grafito_tex::latex_to_rgba_con_tinta(source, grafito_tex::TEX_DEFAULT_FONT_PX, tinta)
+        {
+            Ok(mapa) => mapa,
+            Err(error) => {
+                return TexFormulaEntrada::Subset {
+                    motivo: acortar_aviso(&error.to_string()),
+                };
+            }
+        };
     let (ancho, alto) = (mapa.width, mapa.height);
     let esperado = ancho
         .checked_mul(alto)
@@ -11846,7 +12093,7 @@ fn rasterizar_formula_tex(ctx: &egui::Context, source: &str) -> TexFormulaEntrad
     }
     let imagen = egui::ColorImage::from_rgba_unmultiplied([ancho, alto], &mapa.rgba);
     let textura = ctx.load_texture(
-        format!("grafito_tex_{:016x}", huella_formula(source)),
+        format!("grafito_tex_{:016x}", huella_formula_tinta(source, tinta)),
         imagen,
         egui::TextureOptions::LINEAR,
     );
@@ -12333,13 +12580,13 @@ fn draw_inline_text(ui: &mut egui::Ui, text: &str) {
         },
         code: egui::TextFormat {
             font_id: egui::FontId::monospace(TYPE_SM),
-            color: theme.accent,
+            color: theme.code_text,
             background: theme.accent_muted,
             ..Default::default()
         },
         math: egui::TextFormat {
             font_id: egui::FontId::proportional(TYPE_BASE),
-            color: theme.accent_strong,
+            color: theme.math_text,
             ..Default::default()
         },
     };
@@ -12364,13 +12611,13 @@ fn draw_inline_text_sized(ui: &mut egui::Ui, text: &str, size: f32, color: egui:
         bold: normal.clone(),
         code: egui::TextFormat {
             font_id: egui::FontId::monospace(size),
-            color: theme.accent,
+            color: theme.code_text,
             background: theme.accent_muted,
             ..Default::default()
         },
         math: egui::TextFormat {
             font_id: egui::FontId::proportional(size),
-            color: theme.accent_strong,
+            color: theme.math_text,
             ..Default::default()
         },
     };
@@ -12393,13 +12640,13 @@ fn draw_inline_text_with_color(ui: &mut egui::Ui, text: &str, color: egui::Color
         },
         code: egui::TextFormat {
             font_id: egui::FontId::monospace(TYPE_SM),
-            color: theme.accent,
+            color: theme.code_text,
             background: theme.accent_muted,
             ..Default::default()
         },
         math: egui::TextFormat {
             font_id: egui::FontId::proportional(TYPE_BASE),
-            color: theme.accent_strong,
+            color: theme.math_text,
             ..Default::default()
         },
     };
@@ -12435,7 +12682,7 @@ const ASSISTANT_LIVE_RESPONSE_CHARS: usize = 200;
 /// conexión" si el fallo fue de transporte: en cuota/clave/contexto el texto
 /// principal ya explica el qué-hacer y decir "conexión" lo contradecía (el
 /// usuario con clave recién puesta creía que la clave fallaba). Pura.
-pub fn error_secondary_hint(error: &str) -> &'static str {
+pub fn error_secondary_hint_locale(error: &str, locale: crate::i18n::Locale) -> &'static str {
     let lower = error.to_lowercase();
     const TRANSPORT_HINTS: [&str; 12] = [
         "cortó",
@@ -12453,10 +12700,30 @@ pub fn error_secondary_hint(error: &str) -> &'static str {
     ];
     let is_transport = TRANSPORT_HINTS.iter().any(|needle| lower.contains(needle));
     if is_transport {
-        "Se cortó la conexión. Tu texto está a salvo."
+        crate::i18n::t("assistant.error.transport", locale)
     } else {
-        "Tu texto está a salvo."
+        crate::i18n::t("assistant.error.saved", locale)
     }
+}
+
+/// Etiqueta localizada del origen del turno (Ola 1.3).
+fn origin_public_label(
+    origin: grafito_assistant_types::AssistantExecutionOrigin,
+    locale: crate::i18n::Locale,
+) -> String {
+    use grafito_assistant_types::AssistantExecutionOrigin;
+    match origin {
+        AssistantExecutionOrigin::Local => crate::i18n::t("assistant.origin.local", locale),
+        AssistantExecutionOrigin::AuthorizedRemote => {
+            crate::i18n::t("assistant.origin.remote", locale)
+        }
+    }
+    .to_string()
+}
+
+/// Línea de apoyo bajo el error del asistente (ES; ver variante localizada).
+pub fn error_secondary_hint(error: &str) -> &'static str {
+    error_secondary_hint_locale(error, crate::i18n::Locale::Es)
 }
 
 /// Texto polite para la live-region del lector. Puro (`&Estado`): error >
@@ -12768,6 +13035,7 @@ mod tests {
         );
         let visuals = AssistantVisuals {
             mora_texture: Some(texture.id()),
+            locale: crate::i18n::Locale::Es,
         };
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -13353,7 +13621,8 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        action = draw_assistant_composer(ui, &mut state, false);
+                        action =
+                            draw_assistant_composer(ui, &mut state, false, crate::i18n::Locale::Es);
                     });
                 },
             );
@@ -13700,6 +13969,138 @@ mod tests {
     }
 
     #[test]
+    fn tabla_con_filas_colapsadas_por_doble_pipe_se_parte() {
+        // Regresión del reporte real: el modelo juntó dos filas en una línea
+        // con `||` y la tabla se cortaba dejando pipes crudos en pantalla.
+        let blocks = parse_assistant_blocks(
+            "| Tipo | Qué escribís | Qué obtenés | Ejemplo |\n| --- | --- | --- | --- |\n| Definida | ∫₀¹ x² dx | un número: 1/3 | área bajo la parábola de 0 a 1 || Indefinida | ∫x² dx | una función: x³/3 + C | porque (x³/3)' = x² |",
+        );
+        let tablas: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantMessageBlock::Table(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tablas.len(), 1, "una sola tabla: {blocks:?}");
+        assert_eq!(tablas[0].len(), 3, "encabezado + 2 filas: {:?}", tablas[0]);
+        assert_eq!(tablas[0][1][0], "Definida");
+        assert_eq!(tablas[0][2][0], "Indefinida");
+        // Ningún párrafo con pipes crudos.
+        assert!(
+            !blocks.iter().any(|block| matches!(
+                block,
+                AssistantMessageBlock::Paragraph(text) if text.contains('|')
+            )),
+            "sin pipes crudos: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn tabla_sin_separador_con_pipes_en_ambos_extremos() {
+        // Sin `|---|---|`, pero 3 líneas delimitadas en ambos extremos con el
+        // mismo ancho: igual es tabla (la primera es cabecera).
+        let blocks = parse_assistant_blocks("| a | b |\n| 1 | 2 |\n| 3 | 4 |");
+        let tablas: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantMessageBlock::Table(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tablas.len(), 1, "{blocks:?}");
+        assert_eq!(tablas[0].len(), 3, "{:?}", tablas[0]);
+    }
+
+    #[test]
+    fn tabla_sin_separador_no_traga_prosa_matematica() {
+        // `|x| = 3` no termina en pipe: no abre ni continúa tabla.
+        let blocks = parse_assistant_blocks("|x| = 3\n|y| = 4");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, AssistantMessageBlock::Table(_))),
+            "{blocks:?}"
+        );
+        // Una sola línea con pipes tampoco es tabla.
+        let blocks = parse_assistant_blocks("| solo una línea |");
+        assert!(
+            !blocks
+                .iter()
+                .any(|block| matches!(block, AssistantMessageBlock::Table(_))),
+            "{blocks:?}"
+        );
+    }
+
+    #[test]
+    fn tabla_con_separador_roto_igual_se_arma() {
+        // Separador con columnas de menos: se salta y la tabla se arma igual.
+        let blocks = parse_assistant_blocks(
+            "| a | b | c | d |\n|---|---|---|\n| 1 | 2 | 3 | 4 |\n| 5 | 6 | 7 | 8 |",
+        );
+        let tablas: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantMessageBlock::Table(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tablas.len(), 1, "{blocks:?}");
+        assert_eq!(tablas[0].len(), 3, "{:?}", tablas[0]);
+        assert_eq!(tablas[0][1], vec!["1", "2", "3", "4"]);
+    }
+
+    #[test]
+    fn filas_ragged_se_normalizan_sin_pipes_crudos() {
+        // Fila corta se rellena, fila larga se trunca (GFM): jamás pipes
+        // crudos en pantalla.
+        let blocks =
+            parse_assistant_blocks("| a | b |\n| --- | --- |\n| 1 |\n| 2 | 3 | 4 |\ntexto final");
+        let tablas: Vec<_> = blocks
+            .iter()
+            .filter_map(|block| match block {
+                AssistantMessageBlock::Table(rows) => Some(rows),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tablas.len(), 1, "{blocks:?}");
+        assert_eq!(tablas[0].len(), 3, "{:?}", tablas[0]);
+        assert_eq!(tablas[0][1], vec!["1".to_string(), String::new()]);
+        assert_eq!(tablas[0][2], vec!["2".to_string(), "3".to_string()]);
+        // La línea sin pipe cierra la tabla como párrafo aparte.
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            AssistantMessageBlock::Paragraph(text) if text == "texto final"
+        )));
+        assert!(
+            !blocks.iter().any(|block| match block {
+                AssistantMessageBlock::Paragraph(text) => text.contains('|'),
+                _ => false,
+            }),
+            "sin pipes crudos: {blocks:?}"
+        );
+    }
+
+    #[test]
+    fn doble_pipe_dentro_de_matematica_no_parte_filas() {
+        // `$a || b$` (o lógico) y `||x||` (norma) dentro de celdas no deben
+        // partir nada: si las piezas no calzan con el ancho, la línea corta
+        // la tabla como antes.
+        assert!(split_collapsed_table_row("| norma ||x|| | valor |", 4).is_none());
+        assert!(split_collapsed_table_row("| a | $b || c$ |", 2).is_none());
+        // Sin `||` no hay nada que partir.
+        assert!(split_collapsed_table_row("| a | b |", 2).is_none());
+        // Caso sano: dos filas de 2 en una línea.
+        assert_eq!(
+            split_collapsed_table_row("| a | b || c | d |", 2),
+            Some(vec![
+                vec!["a".to_string(), "b".to_string()],
+                vec!["c".to_string(), "d".to_string()],
+            ])
+        );
+    }
+
+    #[test]
     fn rich_assistant_blocks_support_standard_multiline_math_and_outerless_tables() {
         let blocks = parse_assistant_blocks(
             "x | f(x)\n--- | ---\n0 | 1\n\n$$\n\\frac{x^2}{2}\n$$\n\n\\[\nx^2 + y^2 = 1\n\\]",
@@ -13773,11 +14174,56 @@ mod tests {
     }
 
     #[test]
+    fn tex_cache_distinque_tinta_por_modo() {
+        // Regresión del reporte real ("sigue estando negro"): el raster
+        // horneaba tinta negra y en modo oscuro la fórmula quedaba invisible.
+        // La caché distingue (fuente, tinta) para no reutilizar glifos del
+        // modo contrario.
+        let mut caché = TexFormulaCache::default();
+        caché.insertar(
+            "x".to_string(),
+            [0, 0, 0, 255],
+            TexFormulaEntrada::Subset {
+                motivo: "x".to_string(),
+            },
+        );
+        caché.insertar(
+            "x".to_string(),
+            [0xFA, 0xFA, 0xF9, 255],
+            TexFormulaEntrada::Subset {
+                motivo: "x".to_string(),
+            },
+        );
+        assert_eq!(caché.entradas.len(), 2, "misma fuente, distinta tinta");
+    }
+
+    #[test]
+    fn tinta_formula_sigue_al_modo_oscuro_y_claro() {
+        for (oscuro, esperada) in [
+            (true, [0xFA, 0xFA, 0xF9, 255]),
+            (false, [0x1A, 0x1A, 0x1A, 255]),
+        ] {
+            let contexto = egui::Context::default();
+            let _ = contexto.run(egui::RawInput::default(), |ctx| {
+                ctx.set_visuals(if oscuro {
+                    egui::Visuals::dark()
+                } else {
+                    egui::Visuals::light()
+                });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    assert_eq!(tinta_formula_para_tema(ui), esperada);
+                });
+            });
+        }
+    }
+
+    #[test]
     fn tex_cache_desaloja_al_tope() {
         let mut caché = TexFormulaCache::default();
         for i in 0..TEX_FORMULA_CACHE_MAX {
             caché.insertar(
                 format!("f{i}"),
+                [10, 20, 30, 255],
                 TexFormulaEntrada::Subset {
                     motivo: "x".to_string(),
                 },
@@ -13786,6 +14232,7 @@ mod tests {
         assert_eq!(caché.entradas.len(), TEX_FORMULA_CACHE_MAX);
         caché.insertar(
             "una_mas".to_string(),
+            [10, 20, 30, 255],
             TexFormulaEntrada::Subset {
                 motivo: "x".to_string(),
             },
@@ -13828,12 +14275,28 @@ mod tests {
         // ninguno de los dos escribe un override del usuario.
         let _ = context.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                draw_reasoning_disclosure(ui, 7, reasoning, None, true, &state);
+                draw_reasoning_disclosure(
+                    ui,
+                    7,
+                    reasoning,
+                    None,
+                    true,
+                    &state,
+                    crate::i18n::Locale::Es,
+                );
             });
         });
         let _ = context.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                draw_reasoning_disclosure(ui, 7, reasoning, Some(2_400), false, &state);
+                draw_reasoning_disclosure(
+                    ui,
+                    7,
+                    reasoning,
+                    Some(2_400),
+                    false,
+                    &state,
+                    crate::i18n::Locale::Es,
+                );
             });
         });
         assert!(state.reasoning_open.borrow().is_empty());
@@ -13841,7 +14304,15 @@ mod tests {
         state.reasoning_open.borrow_mut().insert(7, true);
         let _ = context.run(egui::RawInput::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                draw_reasoning_disclosure(ui, 7, reasoning, Some(2_400), false, &state);
+                draw_reasoning_disclosure(
+                    ui,
+                    7,
+                    reasoning,
+                    Some(2_400),
+                    false,
+                    &state,
+                    crate::i18n::Locale::Es,
+                );
                 let mut turn = ConversationTurn::assistant("listo");
                 turn.usage = Some(AssistantTokenUsage {
                     input_tokens: 12,
@@ -13850,7 +14321,12 @@ mod tests {
                     cached_input_tokens: 0,
                     total_tokens: 42,
                 });
-                draw_turn_metrics(ui, &turn, crate::theme::current_theme(ctx));
+                draw_turn_metrics(
+                    ui,
+                    &turn,
+                    crate::theme::current_theme(ctx),
+                    crate::i18n::Locale::Es,
+                );
             });
         });
         assert_eq!(state.reasoning_open.borrow().get(&7), Some(&true));
@@ -15474,7 +15950,7 @@ mod tests {
         let mut state = AssistantPanelState::default();
         let output = context.run(panel_input_360x480(), |context| {
             egui::CentralPanel::default().show(context, |ui| {
-                let _ = draw_assistant_composer(ui, &mut state, false);
+                let _ = draw_assistant_composer(ui, &mut state, false, crate::i18n::Locale::Es);
             });
         });
 
@@ -15827,7 +16303,7 @@ mod tests {
     #[test]
     fn composer_height_returns_to_its_compact_baseline_without_optional_content() {
         let mut state = AssistantPanelState::default();
-        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 158.0);
+        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 160.0);
         assert_eq!(
             assistant_composer_height(&state),
             ASSISTANT_COMPOSER_BASE_HEIGHT
@@ -15855,7 +16331,7 @@ mod tests {
                 .unwrap();
         }
 
-        // max_attachments=2 → (2-1)/2 =0 filas extra → 158+112=270
+        // max_attachments=2 → (2-1)/2 =0 filas extra → 160+112=272
         let expected = ASSISTANT_COMPOSER_BASE_HEIGHT
             + ASSISTANT_COMPOSER_ATTACHMENT_HEIGHT
             + ((state.attachments.len().saturating_sub(1) / 2) as f32
@@ -15942,29 +16418,29 @@ mod tests {
     #[test]
     #[allow(clippy::assertions_on_constants)]
     fn composer_base_covers_all_fixed_rows_without_clipping() {
-        // Contenido fijo DENTRO del panel anidado: tarjeta 94 (marco 16 +
-        // editor 44 + espacio 4 + botones 30) + estado 24 + caption 18 +
-        // 16 del marco propio del panel = 152. BASE 158 deja 6px de aire
+        // Contenido fijo DENTRO del panel anidado: tarjeta 96 (marco 16 +
+        // editor 44 + espacio 4 + botones 32) + estado 24 + caption 18 +
+        // 16 del marco propio del panel = 166. BASE 172 deja 6px de aire
         // (anillo de foco 2px + crecimiento HiDPI).
-        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 158.0);
+        assert_eq!(ASSISTANT_COMPOSER_BASE_HEIGHT, 160.0);
         assert!(
             ASSISTANT_COMPOSER_BASE_HEIGHT
                 >= 44.0
-                    + 30.0
+                    + ASSISTANT_COMPOSER_ACTION_SIZE
                     + 16.0
                     + 4.0
                     + 16.0
                     + ASSISTANT_COMPOSER_STATUS_HEIGHT
                     + ASSISTANT_COMPOSER_CAPTION_HEIGHT
         );
-        // Colapsado: tarjeta 78 (16 + 28 + 4 + 30) + estado 24 + caption
-        // 18 + marco 16 = 136, igual al piso (por debajo se recortan
+        // Colapsado: tarjeta 80 (16 + 28 + 4 + 32) + estado 24 + caption
+        // 18 + marco 16 = 150, igual al piso (por debajo se recortan
         // caption y anillo de foco).
-        assert_eq!(ASSISTANT_COMPOSER_COLLAPSED_FLOOR, 136.0);
+        assert_eq!(ASSISTANT_COMPOSER_COLLAPSED_FLOOR, 138.0);
         assert!(
             16.0 + ASSISTANT_COMPOSER_COLLAPSED_EDITOR_HEIGHT
                 + 4.0
-                + 30.0
+                + ASSISTANT_COMPOSER_ACTION_SIZE
                 + 16.0
                 + ASSISTANT_COMPOSER_STATUS_HEIGHT
                 + ASSISTANT_COMPOSER_CAPTION_HEIGHT
@@ -15984,7 +16460,7 @@ mod tests {
             assistant_composer_height(&state),
             16.0 + ASSISTANT_COMPOSER_EDITOR_HEIGHT
                 + 4.0
-                + 30.0
+                + ASSISTANT_COMPOSER_ACTION_SIZE
                 + 16.0
                 + ASSISTANT_COMPOSER_STATUS_HEIGHT
                 + ASSISTANT_COMPOSER_CAPTION_HEIGHT
@@ -16007,8 +16483,8 @@ mod tests {
     fn visible_composer_height_never_clips_content_when_space_allows() {
         // Panel sano: la estimación manda (con foco suma por estimación).
         assert_eq!(
-            visible_composer_height_for(500.0, 158.0, 232.0, 444.0, false),
-            158.0
+            visible_composer_height_for(500.0, 160.0, 232.0, 444.0, false),
+            160.0
         );
         assert_eq!(
             visible_composer_height_for(500.0, 190.0, 232.0, 444.0, false),
@@ -16017,13 +16493,13 @@ mod tests {
         // Tope 38% y reserva de transcript siguen mandando hacia abajo, pero
         // nunca por debajo del contenido cuando hay espacio.
         assert_eq!(
-            visible_composer_height_for(242.0, 158.0, 88.0, 186.0, false),
-            158.0
+            visible_composer_height_for(242.0, 160.0, 88.0, 186.0, false),
+            160.0
         );
         // Colapsado: piso 136 aunque el tope pida menos.
         assert_eq!(
-            visible_composer_height_for(242.0, 158.0, 88.0, 186.0, true),
-            136.0
+            visible_composer_height_for(242.0, 160.0, 88.0, 186.0, true),
+            138.0
         );
         // Espacio imposible: vale `available` (el transcript cede a 0, el
         // composer sigue alcanzable en vez de recortado).
@@ -16103,7 +16579,7 @@ mod tests {
             proposal: command_proposal("Function[sin(x)]"),
             prerequisite_parameters: vec![parameter_assignment("a = 1")],
         };
-        let detail = proposal_detail_text(&verified);
+        let detail = proposal_detail_text(&verified, crate::i18n::Locale::Es);
         assert!(detail.contains("Parámetros"));
         assert!(!detail.contains("Apply"));
         let simple = VerifiedAssistantProposal {
@@ -16111,7 +16587,7 @@ mod tests {
             proposal: command_proposal("Function[x]"),
             prerequisite_parameters: Vec::new(),
         };
-        assert!(proposal_detail_text(&simple).contains("aplicar"));
+        assert!(proposal_detail_text(&simple, crate::i18n::Locale::Es).contains("aplicar"));
     }
 
     #[test]
@@ -16123,14 +16599,14 @@ mod tests {
             prerequisite_parameters: Vec::new(),
         };
         assert_eq!(verified_proposal_view_label(&two_d), "2D");
-        assert!(proposal_detail_text(&two_d).contains("Vista 2D"));
+        assert!(proposal_detail_text(&two_d, crate::i18n::Locale::Es).contains("Vista 2D"));
         let three_d = VerifiedAssistantProposal {
             candidate_index: 1,
             proposal: command_proposal("Sphere[0, 0, 0, 1]"),
             prerequisite_parameters: Vec::new(),
         };
         assert_eq!(verified_proposal_view_label(&three_d), "3D");
-        assert!(proposal_detail_text(&three_d).contains("Vista 3D"));
+        assert!(proposal_detail_text(&three_d, crate::i18n::Locale::Es).contains("Vista 3D"));
     }
 
     #[test]
@@ -16212,8 +16688,8 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = draw_assistant_composer(ui, &mut state, true);
-                    let _ = draw_assistant_composer(ui, &mut state, false);
+                    let _ = draw_assistant_composer(ui, &mut state, true, crate::i18n::Locale::Es);
+                    let _ = draw_assistant_composer(ui, &mut state, false, crate::i18n::Locale::Es);
                     let proposal_state = AssistantProposalRenderState {
                         verified_proposals: &state.verified_proposals,
                         applied_proposals: &state.applied_proposals,
@@ -16231,6 +16707,7 @@ mod tests {
                         None,
                         0,
                         &mut cache,
+                        crate::i18n::Locale::Es,
                     );
                     let _ = draw_assistant_response(
                         ui,
@@ -16239,6 +16716,7 @@ mod tests {
                         None,
                         1,
                         &mut cache,
+                        crate::i18n::Locale::Es,
                     );
                 });
             },
@@ -18410,6 +18888,7 @@ mod tests {
                             None,
                             0,
                             &mut cache,
+                            crate::i18n::Locale::Es,
                         );
                         let used = ui.min_rect().width();
                         assert!(
@@ -18451,6 +18930,7 @@ mod tests {
                         None,
                         0,
                         &mut cache,
+                        crate::i18n::Locale::Es,
                     );
                 });
             },

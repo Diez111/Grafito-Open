@@ -75,6 +75,44 @@ fn p5_groebner_lex_deg_uses_grlex() {
     assert!(err_in(&mut document, "GroebnerLexDeg[{x}]").contains("GroebnerLexDeg"));
 }
 
+// Ola 0.2: los tres nombres GeoGebra usan el Buchberger real, cada uno con su
+// orden. El legacy 2×2 ya no atiende comandos.
+#[test]
+fn ola02_groebner_names_use_real_engine_with_their_order() {
+    let mut document = Document::new();
+    // Orden por defecto (como GroebnerBasis): base real, no "no implementado".
+    let base = ok_in(&mut document, "Groebner[{x^2-y, y^2-x}, {x, y}]");
+    assert!(base.contains("S-polinomios"), "motor real: {base}");
+    assert!(
+        !base.contains("no implementado") && !base.contains("Eliminate"),
+        "sin derivación al legacy: {base}"
+    );
+    // lex: el orden viaja en la salida del motor.
+    let lex = ok_in(&mut document, "GroebnerLex[{x+y-3, x-y-1}, {x, y}]");
+    assert!(lex.contains("lex"), "orden lex: {lex}");
+    assert!(lex.contains('y'), "base triangular en y: {lex}");
+    // grevlex explícito.
+    let grevlex = ok_in(&mut document, "GroebnerDegRevLex[{x^2+y^2-1, x-y}, {x, y}]");
+    assert!(grevlex.contains("grevlex"), "orden grevlex: {grevlex}");
+    // Alias en minúsculas resuelven a su orden.
+    let alias = ok_in(&mut document, "groebner[{x^2-y, y^2-x}, {x, y}]");
+    assert!(alias.contains("S-polinomios"), "alias groebner: {alias}");
+    let alias_lex = ok_in(&mut document, "groebnerlex[{x+y-3, x-y-1}, {x, y}]");
+    assert!(alias_lex.contains("lex"), "alias groebnerlex: {alias_lex}");
+    // Sin variables: error honesto (el motor exige vars explícitas).
+    let err = err_in(&mut document, "Groebner[{x^2-1}]");
+    assert!(err.contains("variables"), "1-arg honesto: {err}");
+    // Fuera de cota: error honesto del motor, no pánico.
+    let over = err_in(
+        &mut document,
+        "Groebner[{x1, x2, x3, x4, x5, x6, x7, x8, x9}, {x1, x2, x3, x4, x5}]",
+    );
+    assert!(
+        !over.contains("no reconocido"),
+        "fuera de cota honesto: {over}"
+    );
+}
+
 #[test]
 fn p5_set_seed_makes_randomness_reproducible() {
     let mut a = Document::new();
@@ -267,4 +305,24 @@ fn p5_slope_and_set_value_are_registered() {
         "SetValue: {out}"
     );
     assert_eq!(document.variables.get("a"), Some(&4.0));
+}
+
+// Ola 2.3: ZTest2 y FTest con motor real (paridad GeoGebra).
+#[test]
+fn ola23_z_test_two_sample_and_f_test() {
+    let mut document = Document::new();
+    // ZTest2: z ≈ -0.4082, p ≈ 0.6831 (bilateral, sigmas 1 y 1).
+    let z = ok_in(&mut document, "ZTest2[{1,2,3}, {1,2,4}, 1, 1]");
+    assert!(z.contains("z-test"), "ZTest2: {z}");
+    assert!(z.contains("-0.4082"), "z esperado: {z}");
+    // FTest: varianzas 1.667 vs 6.667 → F = 0.25 exacto.
+    let f = ok_in(&mut document, "FTest[{1,2,3,4}, {2,4,6,8}]");
+    assert!(f.contains("f-test"), "FTest: {f}");
+    assert!(f.contains("0.2500"), "F esperado: {f}");
+    // Sigmas inválidos y muestras degeneradas: error honesto, sin pánico.
+    assert!(err_in(&mut document, "ZTest2[{1,2,3}, {1,2,4}, 0, 1]").contains("positivos"));
+    assert!(!err_in(&mut document, "FTest[{1}, {2}]").contains("no reconocido"));
+    // Alias en minúsculas.
+    let alias = ok_in(&mut document, "z_test2[{1,2,3}, {1,2,4}, 1, 1]");
+    assert!(alias.contains("z-test"), "alias z_test2: {alias}");
 }

@@ -5831,10 +5831,19 @@ mod gpu_overlay_tests {
         let text = solid_measure_text(&sphere).expect("esfera mide exacto");
         assert!(text.starts_with("V=") && text.contains(" A="));
 
+        // Ola 2.6: la cuádrica esfera/elipsoide ahora informa volumen exacto
+        // y área numérica estable (Simpson).
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
-        assert_eq!(solid_measure_text(&quadric), None);
+        let quadric_text = solid_measure_text(&quadric).expect("cuádrica esfera mide");
+        assert!(quadric_text.starts_with("V=4.1888"), "{quadric_text}");
+        assert!(quadric_text.contains("A=12.5664"), "{quadric_text}");
+        // Fuera de forma cerrada sigue None honesto (hiperboloide).
+        let hyperboloid = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        assert_eq!(solid_measure_text(&hyperboloid), None);
     }
 
     #[test]

@@ -37,9 +37,9 @@ pub use solids::{
 
 /// Puerta Groebner por Buchberger acotado (`grafito_geometry::cas`).
 ///
-/// Resuelve sistemas polinómicos de hasta `MAX_GROEBNER_POLYS` 8
-/// polinomios en `MAX_GROEBNER_VARS` 4 variables con un máximo de
-/// `MAX_GROEBNER_S_POLY` 128 S-polinomios (criterio de pares primos
+/// Resuelve sistemas polinómicos de hasta `MAX_GROEBNER_POLYS` 12
+/// polinomios en `MAX_GROEBNER_VARS` 6 variables con un máximo de
+/// `MAX_GROEBNER_S_POLY` 384 S-polinomios (criterio de pares primos
 /// relativos incluido). Más allá, o ante entrada no polinómica, devuelve
 /// error honesto que deriva a `Eliminate[...]`.
 ///

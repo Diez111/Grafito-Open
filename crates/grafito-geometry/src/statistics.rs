@@ -2114,6 +2114,58 @@ pub fn z_test_one_sample(data: &[f64], mu0: f64, sigma: f64) -> Option<(f64, f64
     Some((z_stat, p_value))
 }
 
+/// Prueba z de dos muestras independientes con sigmas poblacionales conocidos
+/// (paridad GeoGebra `ZTest2`). P valor bilateral.
+pub fn z_test_two_sample(
+    data1: &[f64],
+    data2: &[f64],
+    sigma1: f64,
+    sigma2: f64,
+) -> Option<(f64, f64)> {
+    let n1 = data1.len();
+    let n2 = data2.len();
+    if n1 < 1 || n2 < 1 || sigma1 <= 0.0 || sigma2 <= 0.0 {
+        return None;
+    }
+
+    let mean1 = mean(data1)?;
+    let mean2 = mean(data2)?;
+    let se = (sigma1.powi(2) / n1 as f64 + sigma2.powi(2) / n2 as f64).sqrt();
+    if se <= 0.0 {
+        return None;
+    }
+    let z_stat = (mean1 - mean2) / se;
+    let p_value = 2.0 * (1.0 - normal_cdf(z_stat.abs(), 0.0, 1.0));
+
+    Some((z_stat, p_value))
+}
+
+/// Prueba F de igualdad de varianzas (paridad GeoGebra `FTest`), bilateral.
+/// `df1 = n1 - 1`, `df2 = n2 - 1`; p = 2·min(CDF(F), 1 − CDF(F)) acotado a [0, 1].
+pub fn f_test_two_sample(data1: &[f64], data2: &[f64]) -> Option<(f64, f64)> {
+    let n1 = data1.len();
+    let n2 = data2.len();
+    if n1 < 2 || n2 < 2 {
+        return None;
+    }
+
+    let var1 = variance(data1)?;
+    let var2 = variance(data2)?;
+    if var2 <= 0.0 || var1 < 0.0 {
+        return None;
+    }
+    let f_stat = var1 / var2;
+    if !f_stat.is_finite() {
+        return None;
+    }
+    let df1 = (n1 - 1) as f64;
+    let df2 = (n2 - 1) as f64;
+    let cdf = f_distribution_cdf(f_stat, df1, df2);
+    let p_value = (2.0 * cdf.min(1.0 - cdf)).clamp(0.0, 1.0);
+
+    Some((f_stat, p_value))
+}
+
 pub fn chi_squared_test(observed: &[f64], expected: &[f64]) -> Option<(f64, f64)> {
     if observed.len() != expected.len() || observed.len() < 2 {
         return None;

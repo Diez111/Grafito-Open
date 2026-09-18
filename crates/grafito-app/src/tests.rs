@@ -560,18 +560,19 @@ fn test_perspective_layout_tool_groups_nonempty() {
 
 #[test]
 fn stable_perspectives_do_not_expose_unavailable_placeholder_tools() {
+    // Ola 1.6: `Tool::Button` pasó a ser real (botón de acción con guion);
+    // `Tool::Image` sigue oculta hasta tener modelo persistente.
     use crate::Perspective;
     use grafito_ui::Tool;
 
     for perspective in Perspective::ALL {
         for group in perspective.layout().visible_tool_groups {
             let (_, tools) = group.def();
-            for unavailable in [Tool::Button, Tool::Image] {
-                assert!(
-                    tools.iter().all(|(tool, _, _)| *tool != unavailable),
-                    "{perspective:?} exposes unavailable tool {unavailable:?} through {group:?}"
-                );
-            }
+            let unavailable = Tool::Image;
+            assert!(
+                tools.iter().all(|(tool, _, _)| *tool != unavailable),
+                "{perspective:?} exposes unavailable tool {unavailable:?} through {group:?}"
+            );
         }
     }
 }
@@ -581,12 +582,11 @@ fn stable_tools_panel_and_status_help_do_not_claim_unavailable_features() {
     let tools_panel = include_str!("tools_panel.rs");
     let status_help = include_str!("ui.rs");
 
-    for registration in ["(Tool::Button,", "(Tool::Image,"] {
-        assert!(
-            !tools_panel.contains(registration),
-            "stable tools panel still registers {registration}"
-        );
-    }
+    let registration = "(Tool::Image,";
+    assert!(
+        !tools_panel.contains(registration),
+        "stable tools panel still registers {registration}"
+    );
     assert!(status_help.contains("Locus: clic punto driver, clic punto objetivo"));
 }
 
@@ -883,7 +883,9 @@ fn legacy_placeholder_tools_error_without_document_mutation() {
     use grafito_geometry::Point2;
     use grafito_ui::Tool;
 
-    for tool in [Tool::Button, Tool::Image] {
+    // Ola 1.6: Button ya no es placeholder; Image sigue fallando honesto.
+    let tool = Tool::Image;
+    {
         let mut document = grafito_core::Document::new();
         document.set_variable("baseline".into(), 7.0);
         let before = serde_json::to_value(&document).expect("serialize document before tool");
@@ -3951,11 +3953,12 @@ fn status_bar_stays_in_the_middle_column_in_side_panel_mode() {
     let assistant = app_source
         .find("self.draw_assistant(ctx, keyboard_height);")
         .expect("assistant draw call");
+    // Ola 1.1: la barra de entrada vuelve, gobernada por ShellLayout.
     let first_bar = app_source
-        .find("crate::ui::draw_bottom_bar(self, ctx, false);")
+        .find("crate::ui::draw_bottom_bar(self, ctx, shell.show_bottom_input);")
         .expect("bottom bar compact branch");
     let last_bar = app_source
-        .rfind("crate::ui::draw_bottom_bar(self, ctx, false);")
+        .rfind("crate::ui::draw_bottom_bar(self, ctx, shell.show_bottom_input);")
         .expect("bottom bar side branch");
     assert!(first_bar < assistant, "compact: barra antes que el sheet");
     assert!(
@@ -3969,6 +3972,32 @@ fn status_bar_stays_in_the_middle_column_in_side_panel_mode() {
     assert!(
         app_source.contains("assistant_limits_status_bar"),
         "el límite depende de visibilidad + modo"
+    );
+}
+
+#[test]
+fn ola11_slash_requests_command_input_focus() {
+    // Ola 1.1: "/" (sin foco en texto) pide foco para la entrada de comandos.
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    assert!(!app.command_input_focus_requested);
+    let input = top_chrome_input(
+        1280.0,
+        0.0,
+        vec![egui::Event::Key {
+            key: egui::Key::Slash,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    let _ = ctx.run(input, |ctx| {
+        app.handle_keyboard_shortcuts(ctx);
+    });
+    assert!(
+        app.command_input_focus_requested,
+        "'/' debe pedir foco de entrada"
     );
 }
 
@@ -4775,8 +4804,9 @@ fn document_lifecycle_ui_exposes_save_as_and_native_close_cancellation() {
     assert!(ui.contains(".shortcut_text(\"Ctrl+O\")"));
     assert!(ui.contains(".shortcut_text(\"Ctrl+S\")"));
     assert!(ui.contains(".shortcut_text(\"Ctrl+Shift+S\")"));
-    assert!(ui.contains("Abrir…"));
-    assert!(ui.contains("Guardar como…"));
+    // Ola 1.3: label vía i18n; el atajo sigue literal.
+    assert!(ui.contains("menu.file.open"));
+    assert!(ui.contains("menu.file.save_as"));
 
     let app = include_str!("app.rs");
     assert!(app.contains("i.viewport().close_requested()"));
@@ -5425,6 +5455,35 @@ fn d1_escape_closes_about_and_onboarding_headless() {
 }
 
 #[test]
+fn ola06_cheat_sheet_opens_and_esc_closes_headless() {
+    let ctx = egui::Context::default();
+    let mut app = crate::app::dummy_grafito_app();
+    app.show_cheat_sheet = true;
+    let _ = ctx.run(esc_raw_input(), |ctx| {
+        app.draw_cheat_sheet_window(ctx);
+    });
+    assert!(!app.show_cheat_sheet, "Esc cierra la hoja de atajos");
+}
+
+#[test]
+fn ola06_zoom_stepped_view_clamps_and_marks_interaction() {
+    let mut app = crate::app::dummy_grafito_app();
+    let before = app.document.view().scale;
+    app.zoom_stepped_view(1.25, glam::Vec2::new(400.0, 300.0));
+    assert!(
+        app.document.view().scale > before,
+        "zoom + acerca con centro dado"
+    );
+    assert!(app.is_view_changing, "marca vista en cambio");
+    // Factor absurdo: clamp al rango del gesto + guards del motor, sin pánico.
+    app.zoom_stepped_view(f32::INFINITY, glam::Vec2::new(0.0, 0.0));
+    assert!(
+        app.document.view().scale.is_finite(),
+        "escala finita tras factor infinito"
+    );
+}
+
+#[test]
 fn wa_onboarding_solo_no_mostrar_persiste() {
     // W-A red: la X solo oculta en sesión; persiste SOLO "No mostrar".
     use crate::app::{GrafitoApp, OnboardingChoice};
@@ -5918,4 +5977,142 @@ fn gesto_huerfano_sin_cambio_neto_no_deja_entrada() {
     );
     assert_eq!(cerrados, 1, "el gesto se cierra");
     assert!(undo_stack.is_empty(), "sin cambio no hay entrada");
+}
+
+#[test]
+fn ola17_set_spin_speed_drives_camera_orbit_without_app_toggle() {
+    let mut app = crate::app::dummy_grafito_app();
+    // La órbita es de la vista 3D en perspectiva (las ortográficas no tienen azimut).
+    app.view3d = crate::canvas::View3D::Perspective;
+    let sphere = app.execute_command_and_record("Sphere[0, 0, 0, 1]", 0.0);
+    assert!(
+        !matches!(sphere, grafito_command::commands::CommandOutcome::Error(_)),
+        "Sphere debe crear el objeto: {sphere:?}"
+    );
+    assert!(
+        app.has_visible_multidimensional_object(),
+        "esfera visible 3D"
+    );
+    app.execute_command_and_record("SetSpinSpeed[90]", 0.0);
+    app.sync_spin_speed_from_document();
+    assert_eq!(app.explicit_spin_speed_dps, Some(90.0));
+    // Con velocidad explícita la cámara gira aunque el interruptor esté apagado.
+    app.multidimensional_motion_enabled = false;
+    let theta_before = app.camera.theta;
+    assert!(app.advance_multidimensional_motion(0.5));
+    assert_ne!(app.camera.theta, theta_before);
+    // SetSpinSpeed[0] estaciona la órbita.
+    app.execute_command_and_record("SetSpinSpeed[0]", 0.0);
+    app.sync_spin_speed_from_document();
+    assert_eq!(app.explicit_spin_speed_dps, Some(0.0));
+    let theta_stopped = app.camera.theta;
+    assert!(!app.advance_multidimensional_motion(0.5));
+    assert_eq!(app.camera.theta, theta_stopped);
+    // Sin variable (documento limpio) vuelve al gobierno de la app.
+    app.document.variables.remove("__view_spin_speed");
+    app.sync_spin_speed_from_document();
+    assert_eq!(app.explicit_spin_speed_dps, None);
+}
+
+#[test]
+fn ola27_on_load_and_on_update_scripts_run_automatically() {
+    let mut app = crate::app::dummy_grafito_app();
+    app.execute_command_and_record("A=(0,0)", 0.0);
+    app.document
+        .try_set_variable("k".to_string(), 0.0)
+        .expect("k");
+    app.execute_command_and_record("OnLoad[\"SetValue[k, 7]\"]", 0.0);
+    // Guardar el guion no lo ejecuta.
+    assert_eq!(app.document.variables.get("k"), Some(&0.0));
+    // Al reemplazar el documento (abrir), el OnLoad corre una vez.
+    let loaded = app.document.clone();
+    let mut fresh = crate::app::dummy_grafito_app();
+    fresh.replace_document(loaded, None);
+    assert_eq!(fresh.document.variables.get("k"), Some(&7.0));
+
+    // OnUpdate: corre tras un commit mutante, no al guardarse.
+    let mut app2 = crate::app::dummy_grafito_app();
+    app2.execute_command_and_record("A=(0,0)", 0.0);
+    app2.document
+        .try_set_variable("k".to_string(), 0.0)
+        .expect("k");
+    app2.execute_command_and_record("OnUpdate[A, \"SetValue[k, k+1]\"]", 0.0);
+    assert_eq!(
+        app2.document.variables.get("k"),
+        Some(&0.0),
+        "OnUpdate no corre al guardarse"
+    );
+    app2.execute_command_and_record("SetValue[k, 10]", 0.0);
+    assert_eq!(app2.document.variables.get("k"), Some(&11.0));
+    // Auto-referencia: el guard corta la cascada (un paso por commit).
+    app2.execute_command_and_record("OnUpdate[A, \"SetValue[k, k+100]\"]", 0.0);
+    app2.execute_command_and_record("SetValue[k, 0]", 0.0);
+    assert_eq!(app2.document.variables.get("k"), Some(&100.0));
+}
+
+#[test]
+fn ola27_script_store_commands_are_recognized() {
+    assert!(crate::app::is_script_store_command("OnLoad[\"x\"]"));
+    assert!(crate::app::is_script_store_command("onupdate[A, \"x\"]"));
+    assert!(crate::app::is_script_store_command("OnClick[A, \"x\"]"));
+    assert!(!crate::app::is_script_store_command("SetValue[k, 1]"));
+    assert!(!crate::app::is_script_store_command("A=(0,0)"));
+}
+
+#[test]
+fn ola16_text_tool_places_editable_text_object() {
+    use grafito_core::{GeoObject, TextObj};
+    use grafito_geometry::Point2;
+
+    let mut app = crate::app::dummy_grafito_app();
+    app.current_tool = grafito_ui::Tool::Text;
+    let id = app
+        .insert_object_from_tool(
+            GeoObject::Text(TextObj::new("Texto", Point2::new(1.0, 2.0))),
+            "Text",
+            0.0,
+        )
+        .expect("texto insertado");
+    let object = app.document.get_object(id).expect("objeto");
+    assert!(matches!(object, GeoObject::Text(_)), "es un Text");
+    assert!(!object.label().is_empty(), "etiqueta asignada");
+    assert_eq!(
+        app.current_tool,
+        grafito_ui::Tool::Text,
+        "herramienta activa"
+    );
+}
+
+#[test]
+fn ola16_button_tool_creates_real_action_button() {
+    use grafito_command::commands::CommandOutcome;
+    use grafito_geometry::Point2;
+
+    let mut document = grafito_core::Document::new();
+    let mut state = crate::tool_dispatcher::ToolState::default();
+    let result = crate::tool_dispatcher::dispatch_tool(
+        grafito_ui::Tool::Button,
+        &mut state,
+        &mut document,
+        Point2::new(0.0, 0.0),
+    );
+    assert!(result.reset_tool, "Button vuelve a Select");
+    match &state.last_outcome {
+        Some(CommandOutcome::Message(message)) => {
+            assert!(message.contains("creado"), "mensaje: {message}");
+        }
+        other => panic!("Button tool debía crear: {other:?}"),
+    }
+    let label = document
+        .objects_iter()
+        .find_map(|(_, object)| {
+            grafito_command::ggbscript::action_view_of(object)
+                .filter(|view| matches!(view.kind, grafito_command::ggbscript::ActionKind::Button))
+                .map(|_| object.label().to_string())
+        })
+        .expect("botón real en el documento");
+    let steps = grafito_command::ggbscript::run_button_script(&mut document, &label)
+        .expect("el guion del botón corre");
+    assert!(steps >= 1, "pasos: {steps}");
+    assert_eq!(document.variables.get("boton1"), Some(&1.0));
 }

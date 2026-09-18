@@ -4193,6 +4193,265 @@ pub fn expand(expr: &str) -> Result<String, String> {
 ///
 /// Para expresiones fuera de este subconjunto devuelve la expresión original:
 /// es preferible no factorizar a publicar factores numéricos incompletos.
+
+/// Ola 2.4: factorización de Kronecker acotada (coeficientes enteros,
+/// grado ≤ `MAX_KRONECKER_DEGREE`, presupuesto de candidatos). Devuelve los
+/// factores con multiplicidad; un polinomio irreducible sobre Q vuelve como
+/// un único factor igual al original. `None` si no aplica o se agota el
+/// presupuesto (el llamador conserva el error honesto histórico).
+const MAX_KRONECKER_CANDIDATES: usize = 30_000;
+const MAX_KRONECKER_DEGREE: usize = 6;
+const MAX_KRONECKER_COEFF: i128 = 10_000;
+
+fn poly_eval_i128(coeffs: &[i128], x: i128) -> Option<i128> {
+    let mut acc = 0i128;
+    for &c in coeffs.iter().rev() {
+        acc = acc.checked_mul(x)?.checked_add(c)?;
+    }
+    Some(acc)
+}
+
+fn integer_divisors(value: i128) -> Vec<i128> {
+    let v = value.abs();
+    if v == 0 {
+        return vec![0];
+    }
+    let mut out = Vec::new();
+    let mut d = 1i128;
+    while d * d <= v {
+        if v % d == 0 {
+            out.push(d);
+            if d * d != v {
+                out.push(v / d);
+            }
+        }
+        d += 1;
+    }
+    out.sort_unstable();
+    out
+}
+
+fn poly_div_rem_i128(a: &[i128], b: &[i128]) -> Option<(Vec<i128>, Vec<i128>)> {
+    let mut rem: Vec<i128> = a.to_vec();
+    let b_deg = b.len().checked_sub(1)?;
+    let lead = *b.last()?;
+    if lead == 0 {
+        return None;
+    }
+    if rem.len() < b.len() {
+        return Some((vec![0], rem));
+    }
+    let mut quot = vec![0i128; rem.len() - b_deg];
+    while rem.len() >= b.len() && !rem.is_empty() {
+        let shift = rem.len() - b.len();
+        let top = rem[rem.len() - 1];
+        // División exacta en Z[i]: si el coeficiente líder no divide, no es
+        // factor (evita un "resto cero" espurio por truncamiento).
+        if top % lead != 0 {
+            return None;
+        }
+        let factor = top / lead;
+        quot[shift] = factor;
+        for i in 0..b.len() {
+            rem[shift + i] -= factor * b[i];
+        }
+        while rem.last() == Some(&0) {
+            rem.pop();
+        }
+    }
+    Some((quot, rem))
+}
+
+fn interpolate_integer_poly(points: &[(i128, i128)]) -> Option<Vec<i128>> {
+    let n = points.len();
+    if n == 0 {
+        return None;
+    }
+    let xs: Vec<f64> = points.iter().map(|(x, _)| *x as f64).collect();
+    let mut coef: Vec<f64> = points.iter().map(|(_, y)| *y as f64).collect();
+    for j in 1..n {
+        for i in (j..n).rev() {
+            let den = xs[i] - xs[i - j];
+            if den == 0.0 {
+                return None;
+            }
+            coef[i] = (coef[i] - coef[i - 1]) / den;
+        }
+    }
+    // Expansión a coeficientes monomiales: poly = coef[n-1]; por cada punto
+    // restante poly = poly*(x - x_i) + coef[i].
+    let mut poly: Vec<f64> = vec![coef[n - 1]];
+    for i in (0..n - 1).rev() {
+        let mut next = vec![0.0; poly.len() + 1];
+        for (deg, &value) in poly.iter().enumerate() {
+            next[deg + 1] += value;
+            next[deg] -= value * xs[i];
+        }
+        next[0] += coef[i];
+        poly = next;
+    }
+    let mut rounded: Vec<i128> = poly
+        .iter()
+        .map(|value| {
+            if !value.is_finite() || value.abs() > 1e9 {
+                return None;
+            }
+            let round = value.round();
+            ((value - round).abs() < 1e-6).then_some(round as i128)
+        })
+        .collect::<Option<Vec<i128>>>()?;
+    while rounded.len() > 1 && rounded.last() == Some(&0) {
+        rounded.pop();
+    }
+    Some(rounded)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn kronecker_search(
+    f: &[i128],
+    budget: &mut usize,
+    depth: usize,
+    out: &mut Vec<(Vec<i128>, usize)>,
+) -> bool {
+    let degree = f.len().saturating_sub(1);
+    // Base: lineales y cuadráticos son atómicos sobre Q (las raíces
+    // racionales ya se extrajeron antes de Kronecker).
+    if degree <= 2 {
+        out.push((f.to_vec(), 1));
+        return true;
+    }
+    if depth > 4 || *budget == 0 {
+        return false;
+    }
+    let n = degree;
+    // Puntos distintos fijos (0, ±1, ±2, 3) según el grado pedido.
+    const KRONECKER_POINTS: [i128; 6] = [0, 1, -1, 2, -2, 3];
+    let points: Vec<i128> = KRONECKER_POINTS.iter().copied().take(n).collect();
+    let values: Vec<i128> = points
+        .iter()
+        .map(|x| poly_eval_i128(f, *x))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    if values.len() != n {
+        return false;
+    }
+    // Raíz entera directa: deflacta.
+    for (index, value) in values.iter().enumerate() {
+        if *value == 0 {
+            let x = points[index];
+            if let Some((quot, rem)) = poly_div_rem_i128(f, &[-x, 1]) {
+                if rem.is_empty() && quot.len() >= 2 {
+                    out.push((vec![-x, 1], 1));
+                    return kronecker_search(&quot, budget, depth + 1, out);
+                }
+            }
+        }
+    }
+    let candidate_sets: Vec<Vec<i128>> = values
+        .iter()
+        .map(|value| {
+            let mut set: Vec<i128> = Vec::new();
+            for divisor in integer_divisors(*value) {
+                if !set.contains(&divisor) {
+                    set.push(divisor);
+                }
+                if !set.contains(&(-divisor)) {
+                    set.push(-divisor);
+                }
+            }
+            set
+        })
+        .collect();
+    // Búsqueda de un factor g de grado 1..n-1 con g(x_i) = y_i (y_i | f(x_i)).
+    let mut choice = vec![0usize; n];
+    loop {
+        if *budget == 0 {
+            return false;
+        }
+        *budget = budget.saturating_sub(1);
+        let chosen: Vec<(i128, i128)> = points
+            .iter()
+            .enumerate()
+            .map(|(index, x)| (*x, candidate_sets[index][choice[index]]))
+            .collect();
+        let any_zero = chosen.iter().any(|(_, y)| *y == 0);
+        if !any_zero {
+            if let Some(g) = interpolate_integer_poly(&chosen) {
+                let g_deg = g.len().saturating_sub(1);
+                if g_deg >= 1 && g_deg < degree && g.last() != Some(&0) {
+                    if let Some((quot, rem)) = poly_div_rem_i128(f, &g) {
+                        if rem.is_empty() && !quot.is_empty() {
+                            return kronecker_search(&g, budget, depth + 1, out)
+                                && kronecker_search(&quot, budget, depth + 1, out);
+                        }
+                    }
+                }
+            }
+        }
+        // Siguiente combinación (odómetro).
+        let mut index = 0usize;
+        loop {
+            if index == n {
+                // Sin factor no trivial en la búsqueda acotada: el polinomio
+                // es irreducible sobre Q (dentro de la cota) y vuelve atómico.
+                out.push((f.to_vec(), 1));
+                return true;
+            }
+            choice[index] += 1;
+            if choice[index] < candidate_sets[index].len() {
+                break;
+            }
+            choice[index] = 0;
+            index += 1;
+        }
+    }
+}
+
+fn kronecker_factor_integer_poly(coeffs: &[f64]) -> Option<Vec<(Vec<f64>, usize)>> {
+    let degree = coeffs.iter().rposition(|c| *c != 0.0)?;
+    if degree <= 2 || degree > MAX_KRONECKER_DEGREE {
+        return None;
+    }
+    let integer: Vec<i128> = coeffs[..=degree]
+        .iter()
+        .map(|value| {
+            if !value.is_finite() {
+                return None;
+            }
+            let round = value.round();
+            if (value - round).abs() > 1e-9 || round.abs() > MAX_KRONECKER_COEFF as f64 {
+                return None;
+            }
+            Some(round as i128)
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if integer.last().is_none_or(|lead| *lead <= 0) {
+        return None;
+    }
+    // Parte primitiva (contenido 1) para que los factores la reconstruyan.
+    let content = integer
+        .iter()
+        .fold(0i128, |acc, value| gcd_i128(acc, *value));
+    if content > 1 {
+        return None;
+    }
+    let mut budget = MAX_KRONECKER_CANDIDATES;
+    let mut factors: Vec<(Vec<i128>, usize)> = Vec::new();
+    if !kronecker_search(&integer, &mut budget, 0, &mut factors) {
+        return None;
+    }
+    // Combina iguales (multiplicidad) y pasa a f64.
+    let mut merged: Vec<(Vec<f64>, usize)> = Vec::new();
+    for (factor, mult) in factors {
+        let as_f64: Vec<f64> = factor.iter().map(|value| *value as f64).collect();
+        if let Some(entry) = merged.iter_mut().find(|(existing, _)| *existing == as_f64) {
+            entry.1 += mult;
+        } else {
+            merged.push((as_f64, mult));
+        }
+    }
+    Some(merged)
+}
 pub fn factor(expr: &str, var: &str) -> Result<String, String> {
     if !is_math_identifier(var) {
         return Err(format!("variable '{var}' no es un identificador válido"));
@@ -4252,6 +4511,45 @@ pub fn factor(expr: &str, var: &str) -> Result<String, String> {
             }
         }
         let rem_deg = poly_degree(&rem);
+        // Ola 2.4: Kronecker acotado para el resto entero que las raíces
+        // racionales no parten. Irreducible sobre Q → se devuelve tal cual
+        // (paridad GeoGebra), sin error.
+        if matches!(rem_deg, Some(d) if d > 2) {
+            if let Some(factors) = kronecker_factor_integer_poly(&rem) {
+                let rem_degree = rem_deg.unwrap_or(0);
+                let nontrivial = factors
+                    .iter()
+                    .any(|(factor, _)| factor.len().saturating_sub(1) < rem_degree);
+                if !nontrivial {
+                    fac_strs.push(format!("({})", format_polynomial_from_coeffs(&rem, var)));
+                    if orig_leading != 1.0 {
+                        fac_strs.insert(0, orig_leading.to_string());
+                    }
+                    return Ok(fac_strs.join(" * "));
+                }
+                for (factor, mult) in factors {
+                    let piece = if factor.len() == 2 {
+                        let leading = factor[1];
+                        if leading == 0.0 {
+                            format!("({})", format_polynomial_from_coeffs(&factor, var))
+                        } else {
+                            linear_factor(var, -factor[0] / leading)
+                        }
+                    } else {
+                        format!("({})", format_polynomial_from_coeffs(&factor, var))
+                    };
+                    if mult > 1 {
+                        fac_strs.push(format!("{piece}^{mult}"));
+                    } else {
+                        fac_strs.push(piece);
+                    }
+                }
+                if orig_leading != 1.0 {
+                    fac_strs.insert(0, orig_leading.to_string());
+                }
+                return Ok(fac_strs.join(" * "));
+            }
+        }
         match rem_deg {
             None => {
                 // todo factorizado
@@ -8851,18 +9149,45 @@ mod tests {
 
     #[test]
     fn factor_rejects_degree_greater_than_two_honestly() {
-        let err = factor("x^3 + 2*x + 1", "x").expect_err("grado>2 debe ser Err");
+        // Ola 2.4: un cúbico irreducible sobre Q ya no es error: GeoGebra
+        // devuelve el polinomio tal cual.
+        let irreducible = factor("x^3 + 2*x + 1", "x").expect("cúbico irreducible sobre Q");
+        assert!(irreducible.contains("x^3"), "se conserva: {irreducible}");
+        assert!(matches!(
+            factor_typed("x^3 + 2*x + 1", "x"),
+            MathResult::Exact(_)
+        ));
+        // Fuera de la cota de Kronecker (grado 7): sigue el error honesto.
+        let err = factor("x^7 + 2*x + 1", "x").expect_err("grado>6 fuera de cota");
         assert!(
             err.contains("grado>2"),
             "mensaje debe contener grado>2, got {err}"
         );
         assert!(matches!(
-            factor_typed("x^3 + 2*x + 1", "x"),
+            factor_typed("x^7 + 2*x + 1", "x"),
             MathResult::Unsupported(MathError::DerivativeUnavailable { reason, .. }) if reason.contains("grado>2")
         ));
         assert!(factor("x^2 - 4", "x").is_ok());
         assert!(factor("x + 2", "x").is_ok());
         assert!(matches!(factor_typed("x^2 - 4", "x"), MathResult::Exact(_)));
+    }
+
+    /// Ola 2.4: Kronecker factoriza cuárticos sin raíces racionales y
+    /// detecta multiplicidades; los irreducibles vuelven tal cual.
+    #[test]
+    fn ola24_kronecker_factors_degree_above_two() {
+        // x⁴ − 4 = (x² − 2)(x² + 2): sin raíces racionales.
+        let quartic = factor("x^4 - 4", "x").expect("cuártico factorizable");
+        assert!(quartic.contains("x^2 - 2"), "factor 1: {quartic}");
+        assert!(quartic.contains("x^2 + 2"), "factor 2: {quartic}");
+        assert_eq!(quartic.matches('*').count(), 1, "dos factores: {quartic}");
+        // x⁴ + 2x² + 1 = (x² + 1)².
+        let squared = factor("x^4 + 2*x^2 + 1", "x").expect("cuadrado perfecto");
+        assert!(squared.contains("x^2 + 1"), "factor: {squared}");
+        assert!(squared.contains("^2"), "multiplicidad: {squared}");
+        // Irreducible sobre Q (x⁴ + 1): se conserva sin error.
+        let irreducible = factor("x^4 + 1", "x").expect("irreducible");
+        assert!(irreducible.contains("x^4"), "{irreducible}");
     }
 
     #[test]

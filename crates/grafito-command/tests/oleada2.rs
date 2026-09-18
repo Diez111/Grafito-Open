@@ -146,8 +146,11 @@ fn oleada2_todos_visibles_en_paleta() {
     // Frente P4 (CAS+listas/geometría/stats/display: +105 visibles S): 472 → 577, 516 → 621.
     // Frente P4-fix: Shear/Stretch/FractionText/SurdText visibles: 577 → 581.
     // Frente P5 (cierre nominal: +18 visibles S): 581 → 599, 621 → 639.
-    assert_eq!(command_registry::palette_commands().count(), 599);
-    assert_eq!(command_registry::all().len(), 639);
+    // Ola 0.2 (Groebner/GroebnerLex: +2 visibles S): 599 → 601, 639 → 641.
+    // Ola 0.3 (StartAnimation/StopAnimation/Delete visibles: +3): 601 → 604.
+    // Ola 2.3 (ZTest2/FTest visibles): 604 → 606, 641 → 643.
+    assert_eq!(command_registry::palette_commands().count(), 606);
+    assert_eq!(command_registry::all().len(), 643);
 }
 
 #[test]

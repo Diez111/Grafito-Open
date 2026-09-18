@@ -43,6 +43,51 @@ pub fn sphere_area(radius: f64) -> Result<f64, SolidError> {
     Ok(4.0 * std::f64::consts::PI * r * r)
 }
 
+/// Ola 2.6: área del elipsoide por integración numérica determinista
+/// (Simpson compuesto 2D sobre la parametrización esférica). No hay forma
+/// cerrada elemental: se documenta como numérica, no "exacta".
+///
+/// `S = ∫₀^π ∫₀^2π sinφ·√(b²c²sin²φcos²θ + a²c²sin²φsin²θ + a²b²cos²φ) dθ dφ`
+pub fn ellipsoid_area(rx: f64, ry: f64, rz: f64) -> Option<f64> {
+    const N: usize = 128; // par: Simpson requiere tramos pares
+    let (a, b, c) = (rx, ry, rz);
+    if !(a.is_finite() && b.is_finite() && c.is_finite()) || a <= 0.0 || b <= 0.0 || c <= 0.0 {
+        return None;
+    }
+    let h_phi = std::f64::consts::PI / N as f64;
+    let h_theta = std::f64::consts::TAU / N as f64;
+    let weight = |index: usize| -> f64 {
+        if index == 0 || index == N {
+            1.0
+        } else if index % 2 == 1 {
+            4.0
+        } else {
+            2.0
+        }
+    };
+    let mut total = 0.0;
+    for i in 0..=N {
+        let phi = i as f64 * h_phi;
+        let sin_phi = phi.sin();
+        let cos_phi = phi.cos();
+        if sin_phi <= 0.0 {
+            continue;
+        }
+        let mut inner = 0.0;
+        for j in 0..=N {
+            let theta = j as f64 * h_theta;
+            let (sin_t, cos_t) = theta.sin_cos();
+            let radicand = b * b * c * c * sin_phi * sin_phi * cos_t * cos_t
+                + a * a * c * c * sin_phi * sin_phi * sin_t * sin_t
+                + a * a * b * b * cos_phi * cos_phi;
+            inner += weight(j) * radicand.max(0.0).sqrt();
+        }
+        total += weight(i) * sin_phi * inner;
+    }
+    let area = total * h_phi * h_theta / 9.0;
+    area.is_finite().then_some(area)
+}
+
 /// Volumen de un cubo de arista `s`.
 pub fn cube_volume(size: f64) -> Result<f64, SolidError> {
     let s = positive("arista", size)?;
@@ -274,6 +319,26 @@ pub fn solid_area(object: &GeoObject) -> Option<f64> {
             }
             Some(2.0 * base_area + perimeter * extrusion)
         }
+        // Ola 2.6: esfera/elipsoide informan área por integración numérica.
+        GeoObject::Quadric3D(quadric) => {
+            let coeffs = [
+                quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g,
+                quadric.h, quadric.i, quadric.j,
+            ];
+            match grafito_geometry::quadrics::classify_quadric(coeffs) {
+                Ok(shape)
+                    if matches!(
+                        shape.kind,
+                        grafito_geometry::quadrics::QuadricKind::Sphere
+                            | grafito_geometry::quadrics::QuadricKind::Ellipsoid
+                    ) =>
+                {
+                    let [rx, ry, rz] = shape.params;
+                    ellipsoid_area(rx, ry, rz)
+                }
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -285,6 +350,29 @@ pub fn solid_area(object: &GeoObject) -> Option<f64> {
 /// resumen global continúa `None` honesto). El resto de cuádricas mantiene el
 /// mensaje de no soportado.
 pub fn solid_measure_status(object: &GeoObject) -> &'static str {
+    // Ola 2.6: cuádrica real con volumen exacto y área numérica: se informa
+    // como tal (nunca "exacto" para una integración).
+    if let GeoObject::Quadric3D(quadric) = object {
+        let coeffs = [
+            quadric.a, quadric.b, quadric.c, quadric.d, quadric.e, quadric.f, quadric.g, quadric.h,
+            quadric.i, quadric.j,
+        ];
+        if let Ok(shape) = grafito_geometry::quadrics::classify_quadric(coeffs) {
+            if matches!(
+                shape.kind,
+                grafito_geometry::quadrics::QuadricKind::Sphere
+                    | grafito_geometry::quadrics::QuadricKind::Ellipsoid
+            ) {
+                let [rx, ry, rz] = shape.params;
+                let area_ok = ellipsoid_area(rx, ry, rz).is_some();
+                return if solid_volume(object).is_some() && area_ok {
+                    "elipsoide real: volumen 4/3·π·rx·ry·rz (área numérica estable, Simpson 128×128)"
+                } else {
+                    "elipsoide real: parámetros fuera de dominio (volumen/área honestos)"
+                };
+            }
+        }
+    }
     if solid_volume(object).is_some() && solid_area(object).is_some() {
         "exacto"
     } else if let GeoObject::Quadric3D(quadric) = object {
@@ -612,9 +700,8 @@ mod tests {
 
     #[test]
     fn quadric_has_honest_status() {
-        // Esfera como cuádrica: clasificación real con volumen analítico
-        // 4/3·π·1·1·1 (el área sigue por integración: el resumen global
-        // continúa `None` honesto salvo el texto de estado).
+        // Esfera como cuádrica: volumen analítico 4/3·π·1·1·1 y área por
+        // integración numérica estable (Ola 2.6).
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
@@ -643,7 +730,21 @@ mod tests {
             "elipsoide 2×3×4 = 32π: {volume}"
         );
         assert!(solid_measure_status(&elipsoide).contains("elipsoide real"));
-        assert_eq!(solid_area(&elipsoide), None);
+        // Ola 2.6: área numérica del elipsoide 2×3×4 (Simpson), finita y > volumen.
+        let area = solid_area(&elipsoide).expect("área numérica del elipsoide");
+        assert!(
+            area.is_finite() && area > 32.0 * std::f64::consts::PI,
+            "área: {area}"
+        );
+        // Esfera unitaria: la integración reproduce 4π (tolerancia 1e-6 rel).
+        let sphere_area_num = ellipsoid_area(1.0, 1.0, 1.0).expect("esfera");
+        assert!(
+            (sphere_area_num - 4.0 * std::f64::consts::PI).abs()
+                < 4.0 * std::f64::consts::PI * 1e-6,
+            "esfera 4π: {sphere_area_num}"
+        );
+        // Parámetros inválidos: None honesto.
+        assert_eq!(ellipsoid_area(0.0, 1.0, 1.0), None);
         // Hiperboloide: superficie real pero sin volumen cerrado.
         let hiperboloide = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,

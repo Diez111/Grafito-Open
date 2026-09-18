@@ -300,6 +300,47 @@ impl fmt::Display for ExactRational {
     }
 }
 
+impl ExactRational {
+    /// Ola 2.5: convierte un `f64` que representa un decimal exacto simple
+    /// (hasta 12 decimales, dentro de i128) a racional reducido. `None` si no
+    /// es finito, si el redondeo decimal no estabiliza o si desborda i128.
+    ///
+    /// No inventa precisión: `0.1` → `1/10`, `1.0/3.0` (0.333…) → `None`
+    /// porque su expansión decimal no cierra.
+    pub fn from_f64_decimal(value: f64) -> Option<Self> {
+        if !value.is_finite() {
+            return None;
+        }
+        if value == value.trunc() {
+            let round = value.round();
+            if round.abs() > i128::MAX as f64 {
+                return None;
+            }
+            return Some(Self::from(round as i128));
+        }
+        let mut scaled = value;
+        let mut denominator: i128 = 1;
+        for _ in 0..12 {
+            scaled *= 10.0;
+            denominator = denominator.checked_mul(10)?;
+            if !scaled.is_finite() {
+                return None;
+            }
+            let round = scaled.round();
+            // Tolerancia absoluta: un decimal n/10^k representado en f64
+            // cierra con error ~1e-16 relativo; 1e-9 absoluto acepta eso y
+            // rechaza expansiones infinitas (0.333… nunca cierra).
+            if (scaled - round).abs() <= 1e-9 {
+                if round.abs() > i128::MAX as f64 {
+                    return None;
+                }
+                return Self::new(round as i128, denominator).ok();
+            }
+        }
+        None
+    }
+}
+
 impl Ord for ExactRational {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.numerator.is_negative(), other.numerator.is_negative()) {

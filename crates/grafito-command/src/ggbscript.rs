@@ -1128,6 +1128,102 @@ fn run_play_pause(
     }
 }
 
+/// Ola 0.3: `StartAnimation`/`StopAnimation` con semántica set (GeoGebra), a
+/// diferencia de `PlayPause` que alterna. `start=true` deja en marcha aunque ya
+/// corriera; `start=false` pausa aunque ya estuviera pausada (idempotente).
+fn run_start_stop_animation(
+    document: &mut Document,
+    args: &[String],
+    input_text: &mut String,
+    start: bool,
+) -> CommandOutcome {
+    let name = if start {
+        "StartAnimation"
+    } else {
+        "StopAnimation"
+    };
+    let state = if start { "en marcha" } else { "pausada" };
+    if args.len() > 1 {
+        return CommandOutcome::Error(format!("{name}: usa {name}[] o {name}[variable]"));
+    }
+    if args.is_empty() {
+        // Solo variables con animación configurada (meta existente).
+        let names: Vec<String> = document
+            .variables()
+            .keys()
+            .filter(|name| document.variable_meta(name).is_some())
+            .cloned()
+            .collect();
+        if names.is_empty() {
+            return outcome_message(
+                input_text,
+                format!(
+                    "{name}: no hay variables con animación configurada (crea un Slider primero)"
+                ),
+            );
+        }
+        let mut changed = 0usize;
+        for name_var in &names {
+            if let Some(meta) = document.variable_meta(name_var).cloned() {
+                let mut next = meta;
+                next.animating = start;
+                match document.try_replace_variable_meta_with_previous(name_var, next) {
+                    Ok(_) => changed = changed.saturating_add(1),
+                    Err(error) => return CommandOutcome::Error(format!("{name}: {error}")),
+                }
+            }
+        }
+        return outcome_message(input_text, format!("{name}: {changed} variable(s) {state}"));
+    }
+    let var = match check_variable_name(&args[0]) {
+        Ok(var) => var,
+        Err(error) => return CommandOutcome::Error(format!("{name}: {error}")),
+    };
+    if !document.variables.contains_key(&var) {
+        return CommandOutcome::Error(format!("{name}: no existe la variable '{var}'"));
+    }
+    if let Some(meta) = document.variable_meta(&var).cloned() {
+        let mut next = meta;
+        next.animating = start;
+        match document.try_replace_variable_meta_with_previous(&var, next) {
+            Ok(_) => return outcome_message(input_text, format!("{name}: '{var}' {state}")),
+            Err(error) => return CommandOutcome::Error(format!("{name}: {error}")),
+        }
+    }
+    if !start {
+        // Pausar algo sin animación es no-op honesto (idempotente en guiones).
+        return outcome_message(
+            input_text,
+            format!("{name}: '{var}' ya está pausada (sin animación configurada)"),
+        );
+    }
+    // Arrancar sin meta configura el rango por defecto, como PlayPause.
+    let current = document.variables.get(&var).copied().unwrap_or(0.0);
+    if !current.is_finite() {
+        return CommandOutcome::Error(format!("{name}: la variable '{var}' no es finita"));
+    }
+    let min = current - 1.0;
+    let max = current + 1.0;
+    if !min.is_finite() || !max.is_finite() || min >= max {
+        return CommandOutcome::Error(format!(
+            "{name}: no se pudo crear un rango por defecto para '{var}'"
+        ));
+    }
+    match document.configure_variable_animation(
+        &var,
+        min,
+        max,
+        1.0,
+        grafito_core::AnimationMode::PingPong,
+    ) {
+        Ok(()) => outcome_message(
+            input_text,
+            format!("{name}: '{var}' en marcha (rango [{min}, {max}])"),
+        ),
+        Err(error) => CommandOutcome::Error(format!("{name}: {error}")),
+    }
+}
+
 fn run_if(
     document: &mut Document,
     args: &[String],
@@ -1725,13 +1821,6 @@ fn run_execute(
     }
 }
 
-/// Error honesto para comandos GGBScript conocidos pero no soportados.
-fn unsupported(command: &str, alternative: &str) -> CommandOutcome {
-    CommandOutcome::Error(format!(
-        "{command} no está soportado en Grafito ({alternative})"
-    ))
-}
-
 // ── Dispatcher G-D ──────────────────────────────────────────────────
 
 // ── Frente P3 SCRIPTING: ejecución explícita, vistas, display, export ──
@@ -1769,6 +1858,33 @@ pub fn run_update_script(document: &mut Document, label: &str) -> Result<usize, 
     let steps = check_script_allowlist(&script)?;
     let mut budget = crate::commands::ScriptBudget::default();
     run_ggb_steps(document, &steps, &mut budget)
+}
+
+/// Ejecuta el guion `OnLoad` del documento (Ola 2.7). Sin guion → `Ok(0)`.
+///
+/// Valida el allowlist al ejecutar (defensa en profundidad: ya se validó al
+/// guardar) y usa un presupuesto fresco. La app lo llama al reemplazar el
+/// documento (abrir/importar).
+pub fn run_load_script(document: &mut Document) -> Result<usize, String> {
+    let Some(script) = document.on_load_script.clone() else {
+        return Ok(0);
+    };
+    let steps = check_script_allowlist(&script)?;
+    let mut budget = crate::commands::ScriptBudget::default();
+    run_ggb_steps(document, &steps, &mut budget)
+}
+
+/// Etiquetas con guion `OnUpdate`, en orden determinista (Ola 2.7).
+///
+/// La app las ejecuta una vez por commit mutante (con guard de reentrada y
+/// tope de guiones por commit).
+pub fn on_update_script_labels(document: &Document) -> Vec<String> {
+    document
+        .object_scripts
+        .iter()
+        .filter(|(_, scripts)| scripts.on_update.is_some())
+        .map(|(label, _)| label.clone())
+        .collect()
 }
 
 /// Etiquetas máximas aceptadas por `SelectObjects` en una invocación.
@@ -2676,9 +2792,9 @@ pub(crate) fn handle_ggb_command(
         "DefineTool" => run_define_tool(args, input_text),
         "LoadTool" => run_load_tool(args, input_text),
         "Execute" => run_execute(document, args, input_text, script_budget),
-        "StartAnimation" => unsupported("StartAnimation", "usa PlayPause[variable] o PlayPause[]"),
-        "StopAnimation" => unsupported("StopAnimation", "usa PlayPause[variable] o PlayPause[]"),
-        "Delete" => unsupported("Delete", "usa Erase[etiqueta] o EraseAll[]"),
+        "StartAnimation" => run_start_stop_animation(document, args, input_text, true),
+        "StopAnimation" => run_start_stop_animation(document, args, input_text, false),
+        // Delete cae a handle_remaining_cas_commands (brazo propio, Ola 0.3).
         "Rename" => crate::commands::run_rename(document, args, input_text),
         _ => return None,
     };
@@ -2995,21 +3111,97 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_commands_fail_honestly() {
-        for (cmd, hint) in [
-            ("StartAnimation[]", "PlayPause"),
-            ("StopAnimation[]", "PlayPause"),
-            ("Delete[A]", "Erase"),
-        ] {
-            let mut doc = doc_with_point("A");
-            let mut input = cmd.to_string();
-            match process_input(&mut doc, &mut input) {
-                CommandOutcome::Error(message) => assert!(
-                    message.contains(hint),
-                    "{cmd} debe sugerir '{hint}': {message}"
-                ),
-                other => panic!("{cmd} debe fallar honesto, dio {other:?}"),
+    fn animation_commands_set_state() {
+        // Start/Stop con semántica set (GeoGebra), no toggle como PlayPause.
+        let mut doc = Document::new();
+        // Sin sliders: mensaje honesto, no error.
+        let mut input = "StartAnimation[]".to_string();
+        match process_input(&mut doc, &mut input) {
+            CommandOutcome::Message(message) => assert!(
+                message.contains("StartAnimation") && message.contains("Slider"),
+                "sin sliders honesto: {message}"
+            ),
+            other => panic!("StartAnimation[] debe dar Message, dio {other:?}"),
+        }
+        // Con slider: Start pone en marcha, Stop pausa (idempotente).
+        let mut slider = "Slider[v, 0, 10, 1]".to_string();
+        assert!(
+            matches!(
+                process_input(&mut doc, &mut slider),
+                CommandOutcome::Message(_)
+            ),
+            "Slider de prueba"
+        );
+        let mut start = "StartAnimation[v]".to_string();
+        match process_input(&mut doc, &mut start) {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("en marcha"), "start: {message}")
             }
+            other => panic!("StartAnimation[v] debe dar Message, dio {other:?}"),
+        }
+        assert!(
+            doc.variable_meta("v").is_some_and(|meta| meta.animating),
+            "StartAnimation[v] deja animating=true"
+        );
+        // Start repetido no alterna (diferencia con PlayPause).
+        let mut start2 = "StartAnimation[v]".to_string();
+        let _ = process_input(&mut doc, &mut start2);
+        assert!(
+            doc.variable_meta("v").is_some_and(|meta| meta.animating),
+            "StartAnimation repetido sigue en marcha"
+        );
+        let mut stop = "StopAnimation[]".to_string();
+        match process_input(&mut doc, &mut stop) {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("pausada"), "stop: {message}")
+            }
+            other => panic!("StopAnimation[] debe dar Message, dio {other:?}"),
+        }
+        assert!(
+            doc.variable_meta("v").is_some_and(|meta| !meta.animating),
+            "StopAnimation[] deja animating=false"
+        );
+        // Stop sobre variable sin animación: no-op honesto, no error.
+        doc.try_set_variable("v2".to_string(), 3.0)
+            .expect("variable de prueba");
+        let mut stop_plain = "StopAnimation[v2]".to_string();
+        match process_input(&mut doc, &mut stop_plain) {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("pausada"), "stop sin meta: {message}")
+            }
+            other => panic!("StopAnimation[v2] debe dar Message, dio {other:?}"),
+        }
+        // Variable inexistente: error honesto.
+        let mut missing = "StartAnimation[q]".to_string();
+        match process_input(&mut doc, &mut missing) {
+            CommandOutcome::Error(message) => {
+                assert!(message.contains("no existe"), "var inexistente: {message}")
+            }
+            other => panic!("var inexistente debe dar Error, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delete_removes_object_by_label() {
+        // Delete[objeto] es el nombre GeoGebra de Erase[etiqueta].
+        let mut doc = doc_with_point("A");
+        let mut input = "Delete[A]".to_string();
+        match process_input(&mut doc, &mut input) {
+            CommandOutcome::Message(message) => {
+                assert!(message.contains("borrado"), "delete: {message}")
+            }
+            other => panic!("Delete[A] debe dar Message, dio {other:?}"),
+        }
+        assert!(
+            doc.objects_iter().next().is_none(),
+            "Delete[A] borra el objeto"
+        );
+        let mut missing = "Delete[A]".to_string();
+        match process_input(&mut doc, &mut missing) {
+            CommandOutcome::Error(message) => {
+                assert!(message.contains("no encontrado"), "doble delete: {message}")
+            }
+            other => panic!("Delete repetido debe dar Error, dio {other:?}"),
         }
     }
 
@@ -3626,5 +3818,67 @@ mod tests {
         assert!(SLOW_PLOT_UNAVAILABLE.contains("SlowPlot"));
         assert!(PLAY_SOUND_UNAVAILABLE.contains("PlaySound"));
         assert!(START_RECORD_UNAVAILABLE.contains("StartRecord"));
+    }
+
+    /// Ola 2.7: la allowlist es benigna por construcción y queda pinneada.
+    /// Cualquier comando nuevo (I/O, red, borrado) rompe este test a
+    /// propósito: los guiones `OnLoad`/`OnUpdate` ahora se ejecutan solos.
+    #[test]
+    fn auto_script_allowlist_is_benign_and_pinned() {
+        assert_eq!(
+            GGBSCRIPT_ALLOWLIST,
+            &[
+                "SetValue",
+                "Show",
+                "Hide",
+                "ZoomIn",
+                "ZoomOut",
+                "PlayPause",
+                "If",
+                "Repeat",
+                "Button",
+                "Checkbox",
+                "InputBox",
+                "TextField",
+                "DefineTool",
+                "LoadTool",
+            ]
+        );
+        // Ni I/O ni borrado masivo: nombres peligrosos fuera de la lista.
+        for forbidden in [
+            "Save",
+            "Load",
+            "Export",
+            "Import",
+            "PlaySound",
+            "Delete",
+            "Erase",
+        ] {
+            assert!(
+                !GGBSCRIPT_ALLOWLIST.contains(&forbidden),
+                "{forbidden} no debe ser auto-ejecutable"
+            );
+        }
+    }
+
+    #[test]
+    fn run_load_script_without_script_is_a_noop() {
+        let mut doc = Document::new();
+        assert_eq!(run_load_script(&mut doc), Ok(0));
+        doc.on_load_script = Some("SetValue[k, 5]".to_string());
+        doc.try_set_variable("k".to_string(), 0.0).expect("k");
+        assert_eq!(run_load_script(&mut doc), Ok(1));
+        assert_eq!(doc.variables.get("k"), Some(&5.0));
+    }
+
+    #[test]
+    fn on_update_labels_are_sorted_and_only_with_script() {
+        let mut doc = doc_with_point("A");
+        assert!(on_update_script_labels(&doc).is_empty());
+        doc.object_scripts
+            .entry("A".to_string())
+            .or_default()
+            .on_update = Some("SetValue[k, 1]".to_string());
+        assert_eq!(on_update_script_labels(&doc), vec!["A".to_string()]);
     }
 }

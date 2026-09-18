@@ -1,4 +1,8 @@
 use crate::anim_ui::{RetentionQueue, TEXTURE_GRACE_FRAMES};
+use crate::view_flags::{
+    view_axis_step, view_flag_bool, VIEW_AXIS_STEP_X, VIEW_AXIS_STEP_Y, VIEW_SHOW_AXES,
+    VIEW_SHOW_GRID,
+};
 use crate::GrafitoApp;
 use egui::{Color32, Pos2, Rect, Shape, Stroke, Vec2};
 use glam::Vec2 as GlamVec2;
@@ -3347,7 +3351,9 @@ impl GrafitoApp {
     pub(crate) fn draw_grid(&self, painter: &egui::Painter, canvas_rect: Rect) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("draw_grid");
-        if !self.show_grid {
+        // Ola 0.5: `ShowGrid[bool]` guarda `__view_show_grid` en el documento y
+        // gana al interruptor de la app; sin flag vale `show_grid`.
+        if !view_flag_bool(&self.document, VIEW_SHOW_GRID, self.show_grid) {
             return;
         }
         let painter = clipped_to_canvas(painter, canvas_rect);
@@ -3415,6 +3421,8 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
+            // Ola 0.5: `AxisStepX[paso]` fija el paso vertical de grilla.
+            let major_step = view_axis_step(&self.document, VIEW_AXIS_STEP_X).unwrap_or(major_step);
             let min_x = (world_tl.x / major_step).floor() as i64;
             let max_x = (world_br.x / major_step).ceil() as i64;
             let mut min_x = min_x.saturating_sub(1);
@@ -3493,6 +3501,8 @@ impl GrafitoApp {
             } else {
                 5.0 * base
             };
+            // Ola 0.5: `AxisStepY[paso]` fija el paso horizontal de grilla.
+            let major_step = view_axis_step(&self.document, VIEW_AXIS_STEP_Y).unwrap_or(major_step);
             let min_y = (world_br.y / major_step).floor() as i64;
             let max_y = (world_tl.y / major_step).ceil() as i64;
             let mut min_y = min_y.saturating_sub(1);
@@ -3525,6 +3535,11 @@ impl GrafitoApp {
     ) {
         #[cfg(feature = "profile")]
         puffin::profile_scope!("draw_axes");
+        // Ola 0.5: `ShowAxes[bool]` guarda `__view_show_axes`; sin flag los
+        // ejes se dibujan siempre (conducta histórica).
+        if !view_flag_bool(&self.document, VIEW_SHOW_AXES, true) {
+            return;
+        }
         let painter = clipped_to_canvas(painter, canvas_rect);
         let view = self.document.view();
         let world_tl = view.screen_to_world(GlamVec2::new(0.0, 0.0));

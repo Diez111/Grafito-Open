@@ -26,6 +26,10 @@ use std::sync::RwLock;
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cache2DKey {
     pub version: u64,
+    /// Identidad del documento (`Document::cache_nonce`): dos documentos
+    /// distintos pueden compartir `version` y sin el nonce la escena GPU del
+    /// anterior se reutilizaría para el nuevo.
+    pub nonce: u64,
     pub view: grafito_geometry::ViewTransform,
     pub render_quality: RenderQuality,
     pub dark_mode: bool,
@@ -1084,6 +1088,7 @@ impl CallbackTrait for CanvasCallback {
 
         let current_key = Cache2DKey {
             version: self.document.version,
+            nonce: self.document.cache_nonce,
             view: *self.document.view(),
             render_quality: self.document.render_quality,
             dark_mode: self.dark_mode,
@@ -1616,6 +1621,7 @@ impl CallbackTrait for CanvasCallback {
         };
         let current_key = Cache2DKey {
             version: self.document.version,
+            nonce: self.document.cache_nonce,
             view: *self.document.view(),
             render_quality: self.document.render_quality,
             dark_mode: self.dark_mode,
@@ -2367,6 +2373,7 @@ mod tests {
         let readiness = GpuSceneReadiness::default();
         let two_d = Cache2DKey {
             version: 1,
+            nonce: 1,
             view: ViewTransform::new(800.0, 600.0),
             render_quality: RenderQuality::Normal,
             dark_mode: false,
@@ -2407,6 +2414,7 @@ mod tests {
     fn stale_2d_buffer_cannot_paint_after_new_prepare_fails() {
         let successful_key = Cache2DKey {
             version: 1,
+            nonce: 1,
             view: ViewTransform::new(800.0, 600.0),
             render_quality: RenderQuality::Normal,
             dark_mode: false,
@@ -2414,6 +2422,7 @@ mod tests {
         };
         let failed_prepare_key = Cache2DKey {
             version: 2,
+            nonce: 1,
             ..successful_key.clone()
         };
         let completed_buffer_key = Some(successful_key.clone());
@@ -2494,6 +2503,7 @@ mod tests {
     fn warmup_callback_cannot_claim_the_cpu_owned_frame_after_prepare() {
         let key = Cache2DKey {
             version: 7,
+            nonce: 1,
             view: ViewTransform::new(800.0, 600.0),
             render_quality: RenderQuality::Normal,
             dark_mode: false,
@@ -2509,6 +2519,7 @@ mod tests {
         let readiness = GpuSceneReadiness::default();
         let key = Cache2DKey {
             version: 9,
+            nonce: 1,
             view: ViewTransform::new(800.0, 600.0),
             render_quality: RenderQuality::Normal,
             dark_mode: false,

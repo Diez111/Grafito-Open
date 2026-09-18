@@ -280,10 +280,7 @@ pub fn dispatch_tool(
                 reset_tool: true,
             }
         }
-        Tool::Button => unavailable_tool(
-            state,
-            "Button no está disponible: Grafito aún no tiene un modelo persistente de botón interactivo.",
-        ),
+        Tool::Button => handle_button(state, document),
         Tool::Image => unavailable_tool(
             state,
             "Image no está disponible: Grafito aún no tiene un modelo persistente de imagen en el documento.",
@@ -1617,6 +1614,30 @@ fn handle_tetrahedron(state: &mut ToolState, document: &mut Document, world: Poi
         document,
         format!("Tetrahedron[{:.2}, {:.2}, 0, 2]", world.x, world.y),
         "Tetraedro creado (arista 2; ajustala con Tetrahedron[x, y, z, arista])".to_string(),
+        true,
+    )
+}
+
+/// Ola 1.6: botón de acción real (motor `ggbscript::run_button`): crea un
+/// action object con guion por defecto que activa su propia variable; el
+/// click lo ejecuta la UI (`fire_click_scripts`). El usuario puede redefinir
+/// el guion con `Button[...]`.
+fn handle_button(state: &mut ToolState, document: &mut Document) -> ToolResult {
+    let mut index = document.variables.len() + 1;
+    let mut var = format!("boton{index}");
+    while document.variables.contains_key(&var) {
+        index += 1;
+        if index > 1_000_000 {
+            return tool_honest_reset(state, "No hay nombres de variable libres");
+        }
+        var = format!("boton{index}");
+    }
+    let caption = format!("Botón {index}");
+    finish_with_command(
+        state,
+        document,
+        format!("Button[\"{caption}\", \"SetValue[{var}, 1]\"]"),
+        format!("{caption} creado (guion: SetValue[{var}, 1])"),
         true,
     )
 }

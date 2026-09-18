@@ -163,6 +163,11 @@ pub enum Icon {
 pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
     let pad = 2.0;
     let inner = Rect::from_min_max(rect.min + vec2(pad, pad), rect.max - vec2(pad, pad));
+    // Todos los glifos viven en grilla cuadrada 24×24 (`grid24` mapea ancho y
+    // alto por separado): encajar en el cuadrado centrado para no estirar el
+    // icono cuando el botón no es cuadrado (p. ej. toggles del composer, que
+    // dibujaban la lupa/✦ alargadas). En rects cuadrados no cambia nada.
+    let inner = fit_icon_square(inner);
     let stroke = Stroke::new(1.5, color);
     let stroke_thick = Stroke::new(2.0, color);
     let _ = stroke; // suprimir warning de no usado
@@ -274,6 +279,15 @@ pub fn draw_icon(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
         Icon::Close => icon_close(painter, inner, color, stroke_thick),
         Icon::Check => icon_check(painter, inner, color, stroke_thick),
     }
+}
+
+/// Encaja un rect en el cuadrado centrado de lado mínimo (letterbox).
+///
+/// Los glifos viven en grilla 24×24 cuadrada: dibujarlos sobre un rect no
+/// cuadrado los estira. `draw_icon` pasa por acá siempre.
+pub fn fit_icon_square(rect: Rect) -> Rect {
+    let side = rect.width().min(rect.height()).max(0.0);
+    Rect::from_center_size(rect.center(), vec2(side, side))
 }
 
 /// Crea un botón compacto con un icono vectorial y una descripción accesible.
@@ -1927,6 +1941,19 @@ fn icon_draw_compass(painter: &Painter, r: Rect, _color: Color32, stroke: Stroke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fit_icon_square_no_estira_rects_no_cuadrados() {
+        // Regresión del composer: los toggles dibujaban la lupa/✦ sobre un
+        // rect alto y el glifo salía estirado ("íconos rotos").
+        let tall = fit_icon_square(Rect::from_min_max(pos2(0.0, 0.0), pos2(16.0, 30.0)));
+        assert_eq!(tall.width(), tall.height());
+        assert_eq!(tall.width(), 16.0);
+        assert_eq!(tall.center(), pos2(8.0, 15.0));
+        // Cuadrado: idéntico.
+        let square = Rect::from_min_max(pos2(4.0, 4.0), pos2(34.0, 34.0));
+        assert_eq!(fit_icon_square(square), square);
+    }
 
     #[test]
     fn minimalist_icons_render_without_panicking() {

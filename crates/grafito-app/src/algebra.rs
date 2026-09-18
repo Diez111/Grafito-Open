@@ -1049,7 +1049,11 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                     .variables
                     .clone()
                     .into_iter()
-                    .filter(|(name, _)| !is_internal_trig_name(name))
+                    // Ola 0.5: `__view_*` son estado de vista (ShowGrid & cía.),
+                    // no variables del usuario.
+                    .filter(|(name, _)| {
+                        !is_internal_trig_name(name) && !name.starts_with("__")
+                    })
                     .collect();
                 let mut var_to_delete = None;
                 for (name, val) in &vars {

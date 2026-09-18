@@ -9,7 +9,7 @@
 
 use crate::ObjectId;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum number of constraints accepted in one document or serialized graph.
 pub const MAX_CONSTRAINTS: usize = 5_000;
@@ -40,13 +40,13 @@ pub struct Constraint {
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ConstraintGraph {
     /// All constraints, indexed by ID.
-    constraints: HashMap<usize, Constraint>,
+    constraints: BTreeMap<usize, Constraint>,
     /// Map from object ID to the list of constraints that depend on it.
-    dependents: HashMap<ObjectId, Vec<usize>>,
+    dependents: BTreeMap<ObjectId, Vec<usize>>,
     /// Map from object ID to the constraint that created it (if any).
-    creator: HashMap<ObjectId, usize>,
+    creator: BTreeMap<ObjectId, usize>,
     /// Free objects (no parent constraint).
-    free_objects: HashSet<ObjectId>,
+    free_objects: BTreeSet<ObjectId>,
     /// Next constraint ID.
     next_id: usize,
     /// Next construction order.
@@ -56,9 +56,9 @@ pub struct ConstraintGraph {
 #[derive(Deserialize)]
 struct SerializedConstraintGraph {
     #[serde(default)]
-    constraints: HashMap<usize, Constraint>,
+    constraints: BTreeMap<usize, Constraint>,
     #[serde(default)]
-    free_objects: HashSet<ObjectId>,
+    free_objects: BTreeSet<ObjectId>,
 }
 
 impl<'de> Deserialize<'de> for ConstraintGraph {
@@ -136,7 +136,7 @@ impl ConstraintGraph {
     /// Orders are metadata only; canonicalizing hostile persisted values keeps
     /// the next allocation representable without changing dependency topology.
     fn canonicalize_persisted_orders(&mut self) {
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let needs_canonicalization = self
             .constraints
             .values()
@@ -185,7 +185,7 @@ impl ConstraintGraph {
             ));
         }
         let mut creators = BTreeMap::new();
-        let mut orders = HashSet::new();
+        let mut orders = BTreeSet::new();
         for (id, constraint) in &self.constraints {
             if *id == usize::MAX {
                 return Err("Constraint graph contains maximum identifier".to_string());
@@ -244,7 +244,7 @@ impl ConstraintGraph {
 
         // Iterative DFS keeps hostile serialized chains from exhausting the
         // call stack before the graph-size cap can reject them.
-        let mut states: HashMap<usize, u8> = HashMap::new();
+        let mut states: BTreeMap<usize, u8> = BTreeMap::new();
         for root in self.constraints.keys().copied() {
             if states.get(&root).copied().unwrap_or(0) == 2 {
                 continue;
@@ -292,7 +292,7 @@ impl ConstraintGraph {
     {
         self.validate_structure()?;
 
-        let mut constructed = HashSet::new();
+        let mut constructed = BTreeSet::new();
         for constraint in self.constraints.values() {
             constructed.extend(constraint.outputs.iter().copied());
         }
@@ -330,7 +330,7 @@ impl ConstraintGraph {
     pub fn remove_object(&mut self, id: ObjectId) -> Vec<ObjectId> {
         let mut orphaned: Vec<ObjectId> = Vec::new();
         let mut pending_constraints: Vec<usize> = Vec::new();
-        let mut seen_constraints = HashSet::new();
+        let mut seen_constraints = BTreeSet::new();
         self.free_objects.remove(&id);
 
         if let Some(cons_id) = self.creator.remove(&id) {
@@ -407,7 +407,7 @@ impl ConstraintGraph {
                 );
             }
         }
-        let mut created = HashSet::new();
+        let mut created = BTreeSet::new();
         for output in outputs {
             if !created.insert(*output) || self.creator.contains_key(output) {
                 return Err(format!("Object {output} already has a creating constraint"));
@@ -524,7 +524,7 @@ impl ConstraintGraph {
     /// the persisted construction order. Cycles are logged and returned in a
     /// deterministic fallback order so no reachable constraint is skipped.
     pub fn get_update_order(&self, changed: &[ObjectId]) -> Vec<usize> {
-        let mut reachable = HashSet::new();
+        let mut reachable = BTreeSet::new();
         let mut pending: Vec<usize> = changed
             .iter()
             .filter_map(|id| self.dependents.get(id))
@@ -533,7 +533,7 @@ impl ConstraintGraph {
             .collect();
         // Determinismo explícito: ordenar pending para que la fase de
         // descubrimiento no dependa del orden de inserción de dependents
-        // (HashMap iteration) ni del orden de `changed`.
+        // (BTreeMap iteration) ni del orden de `changed`.
         pending.sort_unstable();
         pending.dedup();
 
@@ -554,8 +554,8 @@ impl ConstraintGraph {
             }
         }
 
-        let mut successors: HashMap<usize, Vec<usize>> = HashMap::new();
-        let mut indegree: HashMap<usize, usize> =
+        let mut successors: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        let mut indegree: BTreeMap<usize, usize> =
             reachable.iter().copied().map(|id| (id, 0)).collect();
 
         for &cons_id in &reachable {
@@ -610,7 +610,7 @@ impl ConstraintGraph {
         }
 
         if order.len() != reachable.len() {
-            let scheduled: HashSet<usize> = order.iter().copied().collect();
+            let scheduled: BTreeSet<usize> = order.iter().copied().collect();
             let remaining: Vec<usize> = reachable.difference(&scheduled).copied().collect();
             log::warn!(
                 "Cycle detected in constraint graph; evaluating {} cyclic constraints in ID order",
@@ -636,7 +636,7 @@ impl ConstraintGraph {
                 return true;
             }
         }
-        let mut seen: HashSet<ObjectId> = outputs.iter().copied().collect();
+        let mut seen: BTreeSet<ObjectId> = outputs.iter().copied().collect();
         let mut stack: Vec<ObjectId> = seen.iter().copied().collect();
         while let Some(id) = stack.pop() {
             let Some(dependents) = self.dependents.get(&id) else {
@@ -665,7 +665,7 @@ impl ConstraintGraph {
     /// with `MAX_DRAG_PROPAGATION_DEPTH` (`document.rs`).
     pub fn downstream_depth(&self, changed: &[ObjectId]) -> usize {
         let order = self.get_update_order(changed);
-        let mut depth: HashMap<usize, usize> = HashMap::new();
+        let mut depth: BTreeMap<usize, usize> = BTreeMap::new();
         let mut max_depth = 0usize;
         for cons_id in order {
             let Some(cons) = self.constraints.get(&cons_id) else {

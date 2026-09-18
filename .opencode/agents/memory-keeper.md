@@ -1,7 +1,7 @@
 ---
 description: Dueño de la memoria del harness. Escribe MEMORY.md y .jspace en session.idle con presupuesto.
 mode: subagent
-model: opencode-go/muse-spark-1.3-contributor
+model: opencode-go/deepseek-v4.1-flash
 temperature: 0.1
 permission:
   edit: allow

@@ -308,6 +308,11 @@ impl ChangeSet {
         let mut restored = snapshot.clone();
         restored.version = next_version;
         restored.spatial_dirty = true;
+        // Memos frescos: el snapshot comparte el `Arc` con su linaje y el
+        // documento restaurado es una versión nueva (no debe leer partes del
+        // clon de origen ni contaminarlo con su contenido).
+        restored.estimated_bytes_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        restored.context_parts_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         *document = restored;
         Ok(())
     }
@@ -1173,6 +1178,12 @@ impl Document {
         staged.spatial_dirty = true;
         staged.spatial_variables_hash = 0;
         staged.cached_vars_list = Default::default();
+        // Memos por versión frescos: un clon staged puede mutar antes de
+        // asignar su próxima versión; compartir el `Arc` del memo con el
+        // documento vivo permitiría guardar partes/pesos de un contenido que
+        // no le corresponde a esa versión (lectura stale en el memo del vivo).
+        staged.estimated_bytes_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        staged.context_parts_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         for object in staged.objects.values_mut() {
             object.detach_runtime_caches();
         }

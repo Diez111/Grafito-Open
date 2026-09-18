@@ -14,7 +14,9 @@ use grafito_geometry::expr::evaluate;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_GRAPH_EXPRESSION_BYTES: usize = 4_096;
+/// Paridad con `grafito_geometry::expr::MAX_EXPR_LENGTH` (2000): una gráfica
+/// del asistente no puede superar el presupuesto del evaluador de expresiones.
+const MAX_GRAPH_EXPRESSION_BYTES: usize = 2_000;
 const MAX_GRAPH_DOMAIN_ABS: f64 = 10_000.0;
 
 /// Vista previa textual de una propuesta sin mutar el documento.

@@ -117,6 +117,7 @@ pub enum Tool {
     Image,
     Checkbox,
     InputBox,
+    Text,
     Eraser,
     // Complex & Visualization
     DomainColoring,
@@ -212,6 +213,7 @@ impl Tool {
             Tool::Button => "Button",
             Tool::Checkbox => "Checkbox",
             Tool::InputBox => "InputBox",
+            Tool::Text => "Text",
             Tool::Image => "Image",
             Tool::DomainColoring => "DomainColoring",
             Tool::HeatMap => "HeatMap",
@@ -239,7 +241,7 @@ impl Tool {
     pub fn cursor_icon(&self) -> egui::CursorIcon {
         match self {
             Tool::Select => egui::CursorIcon::Default,
-            Tool::Point | Tool::Point3D => egui::CursorIcon::Crosshair,
+            Tool::Point | Tool::Point3D | Tool::Text => egui::CursorIcon::Crosshair,
             Tool::Tesseract4D | Tool::Hypercube5D => egui::CursorIcon::PointingHand,
             Tool::Line
             | Tool::Circle

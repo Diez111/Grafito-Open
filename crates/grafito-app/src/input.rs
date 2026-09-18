@@ -159,6 +159,15 @@ impl GrafitoApp {
                     self.selected_object = None;
                 }
             }
+            Tool::Text => {
+                // Ola 1.6: un clic coloca un texto editable en el mundo; se
+                // renombra por menú contextual y se edita con `Text[...]`.
+                self.insert_object_from_tool(
+                    GeoObject::Text(grafito_core::TextObj::new("Texto", world)),
+                    "Text",
+                    time,
+                );
+            }
             Tool::Pencil => {
                 // El Pencil se construye en `response.drag_stopped`, no con un
                 // clic simple. Aquí no hacemos nada.
@@ -1193,6 +1202,20 @@ impl GrafitoApp {
                 // Cancel single pending point (Line/Circle first point)
                 self.tool_state.pending.clear();
                 self.tool_ghost = None;
+            } else {
+                // Ola 1.2: clic derecho sin pendiente sobre un objeto abre el
+                // menú contextual (GeoGebra). Selecciona sin disparar OnClick.
+                if let Some(world) = world_at_pointer {
+                    let tolerance = 10.0 / self.document.view().scale;
+                    if let Some(id) = self.document.pick_object(world, tolerance) {
+                        self.document.clear_selection();
+                        self.document.select(id);
+                        self.selected_object = Some(id);
+                        response.context_menu(|ui| {
+                            self.draw_object_context_menu(ui, id);
+                        });
+                    }
+                }
             }
         }
 
@@ -1202,9 +1225,6 @@ impl GrafitoApp {
             if scroll.y != 0.0 {
                 #[cfg(feature = "profile")]
                 puffin::profile_scope!("input_zoom");
-                self.is_view_changing = true;
-                self.last_interaction_time = Instant::now();
-                self.document.render_quality = RenderQuality::Preview;
                 let factor = if scroll.y > 0.0 {
                     1.0 + scroll.y.abs() * 0.001
                 } else {
@@ -1212,10 +1232,21 @@ impl GrafitoApp {
                 };
                 if let Some(pos) = response.hover_pos() {
                     let local = pos - canvas_rect.min;
-                    self.document
-                        .view_mut()
-                        .zoom(factor.clamp(0.8, 1.25), GlamVec2::new(local.x, local.y));
+                    self.zoom_stepped_view(factor, GlamVec2::new(local.x, local.y));
                 }
+            }
+            // ── Ola 0.6: pinch-zoom táctil (zoom_delta de egui; la rueda
+            // física sigue arriba). Sin hover no hay centro: usa el canvas.
+            let pinch = ui.input(|i| i.zoom_delta());
+            if (pinch - 1.0).abs() > f32::EPSILON {
+                let center = response
+                    .hover_pos()
+                    .map(|pos| pos - canvas_rect.min)
+                    .unwrap_or(egui::Vec2::new(
+                        canvas_rect.width() / 2.0,
+                        canvas_rect.height() / 2.0,
+                    ));
+                self.zoom_stepped_view(pinch, GlamVec2::new(center.x, center.y));
             }
         }
 
@@ -1442,6 +1473,53 @@ impl GrafitoApp {
             }
         }
         let _ = pixel_tolerance;
+    }
+
+    /// Ola 1.2: menú contextual 2D sobre un objeto (clic derecho, GeoGebra).
+    /// Todo pasa por comandos reales (`execute_command_and_record`): undo,
+    /// outcome y construction-log incluidos. Renombrar deja la plantilla en
+    /// la entrada y le da foco; Propiedades selecciona y abre el inspector.
+    pub(crate) fn draw_object_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        id: grafito_core::ObjectId,
+    ) {
+        let (label, visible) = match self.document.get_object(id) {
+            Some(object) => (object.label().to_string(), object.is_visible()),
+            None => return,
+        };
+        let time = ui.ctx().input(|input| input.time);
+        if ui.button("Renombrar").clicked() {
+            self.input_text = format!("Rename[{label}, ]");
+            self.command_input_focus_requested = true;
+            ui.close_menu();
+        }
+        if ui.button("Copiar").clicked() {
+            self.execute_command_and_record(&format!("CopyFreeObject[{label}]"), time);
+            ui.close_menu();
+        }
+        if visible {
+            if ui.button("Ocultar").clicked() {
+                self.execute_command_and_record(&format!("Hide[{label}]"), time);
+                ui.close_menu();
+            }
+        } else if ui.button("Mostrar").clicked() {
+            self.execute_command_and_record(&format!("Show[{label}]"), time);
+            ui.close_menu();
+        }
+        if ui.button("Eliminar").clicked() {
+            self.execute_command_and_record(&format!("Delete[{label}]"), time);
+            ui.close_menu();
+        }
+        if ui.button("Propiedades").clicked() {
+            self.document.clear_selection();
+            self.document.select(id);
+            self.selected_object = Some(id);
+            self.sidebar_tab = 0;
+            self.left_drawer_open = true;
+            self.compact_drawer_open = true;
+            ui.close_menu();
+        }
     }
 }
 

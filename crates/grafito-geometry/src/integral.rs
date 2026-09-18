@@ -1439,7 +1439,7 @@ fn risch_rational(
     let lead_q = q_full.last().copied().unwrap_or(1.0);
     let mut run: Vec<(f64, usize)> = Vec::new();
     let mut sorted = roots.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     for r in sorted {
         match run.last_mut() {
             Some(last) if (last.0 - r).abs() < 1e-9 => last.1 += 1,
@@ -2481,7 +2481,7 @@ fn risch_quad_rest_partial(
     // Agrupa lineales con multiplicidad (ordenadas).
     let mut run: Vec<(f64, usize)> = Vec::new();
     let mut sorted = roots.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     for r in sorted {
         match run.last_mut() {
             Some(last) if (last.0 - r).abs() < 1e-9 => last.1 += 1,
@@ -3169,7 +3169,7 @@ fn hermite_remainder_partial(
     }
     let mut run: Vec<(f64, usize)> = Vec::new();
     let mut sorted = roots.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     for root in sorted {
         match run.last_mut() {
             Some(last) if (last.0 - root).abs() < 1e-9 => last.1 += 1,
@@ -3349,7 +3349,7 @@ fn hermite_integrate_proper(
     }
     let mut run: Vec<(f64, usize)> = Vec::new();
     let mut sorted = roots.clone();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(f64::total_cmp);
     for root in sorted {
         match run.last_mut() {
             Some(last) if (last.0 - root).abs() < 1e-9 => last.1 += 1,

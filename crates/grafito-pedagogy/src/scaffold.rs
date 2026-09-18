@@ -241,6 +241,38 @@ pub fn is_exploratory_request(raw: &str) -> bool {
         .any(|marker| norm.contains(*marker))
 }
 
+/// Pedido EXPLÍCITO de ejemplo/demo ("dame un ejemplo…", "mostrame cómo…").
+/// A diferencia de un pedido exploratorio genérico (que igual puede esconder
+/// una evaluación), acá el usuario pide ver algo hecho: NO hay "solución"
+/// que retener, así que el repair socrático no debe disparar nunca.
+/// Puro y determinista, sin `unwrap`.
+pub fn is_explicit_demo_request(raw: &str) -> bool {
+    let norm = normalize_text(raw);
+    EXPLICIT_DEMO_MARKERS
+        .iter()
+        .any(|marker| norm.contains(*marker))
+}
+
+/// Marcadores de pedido explícito de ejemplo/demo (normalizados, sin tildes).
+const EXPLICIT_DEMO_MARKERS: &[&str] = &[
+    "dame un ejemplo",
+    "dame ejemplo",
+    "dame ejemplos",
+    "darme un ejemplo",
+    "mostrame un ejemplo",
+    "mostrame ejemplo",
+    "mostrame ejemplos",
+    "mostrame como",
+    "muestrame un ejemplo",
+    "muestrame ejemplo",
+    "muestrame como",
+    "ejemplo de",
+    "ejemplo con",
+    "un ejemplo",
+    "hace un ejemplo",
+    "haceme un ejemplo",
+];
+
 /// Turno conversacional mínimo para contexto.
 #[derive(Debug, Clone)]
 pub struct Turn {
@@ -594,6 +626,23 @@ mod tests {
         // Vacío también cae al fallback.
         let empty = eng.scaffold("   ", PedagogicalLevel::Secondary, &[]);
         assert_eq!(empty.question, NO_CONCEPT_FALLBACK_QUESTION);
+    }
+
+    #[test]
+    fn pedido_explicito_de_ejemplo_nunca_exige_repair() {
+        // Regresión del reporte real: "dame un ejemplo con numeros complejos"
+        // recibía "¿qué forma te imaginás? contame qué probaste" — un pedido,
+        // no una pregunta; no hay solución que retener.
+        assert!(is_explicit_demo_request(
+            "dame un ejemplo con numeros complejos"
+        ));
+        assert!(is_explicit_demo_request(
+            "a ver dame un ejemplo con numeros complejos"
+        ));
+        assert!(is_explicit_demo_request("mostrame cómo se grafica 1/z"));
+        assert!(is_explicit_demo_request("haceme un ejemplo de derivadas"));
+        assert!(!is_explicit_demo_request("¿qué es la derivada de x^2?"));
+        assert!(!is_explicit_demo_request("resolvé x^2 = 4"));
     }
 
     #[test]

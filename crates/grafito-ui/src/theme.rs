@@ -68,6 +68,13 @@ pub struct Theme {
     pub accent: Color32,
     pub accent_muted: Color32,
     pub accent_strong: Color32,
+    /// Texto de spans `código` inline sobre `accent_muted`: en modo oscuro el
+    /// `accent` de marca queda negro sobre negro, así que el código usa un
+    /// salvia claro propio (contraste ≥ 4.5 en ambos modos, ver tests).
+    pub code_text: Color32,
+    /// Texto de spans de matemática inline (`$…$`): salvia legible sobre el
+    /// fondo de la burbuja en ambos modos (contraste ≥ 4.5, ver tests).
+    pub math_text: Color32,
     pub success: Color32,
     pub warning: Color32,
     pub danger: Color32,
@@ -377,6 +384,8 @@ pub static DARK: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| Th
     accent: Color32::from_rgb(92, 107, 96),
     accent_muted: Color32::from_rgb(58, 65, 60),
     accent_strong: Color32::from_rgb(130, 145, 134),
+    code_text: Color32::from_rgb(198, 212, 200),
+    math_text: Color32::from_rgb(168, 186, 172),
     success: Color32::from_rgb(107, 145, 110),
     warning: Color32::from_rgb(180, 150, 90),
     danger: Color32::from_rgb(180, 95, 85),
@@ -459,6 +468,8 @@ pub static LIGHT: once_cell::sync::Lazy<Theme> = once_cell::sync::Lazy::new(|| T
     accent: Color32::from_rgb(0x6B, 0x7A, 0x6F),
     accent_muted: Color32::from_rgb(0xEB, 0xED, 0xEA),
     accent_strong: Color32::from_rgb(0x5C, 0x6B, 0x60),
+    code_text: Color32::from_rgb(0x4A, 0x55, 0x4E),
+    math_text: Color32::from_rgb(0x5C, 0x6B, 0x60),
     success: Color32::from_rgb(0x2E, 0x5B, 0x32),
     warning: Color32::from_rgb(0x7A, 0x55, 0x10),
     danger: Color32::from_rgb(0x8E, 0x2E, 0x2E),
@@ -567,6 +578,8 @@ mod tests {
         let _ = t.accent;
         let _ = t.accent_muted;
         let _ = t.accent_strong;
+        let _ = t.code_text;
+        let _ = t.math_text;
         let _ = t.success;
         let _ = t.warning;
         let _ = t.danger;
@@ -676,6 +689,26 @@ mod tests {
         // Scandinavian: umbral relajado para border (1.5) — calm restraint, no drama.
         assert_keyboard_state_contrast(&DARK);
         assert_keyboard_state_contrast(&LIGHT);
+    }
+
+    #[test]
+    fn inline_code_y_math_legibles_en_ambos_modos() {
+        // Regresión del reporte real: en modo oscuro el código inline se veía
+        // negro (accent de marca sobre accent_muted, contraste ~1.9).
+        for theme in [&*DARK, &*LIGHT] {
+            assert!(
+                contrast_ratio(theme.code_text, theme.accent_muted) >= 4.5,
+                "código inline sobre su fondo"
+            );
+            assert!(
+                contrast_ratio(theme.math_text, theme.assistant_assistant_bubble) >= 4.5,
+                "matemática inline sobre la burbuja del asistente"
+            );
+            assert!(
+                contrast_ratio(theme.math_text, theme.panel_bg) >= 4.5,
+                "matemática inline sobre el panel"
+            );
+        }
     }
 
     #[test]

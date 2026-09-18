@@ -7,7 +7,9 @@
 
 use crate::feedback::Misconception;
 use crate::level::PedagogicalLevel;
-use crate::scaffold::{is_exploratory_request, Scaffold, ScaffoldEngine, Turn};
+use crate::scaffold::{
+    is_explicit_demo_request, is_exploratory_request, Scaffold, ScaffoldEngine, Turn,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -427,6 +429,10 @@ impl SocraticFsm {
     /// modelo trae matemática (`math_expr`/`$..$`/`=` numérico): un "ejemplo"
     /// que suelta el valor es telling igual.
     ///
+    /// Excepción: pedido EXPLÍCITO de ejemplo (`is_explicit_demo_request`:
+    /// "dame un ejemplo…", "mostrame cómo…") jamás exige repair — no hay
+    /// "solución" que retener porque el usuario pidió ver algo hecho.
+    ///
     /// Pura para el dueño del guard en app (`session_socratic_guard`,
     /// `assistant.rs` — ESTE crate no lo toca):
     /// ```ignore
@@ -436,6 +442,9 @@ impl SocraticFsm {
     /// // …sigue guard normal (repair con voz Mili, attempts>=2)
     /// ```
     pub fn requires_repair_despite_exploratory(question: &str, response_brings_math: bool) -> bool {
+        if is_explicit_demo_request(question) {
+            return false;
+        }
         is_exploratory_request(question) && response_brings_math
     }
 
@@ -899,6 +908,11 @@ mod tests {
         ));
         assert!(!SocraticFsm::requires_repair_despite_exploratory(
             "¿qué es la derivada de x^2?",
+            true
+        ));
+        // Pedido explícito de ejemplo: jamás repair aunque traiga matemática.
+        assert!(!SocraticFsm::requires_repair_despite_exploratory(
+            "a ver dame un ejemplo con numeros complejos",
             true
         ));
         assert!(SocraticFsm::response_brings_math("miralo: $x^2$"));

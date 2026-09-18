@@ -163,6 +163,7 @@ const GROUP_4D: &[ToolEntry] = &[
 // Nota dedup: `Tool::Attractor` vive solo en GROUP_DYNAMICS ("Atractor 3D") —
 // no duplicar aquí; cada Tool un solo grupo.
 const GROUP_ADVANCED: &[ToolEntry] = &[
+    (Tool::Text, "Texto", ""),
     (Tool::Fractal, "Fractal", ""),
     (Tool::Histogram, "Histograma", ""),
     (Tool::ScatterPlot, "Dispersion", ""),
@@ -176,6 +177,7 @@ const GROUP_DYNAMICS: &[ToolEntry] = &[
     (Tool::Attractor, "Atractor 3D", ""),
     (Tool::Checkbox, "Casilla", ""),
     (Tool::InputBox, "Caja de entrada", ""),
+    (Tool::Button, "Botón", ""),
 ];
 
 /// Identificador de un grupo de herramientas de la toolbar.
@@ -420,7 +422,7 @@ pub fn filter_groups_by_pedagogical_level(
     filter_groups_by_level(groups, level.level_value())
 }
 
-/// Slug estable de cada [`Tool`] para [`tool_label`] (87 variantes).
+/// Slug estable de cada [`Tool`] para [`tool_label`] (88 variantes).
 ///
 /// El `match` es exhaustivo a propósito (sin comodín): añadir una variante a
 /// [`Tool`] rompe la compilación hasta darle su slug en el catálogo i18n.
@@ -509,6 +511,7 @@ pub fn tool_slug(tool: Tool) -> &'static str {
         Tool::Slider => "slider",
         Tool::Checkbox => "checkbox",
         Tool::InputBox => "inputbox",
+        Tool::Text => "text",
         Tool::Button => "button",
         Tool::Image => "image",
         Tool::TrigAnimation => "trig_animation",
@@ -516,13 +519,13 @@ pub fn tool_slug(tool: Tool) -> &'static str {
     }
 }
 
-/// Las 87 variantes de [`Tool`] en orden estable: prueba que cada una tiene
+/// Las 88 variantes de [`Tool`] en orden estable: prueba que cada una tiene
 /// slug y etiqueta ES/EN no vacía (ver test `all_87_tools_resolve_both_locales`).
 ///
 /// Las 11 de F3a aún sin entrada en el catálogo i18n (fuera de alcance:
 /// el reducer sincroniza i18n + docs) resuelven por fallback a la etiqueta
 /// estática de `GROUP_*` vía `entry_display_name`, nunca vacío.
-pub const ALL_TOOLS: &[Tool; 87] = &[
+pub const ALL_TOOLS: &[Tool; 88] = &[
     Tool::Select,
     Tool::Point,
     Tool::Midpoint,
@@ -606,6 +609,7 @@ pub const ALL_TOOLS: &[Tool; 87] = &[
     Tool::Slider,
     Tool::Checkbox,
     Tool::InputBox,
+    Tool::Text,
     Tool::Button,
     Tool::Image,
     Tool::TrigAnimation,
@@ -1305,7 +1309,7 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         | Tool::HeatMap
         | Tool::ComplexGrid => icon_advanced,
         Tool::Slider | Tool::Button | Tool::Image | Tool::TrigAnimation => icon_advanced,
-        Tool::Checkbox | Tool::InputBox => icon_advanced,
+        Tool::Checkbox | Tool::InputBox | Tool::Text => icon_advanced,
     }
 }
 
@@ -2165,12 +2169,12 @@ mod tests {
     #[test]
     fn all_87_tools_resolve_both_locales() {
         use crate::i18n::{tool_label, Locale};
-        assert_eq!(ALL_TOOLS.len(), 87, "Tool debe seguir en 87 variantes");
+        assert_eq!(ALL_TOOLS.len(), 88, "Tool debe seguir en 88 variantes");
         // Sin duplicados (cada variante una sola vez).
         let mut names: Vec<&str> = ALL_TOOLS.iter().map(Tool::name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 87);
+        assert_eq!(names.len(), 88);
         for tool in ALL_TOOLS {
             let slug = tool_slug(*tool);
             assert!(!slug.is_empty(), "sin slug para {:?}", tool);

@@ -859,10 +859,25 @@ mod tests {
         assert!((measure.volume - 4.188_790_204_786_390_5).abs() < 1e-9);
         assert!((measure.area - 12.566_370_614_359_172).abs() < 1e-9);
         assert_eq!(measure.status, "exacto");
+        // Ola 2.6: la cuádrica esfera/elipsoide ya informa volumen exacto +
+        // área numérica con estado honesto (no "exacto").
         let quadric = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
             1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
         ]));
-        let err = solid_measure_summary(&quadric).expect_err("cuádrica sin forma cerrada");
+        let measure = solid_measure_summary(&quadric).expect("cuádrica esfera mide");
+        assert!((measure.volume - 4.188_790_204_786_390_5).abs() < 1e-9);
+        assert!((measure.area - 12.566_370_614_359_172).abs() < 1e-6);
+        assert!(
+            measure.status.contains("elipsoide real"),
+            "{}",
+            measure.status
+        );
+        assert!(measure.status.contains("numérica"), "{}", measure.status);
+        // Fuera de forma cerrada sigue el error honesto (hiperboloide).
+        let hyperboloid = GeoObject::Quadric3D(Quadric3DObj::from_coeffs([
+            1.0, 1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0,
+        ]));
+        let err = solid_measure_summary(&hyperboloid).expect_err("sin forma cerrada");
         assert!(err.to_string().contains("Volumen/Área 3D"));
     }
 

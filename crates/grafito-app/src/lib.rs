@@ -51,7 +51,9 @@ pub(crate) mod teaching_ui;
 pub(crate) mod tool_dispatcher;
 pub mod tools_panel;
 pub(crate) mod ui;
+pub(crate) mod usage_log;
 pub(crate) mod utils;
+pub(crate) mod view_flags;
 pub(crate) mod whiteboard_ui;
 
 #[cfg(test)]

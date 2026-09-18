@@ -1016,7 +1016,8 @@ mod tests {
 
     #[test]
     fn nav_wrapped_da_la_vuelta_en_ambos_extremos() {
-        // 614 entradas en paleta: el wrap evita callejones sin salida por teclado.
+        // N entradas en paleta (604 comandos + 15 acciones UI): el wrap evita
+        // callejones sin salida por teclado. 614 acá es largo de ejemplo.
         assert_eq!(CommandPaletteState::nav_wrapped(0, 0, true), None);
         assert_eq!(CommandPaletteState::nav_wrapped(0, 614, false), Some(613));
         assert_eq!(CommandPaletteState::nav_wrapped(613, 614, true), Some(0));

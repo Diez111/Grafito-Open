@@ -2528,6 +2528,12 @@ impl AssistantRuntime {
             document_revision: job.document_revision,
             document_digest: job.document_digest,
             focus: job.focus,
+            input_chars: job.input_chars,
+            elapsed_ms: job
+                .started_at
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
             cancelled: job.cancellation.is_cancelled(),
             result,
             stream_preview_active: job.preview_active,
@@ -2705,9 +2711,9 @@ impl AssistantRuntime {
             question: job.question,
             correction_attempt: job.correction_attempt,
             repair_target_turn: job.repair_target_turn,
-            document_revision: job.document_revision,
-            document_digest: job.document_digest,
-            focus: job.focus,
+            preflight_revision: job.preflight_revision,
+            preflight_digest: job.preflight_digest,
+            preflight_focus: job.preflight_focus,
             text: job.text,
             cancelled: job.cancellation.is_cancelled(),
             result,
@@ -3185,39 +3191,6 @@ pub(crate) fn send_agent_msg_nonblocking(
         Err(std::sync::mpsc::TrySendError::Full(_)) => Some(false),
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => None,
     }
-}
-
-/// Parsea el `args_summary` de un `ToolStarted{ask_user}` a pendiente UI (S2).
-///
-/// Puro y no bloqueante: `args_summary` es `arguments.to_string()` truncado a
-/// 160 chars; para preguntas cortas típicas alcanza. Si viene truncado con
-/// `…` se recorta y se intenta igual; si no parsea, `None` honesto (sin
-/// inventar pregunta ni opciones). El `call_id` real no viaja en el evento,
-/// así que se deriva estable de la pregunta (longitud) sin inventar UUID.
-pub(crate) fn parse_agent_ask_user_pending(
-    args_summary: &str,
-) -> Option<grafito_ui::assistant::PendingClarification> {
-    let cleaned = args_summary.trim().trim_end_matches('…').trim();
-    if cleaned.is_empty() {
-        return None;
-    }
-    let value: serde_json::Value = serde_json::from_str(cleaned).ok()?;
-    let question = value.get("question").and_then(serde_json::Value::as_str)?;
-    if question.trim().is_empty() {
-        return None;
-    }
-    let options = value
-        .get("options")
-        .and_then(|options| options.as_array())
-        .map(|array| {
-            array
-                .iter()
-                .filter_map(|item| item.as_str().map(str::to_owned))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let call_id = format!("ask_user-{}", question.len());
-    grafito_ui::assistant::PendingClarification::try_new(&call_id, question, options).ok()
 }
 
 /// Motivo visible cuando PDF/SVG están deshabilitados sin LaTeX.
@@ -3816,6 +3789,7 @@ impl GrafitoApp {
         );
         grafito_ui::assistant::AssistantVisuals {
             mora_texture: self.mora_texture.as_ref().map(egui::TextureHandle::id),
+            locale: self.config_locale(),
         }
     }
 
@@ -5087,7 +5061,9 @@ impl GrafitoApp {
             AssistantUiAction::AgentModeChanged(_) => {
                 self.save_app_config();
             }
-            AssistantUiAction::ReasoningModeChanged(_) | AssistantUiAction::WebSearchChanged(_) => {
+            AssistantUiAction::ReasoningModeChanged(_)
+            | AssistantUiAction::WebSearchChanged(_)
+            | AssistantUiAction::SocraticModeChanged(_) => {
                 self.save_app_config();
             }
             AssistantUiAction::RunAnimation => self.run_assistant_animation(ctx),
@@ -8771,6 +8747,14 @@ pub(crate) fn remote_error_message(error: &str, current_model: &str) -> String {
         // Configuración.
         "La respuesta llegó con un formato que no se puede mostrar. Reintentá o reformulá el pedido (ej: pedilo por partes)."
             .to_string()
+    } else if let Some(marker) = error.find("[tamaños:") {
+        // El request trae el desglose de tamaños en bytes (SIN contenido del
+        // usuario): se conserva para diagnosticar qué parte excede el
+        // presupuesto sin mandar a Configuración a ciegas.
+        let breakdown: String = error[marker..].chars().take(200).collect();
+        format!(
+            "La consulta excede el presupuesto de entrada {breakdown}. Probá con un pedido más corto o limpiá el historial."
+        )
     } else {
         // Corte por chars, nunca por bytes (el mensaje puede traer multibyte).
         let truncated: String = error.chars().take(120).collect();
@@ -10184,6 +10168,7 @@ mod tests {
             document_revision: 1,
             document_digest: "d".into(),
             focus: None,
+            input_chars: 0,
             cancellation: remote_cancel.clone(),
             receiver: remote_rx,
             stream_rx: None,
@@ -10208,9 +10193,9 @@ mod tests {
             question: "q".into(),
             correction_attempt: 0,
             repair_target_turn: None,
-            document_revision: 1,
-            document_digest: "d".into(),
-            focus: None,
+            preflight_revision: 1,
+            preflight_digest: "d".into(),
+            preflight_focus: None,
             text: "t".into(),
             cancellation: proposal_cancel.clone(),
             receiver: proposal_rx,
@@ -11764,6 +11749,7 @@ mod tests {
             document_revision: 1,
             document_digest: "d".into(),
             focus: None,
+            input_chars: 0,
             cancellation: remote_cancel.clone(),
             receiver: rrx,
             stream_rx: None,
@@ -12897,6 +12883,7 @@ mod tests {
             document_revision: 3,
             document_digest: "fnv1a64:request".into(),
             focus: None,
+            input_chars: 0,
             cancellation: cancellation.clone(),
             receiver,
             stream_rx: None,
@@ -12943,6 +12930,7 @@ mod tests {
             document_revision: 1,
             document_digest: "d".into(),
             focus: None,
+            input_chars: 0,
             cancellation: cancel.clone(),
             receiver: result_rx,
             stream_rx: Some(delta_rx),
@@ -13123,6 +13111,7 @@ mod tests {
             document_revision: 1,
             document_digest: "d".into(),
             focus: None,
+            input_chars: 0,
             cancellation: CancellationToken::default(),
             receiver: result_rx,
             stream_rx: Some(delta_rx),
@@ -13362,9 +13351,9 @@ mod tests {
             question: "dibujá un corazon".into(),
             correction_attempt: 0,
             repair_target_turn: None,
-            document_revision: 3,
-            document_digest: "fnv1a64:request".into(),
-            focus: None,
+            preflight_revision: 3,
+            preflight_digest: "fnv1a64:request".into(),
+            preflight_focus: None,
             text: "respuesta remota".into(),
             cancellation: cancellation.clone(),
             receiver,
@@ -14045,19 +14034,19 @@ mod tests {
 
     #[test]
     fn s2_clarificacion_round_trip_sin_bloquear() {
-        // S2 `ask_user` real vía evento: parse del `args_summary` → pendiente
-        // → respuesta saneada para el loop como `function_call_output`.
+        // S2 `ask_user` real vía evento `Clarification{call_id}`: el id del
+        // wire viaja íntegro (sin heurística de longitud), la UI lo muestra
+        // como botones y la respuesta vuelve como `function_call_output`.
         // Puro y no bloqueante (sin threads, sin Document, sin I/O).
-        let pending = super::parse_agent_ask_user_pending(
-            r#"{"question":"¿qué valor le doy a x?","options":["0","1"]}"#,
+        let pending = grafito_ui::assistant::PendingClarification::try_new(
+            "call_abc123",
+            "  ¿qué   valor le doy a x? ",
+            vec!["0".to_owned(), "1".to_owned()],
         )
-        .expect("pendiente parseable");
+        .expect("pendiente válido");
+        assert_eq!(pending.call_id, "call_abc123");
         assert_eq!(pending.question, "¿qué valor le doy a x?");
         assert_eq!(pending.options, vec!["0".to_owned(), "1".to_owned()]);
-        // Truncado con `…` igual intenta (honesto, sin inventar).
-        assert!(super::parse_agent_ask_user_pending("hola").is_none());
-        assert!(super::parse_agent_ask_user_pending("").is_none());
-        assert!(super::parse_agent_ask_user_pending(r#"{"question":""}"#).is_none());
         // La respuesta vuelve al loop como `function_call_output` (Responses)
         // vía `answer_pending_clarification` (nuevo job, nunca bloquea).
         let output = grafito_agent::tools::ask_user_answer_function_output(&pending.call_id, "1")

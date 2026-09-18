@@ -339,7 +339,7 @@ pub fn limit<F: Fn(f64) -> f64>(f: F, x: f64) -> f64 {
 // Presupuestos: `MAX_CAS_EXPR_BYTES` 2000 (igual que `MAX_EXPR_LENGTH`),
 // `MAX_GRUNTZ_STEPS` 8 iteraciones L'Hôpital, series truncadas a
 // `MAX_SERIES_TERMS` 64, polo máximo `MAX_LAURENT_ORDER` 16,
-// S-polinomios máximos `MAX_GROEBNER_S_POLY` 128. Todo borde devuelve
+// S-polinomios máximos `MAX_GROEBNER_S_POLY` 384. Todo borde devuelve
 // `Result<_, CasError>`; cero `unwrap` en producción.
 // ---------------------------------------------------------------------------
 
@@ -351,12 +351,13 @@ pub const MAX_GRUNTZ_STEPS: usize = 8;
 pub const MAX_SERIES_TERMS: usize = 64;
 /// Orden máximo de polo soportado por Laurent/residuos.
 pub const MAX_LAURENT_ORDER: usize = 16;
-/// Máximo de S-polinomios evaluados por Buchberger.
-pub const MAX_GROEBNER_S_POLY: usize = 128;
-/// Máximo de polinomios de entrada a Buchberger.
-pub const MAX_GROEBNER_POLYS: usize = 8;
-/// Máximo de variables de Buchberger (lejos de `MAX_MATRIX_DIMENSION` 1000).
-pub const MAX_GROEBNER_VARS: usize = 4;
+/// Máximo de S-polinomios evaluados por Buchberger (Ola 2.2: 128 → 384).
+pub const MAX_GROEBNER_S_POLY: usize = 384;
+/// Máximo de polinomios de entrada a Buchberger (Ola 2.2: 8 → 12).
+pub const MAX_GROEBNER_POLYS: usize = 12;
+/// Máximo de variables de Buchberger (lejos de `MAX_MATRIX_DIMENSION` 1000);
+/// Ola 2.2: 4 → 6.
+pub const MAX_GROEBNER_VARS: usize = 6;
 /// Grado total máximo aceptado por Buchberger.
 pub const MAX_BUCHBERGER_DEGREE: usize = 64;
 /// Pasos máximos de una reducción multivariada.
@@ -3189,17 +3190,17 @@ mod tests {
 
     #[test]
     fn b2_buchberger_limits_are_resource_errors() {
-        // > 8 polys, > 4 vars, grado > 64 → `ResourceLimit→Eliminate`.
-        let polys9: Vec<String> = (0..9).map(|i| format!("x + {i}")).collect();
-        let err = buchberger_basis_ordered(&polys9, &["x".to_string()], MonomialOrder::GrLex)
-            .expect_err(">8");
+        // > 12 polys, > 6 vars, grado > 64 → `ResourceLimit→Eliminate`.
+        let polys13: Vec<String> = (0..13).map(|i| format!("x + {i}")).collect();
+        let err = buchberger_basis_ordered(&polys13, &["x".to_string()], MonomialOrder::GrLex)
+            .expect_err(">12");
         assert!(matches!(err, CasError::ResourceLimit { .. }), "got {err}");
-        let vars5: Vec<String> = ["x", "y", "z", "w", "v"]
+        let vars7: Vec<String> = ["x", "y", "z", "w", "v", "u", "t"]
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let err2 = buchberger_basis_ordered(&["x+y".to_string()], &vars5, MonomialOrder::Lex)
-            .expect_err(">4 vars");
+        let err2 = buchberger_basis_ordered(&["x+y".to_string()], &vars7, MonomialOrder::Lex)
+            .expect_err(">6 vars");
         assert!(matches!(err2, CasError::ResourceLimit { .. }), "got {err2}");
         let err3 = buchberger_basis_ordered(
             &["x^65+1".to_string()],
@@ -3213,5 +3214,26 @@ mod tests {
             buchberger_eliminate(&["x-1".to_string()], &["x".to_string()], &["x".to_string()])
                 .expect_err("elim total");
         assert!(matches!(all, CasError::Unsupported { .. }), "got {all}");
+    }
+
+    #[test]
+    fn ola22_new_groebner_caps_hold_real_systems() {
+        // 3 variables (antes fuera de la cota de 4): sistema lineal resoluble.
+        let polys = vec![
+            "x + y + z - 6".to_string(),
+            "x - y + z - 2".to_string(),
+            "x + y - z".to_string(),
+        ];
+        let vars: Vec<String> = ["x", "y", "z"].iter().map(|s| s.to_string()).collect();
+        let out = buchberger_basis(&polys, &vars).expect("3 vars dentro de la cota");
+        assert!(!out.basis.is_empty(), "base no vacía");
+        // 12 polinomios (antes >8): entra y reduce a {1} (inconsistente).
+        let polys12: Vec<String> = (0..12).map(|i| format!("x + {i}")).collect();
+        let out12 = buchberger_basis(&polys12, &["x".to_string()]).expect("12 polys");
+        assert!(
+            out12.basis.iter().any(|poly| poly == "1"),
+            "sistema inconsistente contiene 1: {:?}",
+            out12.basis
+        );
     }
 }
