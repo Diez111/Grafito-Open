@@ -8968,9 +8968,16 @@ pub fn grafito_git_hash() -> &'static str {
         .unwrap_or("dev")
 }
 
+/// Título de la ventana nativa: solo `Grafito` (minimalista; lo dibuja el
+/// compositor). La versión con fecha+hash vive en `--help/--version`.
+/// Pura y testeable.
+pub fn grafito_window_title() -> &'static str {
+    "Grafito"
+}
+
 /// Versión visible `Grafito v<semver> (<fecha> <hash>)`, p.ej.
-/// `Grafito v1.0.0 (2026-09-10 1c52ffc)`. Única fuente para el título de la
-/// ventana, `--help/--version` de `run_app` y de `main.rs`. Pura y testeable.
+/// `Grafito v1.0.0 (2026-09-10 1c52ffc)`. Única fuente para
+/// `--help/--version` de `run_app` y de `main.rs`. Pura y testeable.
 pub fn grafito_version_string() -> String {
     format!(
         "Grafito v{} ({} {})",
@@ -9099,7 +9106,7 @@ pub fn run_app() -> Result<(), eframe::Error> {
         ..Default::default()
     };
     eframe::run_native(
-        &grafito_version_string(),
+        grafito_window_title(),
         options,
         Box::new(|cc| Ok(Box::new(GrafitoApp::new(cc)))),
     )
@@ -9107,12 +9114,18 @@ pub fn run_app() -> Result<(), eframe::Error> {
 
 #[cfg(test)]
 mod version_visible_tests {
-    use super::{grafito_version_string, handle_version_args};
+    use super::{grafito_version_string, grafito_window_title, handle_version_args};
+
+    #[test]
+    fn window_title_es_solo_grafito() {
+        // Minimalista: el compositor muestra solo el nombre, sin semver.
+        assert_eq!(grafito_window_title(), "Grafito");
+    }
 
     #[test]
     fn version_visible_lleva_semver_fecha_y_hash() {
-        // `Grafito v<semver> (<fecha> <hash>)`: título de ventana y
-        // `--help/--version` comparten esta única fuente.
+        // `Grafito v<semver> (<fecha> <hash>)`: `--help/--version`
+        // comparten esta única fuente (ya no es el título de ventana).
         let visible = grafito_version_string();
         assert!(visible.starts_with("Grafito v"));
         assert!(visible.contains(env!("CARGO_PKG_VERSION")));
