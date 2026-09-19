@@ -17431,7 +17431,9 @@ mod tests {
         // track se fundía con el fondo y solo quedaba el knob suelto. La
         // barra propia (`draw_scrub_bar`) pinta rail+progreso+knob con el
         // tema garantizado, en fila propia a todo el ancho.
-        let source = include_str!("assistant.rs");
+        // Normalizado a LF: con CRLF (checkout Windows) `\n}\n` no matchea
+        // y el test paniqueaba solo en la matriz MSVC.
+        let source = include_str!("assistant.rs").replace("\r\n", "\n");
         // Cierre propio de cada fn (`\n}\n` a columna 0): el doc de la
         // siguiente menciona `egui::Slider` en pasado y no debe entrar.
         fn cuerpo<'a>(source: &'a str, f: &str) -> &'a str {
@@ -17444,7 +17446,7 @@ mod tests {
         }
         for f in ["fn draw_media_toolbar(", "fn draw_turn_scrub_bar("] {
             assert!(
-                !cuerpo(source, f).contains("egui::Slider"),
+                !cuerpo(&source, f).contains("egui::Slider"),
                 "{f} sin egui::Slider (barra propia)"
             );
         }
