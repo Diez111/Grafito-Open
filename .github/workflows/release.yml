@@ -61,11 +61,17 @@ jobs:
           fi
 
   # Calling the reusable CI workflow keeps tag releases gated by the same
-  # checks as main/PRs; GitHub Actions cannot make this workflow depend on a
+  # checks as main/PRs, with the release profile: deterministic jobs only
+  # (check/test/examples/docs/clippy/fmt/all-targets/supply-chain/lint).
+  # GPU lavapipe, benches --test, smokes multiplataforma y .deb se excluyen:
+  # son sensibles al entorno o redundantes con la matriz de build que sigue.
+  # GitHub Actions cannot make this workflow depend on a
   # separate CI run's status.
   ci-gate:
-    name: Run full CI gate
+    name: Run release CI gate
     uses: ./.github/workflows/ci.yml
+    with:
+      profile: release
     permissions:
       contents: read
 

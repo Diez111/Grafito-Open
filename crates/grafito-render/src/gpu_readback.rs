@@ -73,7 +73,8 @@ pub const REQUIRED_GPU_READBACK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Puro salvo lectura de env (sin panic, sin unwrap: valor inválido = ignorado).
 /// Sin la env de cobertura el frame conserva sus 250 ms intactos: producción
 /// no cambia; solo los tests/CI con `GRAFITO_REQUIRE_GPU_TESTS` esperan 10 s.
-pub(crate) fn effective_readback_timeout() -> Duration {
+/// Pública porque los docs públicos del módulo la enlazan (regla única).
+pub fn effective_readback_timeout() -> Duration {
     if let Some(ms) = std::env::var_os("GRAFITO_GPU_READBACK_TIMEOUT_MS")
         .and_then(|value| value.into_string().ok())
         .and_then(|text| text.trim().parse::<u64>().ok())

@@ -1,7 +1,13 @@
 name: CI
 
 on:
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      profile:
+        description: "full (push/PR: todo) o release (tag: gate liviano sin jobs de entorno ni redundantes)"
+        required: false
+        default: full
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -86,6 +92,9 @@ jobs:
 
   gpu-compute:
     name: required GPU renderer regressions
+    # Perfil release: lavapipe por software es sensible al entorno del runner;
+    # la cobertura GPU se valida en push/PR (full) y local con lavapipe.
+    if: ${{ inputs.profile != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -132,6 +141,9 @@ jobs:
 
   benches:
     name: cargo check benches
+    # Perfil release: harness --test pesado y sensible a la carga del runner;
+    # se valida en push/PR (full) y local en ambos toolchains.
+    if: ${{ inputs.profile != 'release' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -262,6 +274,9 @@ jobs:
 
   cross-platform-smoke:
     name: app smoke (${{ matrix.os }})
+    # Perfil release: redundante con la matriz de build del release
+    # (linux/win/mac compilan y hacen smoke por target).
+    if: ${{ inputs.profile != 'release' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
     strategy:
@@ -537,6 +552,9 @@ jobs:
 
   package-debian:
     name: Debian package smoke and lint
+    # Perfil release: redundante con el job debian del release (arma el .deb
+    # que se publica); el smoke/lint sigue en push/PR (full).
+    if: ${{ inputs.profile != 'release' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
