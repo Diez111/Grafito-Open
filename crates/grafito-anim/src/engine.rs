@@ -1126,7 +1126,16 @@ done
     /// ¿Hay shell POSIX para los stubs de wire v1? (F0: reemplaza al viejo
     /// `python_available`; si no hay `sh`, los tests de IPC se saltan honesto
     /// en lugar de fallar, igual que antes con python3 ausente).
+    ///
+    /// Solo Unix: los stubs usan `$(pwd)`, `base64 -d` y paths POSIX. En
+    /// Windows el `sh` de Git existe pero devuelve rutas MSYS (`/c/...`) que
+    /// este proceso no puede leer — los tres fallos espurios de la matriz
+    /// MSVC. La cobertura de stubs corre en Linux/macOS; los caminos reales
+    /// de Windows quedan cubiertos por el sidecar de ffmpeg.
     fn shell_available() -> bool {
+        if !cfg!(unix) {
+            return false;
+        }
         Command::new("sh")
             .arg("-c")
             .arg("exit 0")
@@ -1179,7 +1188,7 @@ done
     #[test]
     fn health_check_and_job_roundtrip_over_an_external_stub() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1240,7 +1249,7 @@ done
     #[test]
     fn stub_png_decodifica_honesto() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1269,7 +1278,7 @@ done
     #[test]
     fn run_job_propagates_engine_errors() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1288,7 +1297,7 @@ done
     #[test]
     fn run_job_times_out_when_the_engine_never_answers() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, mut config) = stub_engine();
@@ -1345,7 +1354,7 @@ done
     #[test]
     fn statem_rejects_submit_before_ready() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1399,7 +1408,7 @@ done
     #[test]
     fn engine_tracks_real_progress_from_stub() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1477,7 +1486,7 @@ done
     #[test]
     fn cancel_kills_ignoring_worker_within_200ms() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine_with(IGNORING_STUB);
@@ -1629,7 +1638,7 @@ done
     #[test]
     fn line_cap_rejects_giant_line_as_protocol_error() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, mut config) = stub_engine_with(GIANT_STUB);
@@ -1692,7 +1701,7 @@ done
     #[test]
     fn two_messages_in_one_write_are_both_delivered() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine_with(MULTI_MESSAGE_STUB);
@@ -1815,7 +1824,7 @@ done
     #[test]
     fn submit_while_running_is_rejected_no_fifo_queue() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         let (_guard, config) = stub_engine();
@@ -1835,7 +1844,7 @@ done
     #[test]
     fn run_job_honors_cancel_closure_like_cancellation_token() {
         if !shell_available() {
-            eprintln!("skipping: sh not available");
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
             return;
         }
         // La firma YA soporta tokens: cualquier `&dyn Fn() -> bool` (p. ej.
