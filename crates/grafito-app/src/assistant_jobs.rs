@@ -2485,6 +2485,39 @@ mod tests {
         f(&mut ctx, &egui_ctx, &avisos);
     }
 
+    /// Pulsa `poll_assistant_jobs` hasta que el job remoto asiente (propuesta,
+    /// error o repregunta) o 10 s. Un solo poll es flaky bajo carga: el worker
+    /// de preflight y el scheduler de tests compiten y el settle a veces llega
+    /// tarde. El timeout paniquea con el estado completo para diagnosticar.
+    fn poll_until_remote_settled(
+        ctx: &mut AssistantJobsContext<'_>,
+        egui_ctx: &egui::Context,
+        avisos: &std::cell::RefCell<Vec<String>>,
+    ) {
+        let t0 = std::time::Instant::now();
+        loop {
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+            let settled = ctx.runtime.proposal_job.is_some()
+                || ctx.panel.error.is_some()
+                || avisos
+                    .borrow()
+                    .iter()
+                    .any(|message| message.contains("repregunta"));
+            if settled {
+                return;
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(10),
+                "el job remoto nunca asentó: propuesta={}, error={:?}, avisos={:?}, remoto_pendiente={}",
+                ctx.runtime.proposal_job.is_some(),
+                ctx.panel.error,
+                avisos.borrow(),
+                ctx.runtime.remote_job.is_some(),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn dummy_model_job() -> AssistantModelJob {
         let (_, receiver) = sync_channel(1);
         AssistantModelJob {
@@ -3101,7 +3134,7 @@ mod tests {
             }))
             .expect("envío del completado");
 
-            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+            poll_until_remote_settled(ctx, egui_ctx, avisos);
 
             assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
             assert!(
@@ -3124,7 +3157,7 @@ mod tests {
     fn tutor_encendido_repara_pedido_exploratorio_con_math() {
         // Con el tutor activo (default), un pedido exploratorio genérico cuya
         // respuesta trae matemática sí se convierte en repregunta.
-        with_test_ctx_notify(|ctx, egui_ctx, _avisos| {
+        with_test_ctx_notify(|ctx, egui_ctx, avisos| {
             assert!(ctx.panel.socratic_enabled, "default encendido");
             let launch = grafito_command::assistant_context::document_context(ctx.document);
             let (tx, rx) = sync_channel(1);
@@ -3138,7 +3171,7 @@ mod tests {
             }))
             .expect("envío del completado");
 
-            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+            poll_until_remote_settled(ctx, egui_ctx, avisos);
 
             assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
             assert!(
