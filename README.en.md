@@ -93,7 +93,7 @@ cargo run -p grafito-app --release
 | **Boolean operations** | Polygon Union, Intersection, Difference, XOR |
 | **Conics** | By foci, focus-directrix, or 5 arbitrary points. All with arbitrary rotation |
 | **Implicit curves** | `ImplicitCurve[x^2 + y^2 = 1]`, `ImplicitCurve[x*y = 1]`, `ImplicitCurve[x^3 + y^3 - 3xy = 0]` |
-| **Complex mapping** | `ComplexMapping[1/z, target]` applies any complex function to any 2D object, with automatic dotted asymptotes through singularities |
+| **Complex mapping** | `ComplexMapping[expr]` maps over the unit disk `I` (created if missing); `ComplexMapping[1/z, target]` maps any existing 2D object, with a reference lattice that reveals the deformation, a pullback fill when the expression is invertible, and automatic dotted asymptotes through singularities |
 | **Vector fields** | `VectorField2D[f(x,y), g(x,y)]` with normalized arrow tips |
 | **Fractals** | Mandelbrot, Julia, Burning Ship, Tricorn, Newton — parallel `rayon` evaluation with smooth HSV coloring |
 | **Statistics plots** | Histogram, Scatter Plot, Box Plot (with outliers), Regression Line |

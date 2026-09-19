@@ -306,16 +306,22 @@ Epicycloid[2, 3]                        # epicicloide
 
 ### Mapeos complejos
 
-Aplicá cualquier función de variable compleja a un objeto 2D:
+Aplicá cualquier función de variable compleja a un objeto 2D. El target debe
+existir en el documento; sin target se usa el **disco unidad `I`** (se crea
+si falta):
 
 ```text
-Circle[c, 3]
-ComplexMapping[1/z, c]                   # invierte el círculo
-ComplexMapping[exp(z), c]                # exponencial compleja
-ComplexMapping[z^2, c]                   # transformación cuadrática
+ComplexMapping[exp(z)]                   # exp(z) sobre el disco unidad I
+ComplexMapping[z^2 + 1]                  # cualquier expresión de z (afines, polinomios, …)
+Circle[(0, 0), 3]                        # crea el círculo C (etiqueta automática)
+ComplexMapping[1/z, C]                   # invierte ese círculo
+ComplexMapping[z^2, C]                   # transformación cuadrática
 ```
 
-Las singularidades generan automáticamente asíntotas punteadas.
+Sobre una región (`x^2 + y^2 < 1`, `Circle`) el mapeo dibuja borde, relleno
+(cuando la expresión tiene inversa) y una **retícula de referencia** que hace
+visible la deformación interior (p. ej. `z` vs `z^5`). Las singularidades
+generan automáticamente asíntotas punteadas.
 
 #### Coloración de dominio (domain coloring) acelerada por GPU
 

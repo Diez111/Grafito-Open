@@ -99,12 +99,12 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 323;
+pub const MSG_COUNT: usize = 324;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (88) + `palette` (22) +
+/// `toolbar.group` (18) + `toolbar.tool` (89) + `palette` (22) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (15) +
-/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) + `menu` (65) + `assistant` (62) = 323.
+/// `anim` (2) + `media.title` (14) + `panel.conformal` (3) + `menu` (65) + `assistant` (62) = 324.
 pub static MESSAGES: &[Msg] = &[
     // ── toolbar.group (18) — ES idéntico a `ToolGroupId::label` ──
     Msg { key: "toolbar.group.move", es: "Seleccionar", en: "Select" },
@@ -215,6 +215,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.tool.checkbox", es: "Casilla", en: "Checkbox" },
     Msg { key: "toolbar.tool.inputbox", es: "Caja de entrada", en: "Input box" },
     Msg { key: "toolbar.tool.text", es: "Texto", en: "Text" },
+    Msg { key: "toolbar.tool.complex_contour", es: "Contorno complejo", en: "Complex contour" },
     // ── palette (18): 15 acciones UI + título + vacío + pie ──
     // ES idéntico a `UI_ACTIONS` en command_palette.rs; EN = clave estable de despacho.
     Msg { key: "palette.action.point", es: "Herramienta Punto", en: "Point Tool" },
@@ -631,6 +632,7 @@ pub fn tool_label(slug: &str, locale: Locale) -> &'static str {
         "checkbox" => t("toolbar.tool.checkbox", locale),
         "inputbox" => t("toolbar.tool.inputbox", locale),
         "text" => t("toolbar.tool.text", locale),
+        "complex_contour" => t("toolbar.tool.complex_contour", locale),
         _ => "",
     }
 }
@@ -858,13 +860,13 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
-// 323 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
-// 12 app/misc + 2 anim + 14 media.title + 87 `toolbar.tool` + 3
+// 324 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 12 app/misc + 2 anim + 14 media.title + 88 `toolbar.tool` + 3
 // `panel.conformal`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 323/323 (100%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 324/324 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -877,9 +879,9 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (323). Ordenado por dominio como
+/// Claves principales de UI con traducción PT (324). Ordenado por dominio como
 /// [`MESSAGES`]: grupos (18) + paleta (22) + onboarding (12) + cheat (10) +
-/// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (88) +
+/// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (89) +
 /// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
     // ── grupos (18) ──
@@ -1082,6 +1084,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "toolbar.tool.checkbox", pt: "Caixa de seleção" },
     PtMsg { key: "toolbar.tool.inputbox", pt: "Caixa de entrada" },
     PtMsg { key: "toolbar.tool.text", pt: "Texto" },
+    PtMsg { key: "toolbar.tool.complex_contour", pt: "Contorno complexo" },
     // ── panel.conformal (3) — R3.4 cierra el fallback ES ──
     PtMsg { key: "panel.conformal.title", pt: "Animação de Mapeamento Conforme" },
     PtMsg { key: "panel.conformal.animate", pt: "Animar deformação (homotopia)" },
@@ -1220,7 +1223,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
 ];
 
 /// Texto PT de `key`, o `None` si la clave no está en el catálogo.
-/// Desde R3.4 el overlay es total (323/323): `None` solo para claves
+/// Desde R3.4 el overlay es total (324/324): `None` solo para claves
 /// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
@@ -1234,7 +1237,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 323.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 324.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -1246,20 +1249,20 @@ pub fn pt_coverage() -> (usize, usize) {
 /// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 323/323 = falso).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 324/324 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 323/323"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 324/324"`.
 /// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
 }
 
-// ── Italiano / Français / Deutsch: overlays completos (323/323 c/u) ──
+// ── Italiano / Français / Deutsch: overlays completos (324/324 c/u) ──
 //
 // Generados desde `/tmp/opencode/i18n_table.txt` (190 líneas `clave|it|fr|de`,
 // mismo orden que `MESSAGES`, texto tal cual sin re-traducir). Patrón idéntico
@@ -1279,8 +1282,8 @@ pub struct OverlayMsg {
     pub text: &'static str,
 }
 
-/// Claves principales de UI con traducción al Italiano (323). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Italiano (324). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static IT_MESSAGES: &[OverlayMsg] = &[
@@ -1709,6 +1712,10 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg {
         key: "toolbar.tool.text",
         text: "Testo",
+    },
+    OverlayMsg {
+        key: "toolbar.tool.complex_contour",
+        text: "Contorno complesso",
     },
     // ── paleta (19) ──
     OverlayMsg {
@@ -2592,7 +2599,7 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Italiano de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (323/323): `None` solo para claves inexistentes.
+/// El overlay es total (324/324): `None` solo para claves inexistentes.
 pub fn it(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < IT_MESSAGES.len() {
@@ -2609,8 +2616,8 @@ pub fn it_coverage() -> (usize, usize) {
     (IT_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Français (323). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Français (324). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static FR_MESSAGES: &[OverlayMsg] = &[
@@ -2722,6 +2729,10 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.tool.checkbox", text: "Case" },
     OverlayMsg { key: "toolbar.tool.inputbox", text: "Zone de saisie" },
     OverlayMsg { key: "toolbar.tool.text", text: "Texte" },
+    OverlayMsg {
+        key: "toolbar.tool.complex_contour",
+        text: "Contour complexe",
+    },
     // ── paleta (19) ──
     OverlayMsg { key: "palette.action.point", text: "Outil Point" },
     OverlayMsg { key: "palette.action.line", text: "Outil Droite" },
@@ -2952,7 +2963,7 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Français de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (323/323): `None` solo para claves inexistentes.
+/// El overlay es total (324/324): `None` solo para claves inexistentes.
 pub fn fr(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < FR_MESSAGES.len() {
@@ -2969,8 +2980,8 @@ pub fn fr_coverage() -> (usize, usize) {
     (FR_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Deutsch (323). Ordenado por dominio
-/// como [`MESSAGES`]: grupos (18) + tools (88) + paleta (19) + onboarding (12) +
+/// Claves principales de UI con traducción al Deutsch (324). Ordenado por dominio
+/// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
 pub static DE_MESSAGES: &[OverlayMsg] = &[
@@ -3082,6 +3093,10 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.tool.checkbox", text: "Kontrollkästchen" },
     OverlayMsg { key: "toolbar.tool.inputbox", text: "Eingabefeld" },
     OverlayMsg { key: "toolbar.tool.text", text: "Text" },
+    OverlayMsg {
+        key: "toolbar.tool.complex_contour",
+        text: "Komplexe Kontur",
+    },
     // ── paleta (19) ──
     OverlayMsg { key: "palette.action.point", text: "Punkt-Werkzeug" },
     OverlayMsg { key: "palette.action.line", text: "Geraden-Werkzeug" },
@@ -3312,7 +3327,7 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
 ];
 
 /// Texto Deutsch de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (323/323): `None` solo para claves inexistentes.
+/// El overlay es total (324/324): `None` solo para claves inexistentes.
 pub fn de(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < DE_MESSAGES.len() {
@@ -3401,7 +3416,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 323);
+        assert_eq!(MSG_COUNT, 324);
     }
 
     #[test]
@@ -3615,10 +3630,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // R3.4: overlay total PT — 323 claves, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 324 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 323);
-        assert_eq!(pt_coverage(), (323, 323));
+        assert_eq!(PT_MESSAGES.len(), 324);
+        assert_eq!(pt_coverage(), (324, 324));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -3799,8 +3814,8 @@ mod tests {
 
     #[test]
     fn pt_reports_tool_fallback() {
-        // R3.4: el recorte F3d/W2 está cerrado — las 87 `toolbar.tool` tienen
-        // PT directo (antes 0 a propósito con fallback ES).
+        // R3.4: el recorte F3d/W2 está cerrado — todas las `toolbar.tool`
+        // tienen PT directo (antes 0 a propósito con fallback ES).
         let mut tool_total = 0;
         let mut tool_covered = 0;
         for m in MESSAGES {
@@ -3811,9 +3826,9 @@ mod tests {
                 }
             }
         }
-        assert_eq!(tool_total, 88);
+        assert_eq!(tool_total, 89);
         assert_eq!(
-            tool_covered, 88,
+            tool_covered, 89,
             "tools en PT: R3.4 cierra el recorte al 100%"
         );
         assert_eq!(pt("toolbar.tool.translate"), Some("Translada"));
@@ -3851,11 +3866,11 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 323/323 = 100%. Se imprime el % real con
+        // Cobertura PT medida: 324/324 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (323, 323));
+        assert_eq!((covered, total), (324, 324));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
         assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
@@ -3866,16 +3881,16 @@ mod tests {
         // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
         // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
         // y el texto con conteo para el hover histórico.
-        assert!(!pt_is_partial(), "R3.4 323/323 = 100%: sin badge parcial");
+        assert!(!pt_is_partial(), "R3.4 324/324 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 323/323");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 324/324");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (323, 323));
+        assert_eq!((covered, total), (324, 324));
     }
 
-    // ── Overlays IT/FR/DE (323/323 c/u, texto tal cual de la tabla) ──
+    // ── Overlays IT/FR/DE (324/324 c/u, texto tal cual de la tabla) ──
 
-    /// Aserciones comunes de overlay total: 323 entradas, cobertura 323/323,
+    /// Aserciones comunes de overlay total: 324 entradas, cobertura 324/324,
     /// sin duplicados ni vacíos, claves dentro del catálogo y en su mismo orden.
     fn assert_overlay_total(
         table: &[OverlayMsg],
@@ -3883,8 +3898,8 @@ mod tests {
         coverage: fn() -> (usize, usize),
         tag: &str,
     ) {
-        assert_eq!(table.len(), 323, "{tag}: overlay total");
-        assert_eq!(coverage(), (323, 323), "{tag}: cobertura total");
+        assert_eq!(table.len(), 324, "{tag}: overlay total");
+        assert_eq!(coverage(), (324, 324), "{tag}: cobertura total");
         let mut keys: Vec<&str> = table.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;

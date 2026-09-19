@@ -181,6 +181,42 @@ pub fn snap_point(
     SnapResult::free(world)
 }
 
+/// Snap liviano para captura continua (dibujo de contornos a mano).
+///
+/// A diferencia de [`snap_point`] no analiza características ni proyecta
+/// sobre curvas (demasiado caro por muestra a 60 fps): solo objetos
+/// (puntos existentes), ejes y cuadrícula — exactamente las referencias que
+/// importan para cerrar un lazo o arrancar sobre un punto concreto.
+/// `shift_pressed` libera el imán (mismo contrato que el snap completo).
+pub fn snap_point_light(
+    world: Point2,
+    document: &Document,
+    view_scale: f64,
+    cfg: &SnapConfig,
+    shift_pressed: bool,
+) -> SnapResult {
+    if shift_pressed {
+        return SnapResult::free(world);
+    }
+    let tol = world_tolerance(cfg, view_scale);
+    if cfg.snap_to_objects {
+        if let Some(result) = snap_to_object(world, document, view_scale, tol) {
+            return result;
+        }
+    }
+    if cfg.snap_to_axis {
+        if let Some(result) = snap_to_axis(world, view_scale, tol) {
+            return result;
+        }
+    }
+    if cfg.snap_to_grid {
+        if let Some(result) = snap_to_grid(world, view_scale, tol, cfg.grid_step) {
+            return result;
+        }
+    }
+    SnapResult::free(world)
+}
+
 fn snap_to_feature(
     world: Point2,
     document: &Document,

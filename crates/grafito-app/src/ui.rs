@@ -1862,6 +1862,9 @@ fn status_hint_for_tool(tool: Tool) -> String {
         Tool::Hypercube5D => {
             "Hipercubo 5D: clic para crear un objeto centrado y proyectado".to_string()
         }
+        Tool::ComplexContour => {
+            "Contorno: dibujá el lazo · imán con Shift libre · Esc cancela".to_string()
+        }
         _ => "Espacio / clic medio: mover vista".to_string(),
     }
 }

@@ -26,6 +26,12 @@ grafito-profile/pedagogy/plugins/assistant-types
 - **Piel**: ui (tokens, theme, assistant, animation), app (app.rs 4826L, assistant.rs 4731L, render_2d 4750L, panels 3177L, etc.)
 - **Infra**: packaging/deb, .github/workflows/ci.yml (17 jobs)
 
+## Ola CX — Contorno complejo dibujado a mano (2026-09-19)
+- Objetivo: seleccionar/tipear `f(z)`, dibujar un lazo a mano (o círculo centro+radio) y obtener `∮ f(z) dz` en vivo; al soltar quedan `Pencil`/`Circle` + `ComplexIntegral` persistentes con undo atómico.
+- Núcleo: `complex_calculus.rs` migra de trapecio a Gauss–Legendre 16 por segmento con Kahan, suma `ContourAccumulator` incremental, remuestreo ≤ 2 048 segmentos, integral circular analítica `circle_contour_integral` y `format_complex_rounded` compartido.
+- Render: `ComplexIntegral` acepta Pencil/Polyline/Spline/Arc/Bézier/Paramétrica (+círculo analítico) y deja de ser no-op silencioso; comando valida el tipo de curva con error honesto (`GeoObject::accepts_complex_contour`).
+- Piel: 89.ª `Tool::ComplexContour`, panel “Integral de contorno” con guías (imán liviano, cierre automático, estabilizador, suavizado, residuos) y overlay en vivo (trazo + chip ∅/ΣRes).
+
 ## Principios Invariantes (CORE)
 - **CORE-1 /j-space**: Nada de código sin que esté en Plans.md/Tasks.md/progress.md primero.
 - **CORE-2 /statem**: Todo flujo con estados inválidos imposibles → `enum Estado` + transiciones tipadas que no compilan si son ilegales.

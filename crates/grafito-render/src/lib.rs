@@ -42,6 +42,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 
 pub mod complex_compute;
+pub mod complex_contour;
 pub mod depth_3d;
 pub mod domain_coloring_compute;
 pub mod fill_compute;
@@ -310,6 +311,27 @@ pub fn object_world_aabb(
                     ))
                 }
                 GeoObject::Line(l) => Some(AABB::new(l.start, l.end)),
+                GeoObject::Pencil(p) if !p.points.is_empty() => {
+                    let mut aabb = AABB::new(p.points[0], p.points[0]);
+                    for point in &p.points {
+                        aabb.expand(point);
+                    }
+                    Some(aabb)
+                }
+                GeoObject::Polyline(p) if !p.points.is_empty() => {
+                    let mut aabb = AABB::new(p.points[0], p.points[0]);
+                    for point in &p.points {
+                        aabb.expand(point);
+                    }
+                    Some(aabb)
+                }
+                GeoObject::Spline(spline) if !spline.points.is_empty() => {
+                    let mut aabb = AABB::new(spline.points[0], spline.points[0]);
+                    for point in &spline.points {
+                        aabb.expand(point);
+                    }
+                    Some(aabb)
+                }
                 _ => None,
             }
         }
@@ -657,45 +679,129 @@ pub fn transform_complex_mapping_segments(
     subdivisions: usize,
     t_val: f64,
 ) -> Vec<(Point2, Point2)> {
+    transform_complex_mapping_segments_with(|z| map.apply(z), segments, subdivisions, t_val)
+}
+
+/// Igual que [`transform_complex_mapping_segments`] pero con un aplicador
+/// arbitrario `w = f(z)`: permite mapear expresiones que [`ConformalMap`] no
+/// reconoce (identidad, afines, polinomios con término constante, …) con el
+/// parser complejo, en vez de un no-op silencioso.
+pub fn transform_complex_mapping_segments_with<F>(
+    apply: F,
+    segments: &[(Point2, Point2)],
+    subdivisions: usize,
+    t_val: f64,
+) -> Vec<(Point2, Point2)>
+where
+    F: Fn(num_complex::Complex64) -> Option<num_complex::Complex64> + Sync,
+{
     let subdivisions = subdivisions.max(1);
     // P2-perf: segmentos independientes → rayon SOLO sobre el umbral
     // (convención del repo: 1024 celdas, igual que `RAYON_BATCH_THRESHOLD`
     // en geometría). Debajo, secuencial: el dispatch (~15 µs medido en el
-    // morph) costaría más que el trabajo. `ConformalMap: Copy + Sync`,
-    // cuenta pura por celda; ambas ramas dan salida idéntica y ordenada.
+    // morph) costaría más que el trabajo.
     let cells = segments
         .len()
         .saturating_mul(subdivisions.saturating_add(1));
     if cells >= 1024 {
         segments
             .par_iter()
-            .flat_map(|(a, b)| transform_un_segmento_conforme(map, a, b, subdivisions, t_val))
+            .flat_map(|(a, b)| transform_un_segmento_conforme(&apply, a, b, subdivisions, t_val))
             .collect()
     } else {
         segments
             .iter()
-            .flat_map(|(a, b)| transform_un_segmento_conforme(map, a, b, subdivisions, t_val))
+            .flat_map(|(a, b)| transform_un_segmento_conforme(&apply, a, b, subdivisions, t_val))
             .collect()
+    }
+}
+
+/// Aplicador de un mapeo complejo: el camino rápido [`ConformalMap`] cuando
+/// la expresión es reconocida, o el parser complejo compilado a bytecode
+/// (`ComplexExpr` + `exec_cpu`) para el resto.
+pub(crate) enum ComplexMappingApplier {
+    Named(ConformalMap),
+    Expression {
+        program: grafito_complex::complex_opcode::ComplexBytecodeProgram,
+    },
+    ExpressionFallback {
+        expr: grafito_complex::math::complex_expr::ComplexExpr,
+        symbol: String,
+        vars: std::collections::HashMap<String, num_complex::Complex64>,
+    },
+}
+
+impl ComplexMappingApplier {
+    /// Construye el aplicador del mapeo: `None` solo si la expresión no se
+    /// puede parsear (objeto muerto; el comando lo valida al crear).
+    pub(crate) fn new(cm: &grafito_core::ComplexMappingObj, document: &Document) -> Option<Self> {
+        let symbol = document.complex_base_symbol.clone();
+        if let Some(map) = cm.conformal_map(&symbol) {
+            return Some(Self::Named(map));
+        }
+        let normalized = cm.normalized_expr(&symbol);
+        let expr = grafito_complex::math::complex_expr::parse(&normalized).ok()?;
+        let mut vars = std::collections::HashMap::new();
+        for (name, value) in &document.variables {
+            vars.insert(name.clone(), num_complex::Complex64::new(*value, 0.0));
+        }
+        // Fast path: bytecode compilado una vez (sin HashMap por punto).
+        let real_vars: std::collections::BTreeMap<String, f64> = document.variables.clone();
+        let mut program = grafito_complex::complex_opcode::ComplexBytecodeProgram::default();
+        if grafito_complex::complex_opcode::compile_complex_expr(
+            &expr,
+            &real_vars,
+            &[("z", 0)],
+            &mut program,
+        )
+        .is_ok()
+        {
+            return Some(Self::Expression { program });
+        }
+        Some(Self::ExpressionFallback {
+            expr,
+            symbol: "z".to_string(),
+            vars,
+        })
+    }
+
+    pub(crate) fn apply(&self, z: num_complex::Complex64) -> Option<num_complex::Complex64> {
+        match self {
+            Self::Named(map) => map.apply(z),
+            Self::Expression { program } => {
+                grafito_complex::complex_opcode::exec_cpu(program, &[z])
+                    .filter(|w| w.re.is_finite() && w.im.is_finite())
+            }
+            Self::ExpressionFallback { expr, symbol, vars } => {
+                let mut scope = vars.clone();
+                scope.insert(symbol.clone(), z);
+                expr.eval(&scope)
+                    .ok()
+                    .filter(|w| w.re.is_finite() && w.im.is_finite())
+            }
+        }
     }
 }
 
 /// Un segmento subdividido y mapeado (trabajo por celda de
 /// [`transform_complex_mapping_segments`], extraído para compartir el
 /// camino secuencial y el paralelo sin duplicar). Puro.
-fn transform_un_segmento_conforme(
-    map: ConformalMap,
+fn transform_un_segmento_conforme<F>(
+    apply: &F,
     a: &Point2,
     b: &Point2,
     subdivisions: usize,
     t_val: f64,
-) -> Vec<(Point2, Point2)> {
+) -> Vec<(Point2, Point2)>
+where
+    F: Fn(num_complex::Complex64) -> Option<num_complex::Complex64> + Sync,
+{
     let mut prev: Option<Point2> = None;
     let mut tramos = Vec::new();
     for i in 0..=subdivisions {
         let t = i as f64 / subdivisions as f64;
         let z_orig = num_complex::Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
-        let z_mapped = map.apply(z_orig);
-        let current = match z_mapped {
+        let current = match apply(z_orig) {
             Some(w) if w.re.is_finite() && w.im.is_finite() => {
                 Some(interpolate_complex_mapping_point(
                     Point2::new(z_orig.re, z_orig.im),
@@ -711,6 +817,87 @@ fn transform_un_segmento_conforme(
         prev = current;
     }
     tramos
+}
+
+/// Imagen de una **retícula de referencia** recortada a la región del target
+/// (curva implícita rellenable). Es lo que hace visible la deformación de un
+/// mapeo: para el disco unidad, `z` deja la retícula recta y `z^5` la abre en
+/// abanico (la frontera sola es el mismo círculo en ambos casos).
+fn complex_mapping_reference_lattice(
+    target: &GeoObject,
+    document: &Document,
+    view: &ViewTransform,
+) -> Vec<(Point2, Point2)> {
+    let GeoObject::ImplicitCurve(ic) = target else {
+        return Vec::new();
+    };
+    if matches!(ic.operator, RelationOperator::Eq) {
+        return Vec::new();
+    }
+    let Some((lhs, rhs)) = ic.get_cached_asts(&document.variables, &["x", "y"]) else {
+        return Vec::new();
+    };
+    let swap = matches!(
+        ic.operator,
+        RelationOperator::Greater | RelationOperator::GreaterEq
+    );
+    let inside = |x: f64, y: f64| -> bool {
+        let left = lhs.eval_2d("x", x, "y", y);
+        let right = rhs.eval_2d("x", x, "y", y);
+        if !left.is_finite() || !right.is_finite() {
+            return false;
+        }
+        let field = if swap { right - left } else { left - right };
+        field.is_finite() && field <= 0.0
+    };
+
+    let world_tl = view.screen_to_world(glam::Vec2::new(0.0, 0.0));
+    let world_br = view.screen_to_world(view.screen_size);
+    let x_min = world_tl.x.min(world_br.x);
+    let x_max = world_tl.x.max(world_br.x);
+    let y_min = world_tl.y.min(world_br.y);
+    let y_max = world_tl.y.max(world_br.y);
+    if !(x_min.is_finite() && x_max.is_finite() && y_min.is_finite() && y_max.is_finite()) {
+        return Vec::new();
+    }
+
+    const LINES: usize = 7;
+    const SAMPLES: usize = 96;
+    let mut segments = Vec::new();
+    for line in 1..LINES {
+        let fraction = line as f64 / LINES as f64;
+        // Verticales x = const: tramos dentro de la región.
+        let x = x_min + fraction * (x_max - x_min);
+        let mut run_start: Option<Point2> = None;
+        for sample in 0..=SAMPLES {
+            let y = y_min + sample as f64 / SAMPLES as f64 * (y_max - y_min);
+            let point = Point2::new(x, y);
+            if inside(x, y) {
+                if let Some(start) = run_start {
+                    segments.push((start, point));
+                }
+                run_start = Some(point);
+            } else {
+                run_start = None;
+            }
+        }
+        // Horizontales y = const.
+        let y = y_min + fraction * (y_max - y_min);
+        let mut run_start: Option<Point2> = None;
+        for sample in 0..=SAMPLES {
+            let x = x_min + sample as f64 / SAMPLES as f64 * (x_max - x_min);
+            let point = Point2::new(x, y);
+            if inside(x, y) {
+                if let Some(start) = run_start {
+                    segments.push((start, point));
+                }
+                run_start = Some(point);
+            } else {
+                run_start = None;
+            }
+        }
+    }
+    segments
 }
 
 /// Interpola un punto con el mismo factor usado por los caminos CPU y GPU.
@@ -1071,9 +1258,16 @@ pub fn gpu_2d_base_owns(document: &Document, object: &GeoObject) -> bool {
         | GeoObject::ComplexGrid(_)
         | GeoObject::Transformed(_) => true,
         GeoObject::ComplexMapping(mapping) => {
-            mapping
-                .conformal_map(document.complex_base_symbol.as_str())
-                .is_some()
+            // GPU dibuja por segmento independiente (sin cuerdas entre
+            // segmentos de marching-squares). Vale para todo lo que el
+            // builder puede aplicar: mapa reconocido O expresión parseable
+            // (bytecode o fallback). Solo lo no-parseable queda en CPU, que
+            // lo omite igual (el comando ya lo rechaza al crear).
+            let symbol = document.complex_base_symbol.as_str();
+            let expr_supported = mapping.conformal_map(symbol).is_some()
+                || grafito_complex::math::complex_expr::parse(&mapping.normalized_expr(symbol))
+                    .is_ok();
+            expr_supported
                 && document.get_object(mapping.target).is_some_and(|target| {
                     matches!(
                         target,
@@ -2176,6 +2370,15 @@ impl Renderer {
                         0.0,
                     );
                 }
+                GeoObject::ComplexIntegral(integral) => {
+                    Self::add_complex_integral_geometry(
+                        &mut vertices,
+                        &mut indices,
+                        document,
+                        view,
+                        integral,
+                    );
+                }
                 GeoObject::Fractal2D(fr) => {
                     let _ = Self::add_fractal_geometry(&mut vertices, &mut indices, view, fr);
                 }
@@ -3016,6 +3219,15 @@ impl Renderer {
             GeoObject::ComplexGrid(cg) => {
                 Self::add_complex_grid_geometry(&mut vertices, &mut indices, document, view, cg);
             }
+            GeoObject::ComplexIntegral(integral) => {
+                Self::add_complex_integral_geometry(
+                    &mut vertices,
+                    &mut indices,
+                    document,
+                    view,
+                    integral,
+                );
+            }
             GeoObject::Fractal2D(fr) => {
                 let _ = Self::add_fractal_geometry(&mut vertices, &mut indices, view, fr);
             }
@@ -3039,6 +3251,99 @@ impl Renderer {
         }
         let _ = dark_mode;
         (vertices, indices)
+    }
+
+    /// Etiqueta del contorno complejo (`∮ = …` / `ΣRes = …`) en el centroide
+    /// del camino. Compartido por el path GPU y el estático (preflight del
+    /// asistente, export, benches): ambos muestran exactamente el mismo valor.
+    fn add_complex_integral_geometry(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u32>,
+        document: &Document,
+        view_transform: &ViewTransform,
+        integral: &grafito_core::ComplexIntegralObj,
+    ) {
+        let Some(target_obj) = document.get_object(integral.target) else {
+            return;
+        };
+        let Ok(parsed) = grafito_complex::math::complex_expr::parse(&integral.expr) else {
+            return;
+        };
+
+        let symbol = document.complex_base_symbol.clone();
+        let mut vars = std::collections::HashMap::new();
+        for (k, v) in &document.variables {
+            vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
+        }
+
+        // Círculo: cuadratura analítica sobre γ(θ) = c + r·e^{iθ} (exacta y
+        // más barata que muestrear 256 lados). El resto de contornos usa la
+        // polilínea del objeto (trazo a mano, polígono, spline, paramétrica…),
+        // remuestreada si excede el tope de cuadratura.
+        let (result, center) = match target_obj {
+            GeoObject::Circle(circle) => {
+                let value = grafito_complex::complex_calculus::circle_contour_integral(
+                    &parsed,
+                    num_complex::Complex64::new(circle.center.x, circle.center.y),
+                    circle.radius,
+                    grafito_complex::complex_calculus::CIRCLE_QUADRATURE_ARCS,
+                    &vars,
+                    &symbol,
+                );
+                let result = match value {
+                    Ok(value) if integral.compute_residue => Ok(
+                        grafito_complex::complex_calculus::residues_from_contour_integral(value),
+                    ),
+                    other => other,
+                };
+                (
+                    result,
+                    num_complex::Complex64::new(circle.center.x, circle.center.y),
+                )
+            }
+            other => {
+                let Some(path) = crate::complex_contour::contour_path(other, document) else {
+                    return;
+                };
+                let center = path
+                    .iter()
+                    .fold(num_complex::Complex64::new(0.0, 0.0), |acc, z| acc + z)
+                    / path.len() as f64;
+                let result = if integral.compute_residue {
+                    grafito_complex::complex_calculus::sum_of_residues(
+                        &parsed, &path, &vars, &symbol,
+                    )
+                } else {
+                    grafito_complex::complex_calculus::contour_integral(
+                        &parsed, &path, &vars, &symbol,
+                    )
+                };
+                (result, center)
+            }
+        };
+
+        if let Ok(res) = result {
+            let screen = view_transform.world_to_screen(Point2::new(center.re, center.im));
+            let prefix = if integral.compute_residue {
+                "ΣRes"
+            } else {
+                "∮"
+            };
+            // Mismo formato que el chip en vivo (`format_complex_rounded`):
+            // el valor persistido y el de dibujo nunca divergen.
+            let text = format!(
+                "{prefix} = {}",
+                grafito_complex::complex_calculus::format_complex_rounded(res)
+            );
+            Self::add_text_screen(
+                vertices,
+                indices,
+                &text,
+                glam::Vec2::new(screen.x, screen.y),
+                16.0,
+                integral.color,
+            );
+        }
     }
 
     fn add_function_geometry(
@@ -4005,75 +4310,13 @@ impl Renderer {
                 );
             }
             GeoObject::ComplexIntegral(integral) => {
-                let Some(target_obj) = document.get_object(integral.target) else {
-                    return;
-                };
-                let Ok(parsed) = grafito_complex::math::complex_expr::parse(&integral.expr) else {
-                    return;
-                };
-
-                let mut path = Vec::new();
-                match target_obj {
-                    GeoObject::Polygon(p) => {
-                        for pt in &p.vertices {
-                            path.push(num_complex::Complex64::new(pt.x, pt.y));
-                        }
-                        if let Some(first) = p.vertices.first() {
-                            path.push(num_complex::Complex64::new(first.x, first.y));
-                        }
-                    }
-                    GeoObject::Circle(c) => {
-                        let n = 256;
-                        for i in 0..=n {
-                            let a = i as f64 * std::f64::consts::TAU / n as f64;
-                            path.push(num_complex::Complex64::new(
-                                c.center.x + c.radius * a.cos(),
-                                c.center.y + c.radius * a.sin(),
-                            ));
-                        }
-                    }
-                    GeoObject::Line(l) => {
-                        path.push(num_complex::Complex64::new(l.start.x, l.start.y));
-                        path.push(num_complex::Complex64::new(l.end.x, l.end.y));
-                    }
-                    _ => {}
-                }
-
-                if path.len() >= 2 {
-                    let symbol = document.complex_base_symbol.clone();
-                    let mut vars = std::collections::HashMap::new();
-                    for (k, v) in &document.variables {
-                        vars.insert(k.clone(), num_complex::Complex64::new(*v, 0.0));
-                    }
-
-                    let result = if integral.compute_residue {
-                        grafito_complex::complex_calculus::sum_of_residues(
-                            &parsed, &path, &vars, &symbol,
-                        )
-                    } else {
-                        grafito_complex::complex_calculus::contour_integral(
-                            &parsed, &path, &vars, &symbol,
-                        )
-                    };
-
-                    if let Ok(res) = result {
-                        let center = path
-                            .iter()
-                            .fold(num_complex::Complex64::new(0.0, 0.0), |acc, z| acc + z)
-                            / path.len() as f64;
-                        let screen =
-                            view_transform.world_to_screen(Point2::new(center.re, center.im));
-                        let text = format!("{:.3} + {:.3}i", res.re, res.im);
-                        Self::add_text_screen(
-                            vertices,
-                            indices,
-                            &text,
-                            glam::Vec2::new(screen.x, screen.y),
-                            16.0,
-                            integral.color,
-                        );
-                    }
-                }
+                Self::add_complex_integral_geometry(
+                    vertices,
+                    indices,
+                    document,
+                    view_transform,
+                    integral,
+                );
             }
             GeoObject::ParametricCurve2D(pc) => {
                 let steps = 4000;
@@ -5082,19 +5325,23 @@ impl Renderer {
         let Some(target_obj) = document.get_object(cm.target) else {
             return false;
         };
-        let Some(map) = cm.conformal_map(document.complex_base_symbol.as_str()) else {
+        // Antes: `cm.conformal_map(...)` y, si la expresión no era de la lista
+        // corta (identidad, afines, z^2+1, …), todo el mapeo era un no-op
+        // silencioso. Ahora cae al parser complejo (bytecode) y siempre se ve.
+        let Some(applier) = ComplexMappingApplier::new(cm, document) else {
             return false;
         };
 
         let t_val =
             complex_mapping_homotopy_factor(cm.animate_homotopy, cm.homotopy_speed, homotopy_time);
+        let apply = |z: num_complex::Complex64| applier.apply(z);
 
         if let GeoObject::Point(point) = target_obj {
             let source = Point2::new(
                 document.resolve_expr(&point.x_expr, point.position.x),
                 document.resolve_expr(&point.y_expr, point.position.y),
             );
-            let marker = map
+            let marker = applier
                 .apply(num_complex::Complex64::new(source.x, source.y))
                 .filter(|mapped| mapped.re.is_finite() && mapped.im.is_finite())
                 .map(|mapped| {
@@ -5403,12 +5650,36 @@ impl Renderer {
             RenderQuality::Normal => 8,
             RenderQuality::High => 16,
         };
-        for (a, b) in transform_complex_mapping_segments(map, &source_segments, subdivisions, t_val)
+        for (a, b) in
+            transform_complex_mapping_segments_with(apply, &source_segments, subdivisions, t_val)
         {
             let p1 = view.world_to_screen(a);
             let p2 = view.world_to_screen(b);
             if (p2.x - p1.x).abs() < 300.0 && (p2.y - p1.y).abs() < 300.0 {
                 Self::add_line_segment(vertices, indices, p1, p2, 1.5, cm.color);
+            }
+        }
+
+        // Retícula de referencia: la imagen de la grilla recortada a la región
+        // del target. Sin esto, un disco unidad mapeado por `z` o por `z^5`
+        // dibuja el MISMO círculo (la frontera se preserva) y parece que el
+        // mapeo no hiciera nada.
+        let lattice = complex_mapping_reference_lattice(target_obj, document, view);
+        if !lattice.is_empty() && t_val >= 1.0 - f64::EPSILON {
+            let mut faded = cm.color;
+            faded.a *= 0.45;
+            let lattice_subdivisions = subdivisions.clamp(2, 4);
+            for (a, b) in transform_complex_mapping_segments_with(
+                apply,
+                &lattice,
+                lattice_subdivisions,
+                t_val,
+            ) {
+                let p1 = view.world_to_screen(a);
+                let p2 = view.world_to_screen(b);
+                if (p2.x - p1.x).abs() < 300.0 && (p2.y - p1.y).abs() < 300.0 {
+                    Self::add_line_segment(vertices, indices, p1, p2, 1.0, faded);
+                }
             }
         }
         true

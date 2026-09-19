@@ -1643,7 +1643,7 @@ const COMMANDS: &[CommandSpec] = &[
         "ComplexMapping",
         ["complex_mapping", "mapeocomplejo"],
         "Complejos",
-        "Aplica un mapeo complejo a un objetivo (sin target usa el disco unidad I, creado si falta).",
+        "Aplica un mapeo complejo a un objetivo (sin target usa el disco unidad I, creado si falta; con target, el objeto debe existir).",
         CreatesObject,
         High,
         true,

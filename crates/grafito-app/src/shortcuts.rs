@@ -231,6 +231,8 @@ impl GrafitoApp {
             self.tool_ghost = None;
             self.reset_tool_input();
             self.clear_pending_action();
+            // Esc también tira el contorno a medio dibujar.
+            self.disarm_complex_contour();
         }
     }
 }

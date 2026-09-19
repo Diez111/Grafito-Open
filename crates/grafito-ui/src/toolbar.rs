@@ -170,6 +170,7 @@ const GROUP_ADVANCED: &[ToolEntry] = &[
     (Tool::DomainColoring, "Domain Coloring", ""),
     (Tool::HeatMap, "Heat Map", ""),
     (Tool::ComplexGrid, "Complex Grid", ""),
+    (Tool::ComplexContour, "Contorno complejo", ""),
     (Tool::Slider, "Deslizador", ""),
 ];
 
@@ -508,6 +509,7 @@ pub fn tool_slug(tool: Tool) -> &'static str {
         Tool::DomainColoring => "domain_coloring",
         Tool::HeatMap => "heatmap",
         Tool::ComplexGrid => "complex_grid",
+        Tool::ComplexContour => "complex_contour",
         Tool::Slider => "slider",
         Tool::Checkbox => "checkbox",
         Tool::InputBox => "inputbox",
@@ -525,7 +527,7 @@ pub fn tool_slug(tool: Tool) -> &'static str {
 /// Las 11 de F3a aún sin entrada en el catálogo i18n (fuera de alcance:
 /// el reducer sincroniza i18n + docs) resuelven por fallback a la etiqueta
 /// estática de `GROUP_*` vía `entry_display_name`, nunca vacío.
-pub const ALL_TOOLS: &[Tool; 88] = &[
+pub const ALL_TOOLS: &[Tool; 89] = &[
     Tool::Select,
     Tool::Point,
     Tool::Midpoint,
@@ -606,6 +608,7 @@ pub const ALL_TOOLS: &[Tool; 88] = &[
     Tool::DomainColoring,
     Tool::HeatMap,
     Tool::ComplexGrid,
+    Tool::ComplexContour,
     Tool::Slider,
     Tool::Checkbox,
     Tool::InputBox,
@@ -1068,6 +1071,32 @@ fn icon_advanced(painter: &Painter, rect: Rect, color: Color32) {
     painter.circle_stroke(c, r, Stroke::new(1.5, color));
 }
 
+/// Contorno complejo: lazo alrededor de un punto singular (el polo) con una
+/// punta de flecha que marca el sentido de recorrido.
+fn icon_complex_contour(painter: &Painter, rect: Rect, color: Color32) {
+    let c = rect.center();
+    let r = rect.width() * 0.30;
+    let sw = Stroke::new(1.5, color);
+    let start = -0.35 * TAU;
+    let end = 0.72 * TAU;
+    let segments = 22;
+    let mut previous = c + vec2(r * start.cos(), r * start.sin());
+    for i in 1..=segments {
+        let a = start + (end - start) * i as f32 / segments as f32;
+        let next = c + vec2(r * a.cos(), r * a.sin());
+        painter.line_segment([previous, next], sw);
+        previous = next;
+    }
+    // Punta de flecha sobre el extremo del arco (sentido antihorario).
+    let tip = previous;
+    let tangent = vec2(-end.sin(), end.cos());
+    let normal = vec2(-tangent.y, tangent.x);
+    painter.line_segment([tip, tip - tangent * 5.0 + normal * 3.2], sw);
+    painter.line_segment([tip, tip - tangent * 5.0 - normal * 3.2], sw);
+    // Polo en el centro: el lazo lo rodea.
+    painter.circle_filled(c, 2.2, color);
+}
+
 fn icon_pencil(painter: &Painter, rect: Rect, color: Color32) {
     let c = rect.center();
     let sw = Stroke::new(1.8, color);
@@ -1308,6 +1337,7 @@ pub const fn icon_for_tool(tool: Tool) -> IconFn {
         | Tool::DomainColoring
         | Tool::HeatMap
         | Tool::ComplexGrid => icon_advanced,
+        Tool::ComplexContour => icon_complex_contour,
         Tool::Slider | Tool::Button | Tool::Image | Tool::TrigAnimation => icon_advanced,
         Tool::Checkbox | Tool::InputBox | Tool::Text => icon_advanced,
     }
@@ -2169,12 +2199,12 @@ mod tests {
     #[test]
     fn all_87_tools_resolve_both_locales() {
         use crate::i18n::{tool_label, Locale};
-        assert_eq!(ALL_TOOLS.len(), 88, "Tool debe seguir en 88 variantes");
+        assert_eq!(ALL_TOOLS.len(), 89, "Tool debe seguir en 89 variantes");
         // Sin duplicados (cada variante una sola vez).
         let mut names: Vec<&str> = ALL_TOOLS.iter().map(Tool::name).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), 88);
+        assert_eq!(names.len(), 89);
         for tool in ALL_TOOLS {
             let slug = tool_slug(*tool);
             assert!(!slug.is_empty(), "sin slug para {:?}", tool);

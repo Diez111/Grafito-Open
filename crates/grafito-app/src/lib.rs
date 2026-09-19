@@ -25,6 +25,7 @@ pub(crate) mod assistant_preflight;
 pub(crate) mod canvas;
 pub(crate) mod classroom;
 pub(crate) mod commands;
+pub(crate) mod complex_contour;
 pub mod controllers;
 pub(crate) mod export;
 #[allow(dead_code)]

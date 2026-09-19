@@ -2,8 +2,8 @@
 #[allow(clippy::module_inception, clippy::approx_constant)]
 mod tests {
     use grafito_core::{
-        CircleObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj, LineObj, PointObj,
-        PolygonObj, Quadric3DObj, RelationOperator, TransformedObj,
+        CircleObj, ComplexIntegralObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj,
+        LineObj, PencilObj, PointObj, PolygonObj, Quadric3DObj, RelationOperator, TransformedObj,
     };
     use grafito_geometry::{Camera3D, Color, Point2, ViewTransform};
 
@@ -45,6 +45,127 @@ mod tests {
 
         assert!(!vertices.is_empty());
         assert!(!indices.is_empty());
+    }
+
+    #[test]
+    fn test_build_geometry_with_drawn_contour_emits_integral_label() {
+        // Contorno dibujado a mano (cuadrado) + ComplexIntegral de 1/z: el arm
+        // del render recorre el Pencil y agrega la etiqueta `∮ = …` como
+        // geometría de texto (antes del feature el trazo era no-op silencioso).
+        let mut doc = Document::new();
+        let pencil = PencilObj::new(vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, 1.0),
+            Point2::new(-1.0, -1.0),
+        ])
+        .with_label("trazo");
+        let pencil_id = pencil.id;
+        doc.try_add_object(GeoObject::Pencil(pencil))
+            .expect("trazo");
+        let view = ViewTransform::new(800.0, 600.0);
+        let (without_label, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+
+        doc.try_add_object(GeoObject::ComplexIntegral(ComplexIntegralObj::new(
+            "1/z", pencil_id, false,
+        )))
+        .expect("integral");
+        let (with_label, _) = crate::Renderer::build_geometry_static(&doc, &view, false, false);
+        assert!(
+            with_label.len() > without_label.len(),
+            "la etiqueta del contorno agrega vértices: {} vs {}",
+            with_label.len(),
+            without_label.len()
+        );
+    }
+
+    /// Firma de geometría comparable: posiciones redondeadas a medio píxel,
+    /// ordenadas (independiente del orden de emisión).
+    fn geometry_signature(vertices: &[crate::Vertex]) -> Vec<(i32, i32)> {
+        let mut signature: Vec<(i32, i32)> = vertices
+            .iter()
+            .map(|vertex| {
+                (
+                    (vertex.position[0] * 2.0).round() as i32,
+                    (vertex.position[1] * 2.0).round() as i32,
+                )
+            })
+            .collect();
+        signature.sort_unstable();
+        signature.dedup();
+        signature
+    }
+
+    fn mapping_document(expr: &str) -> Document {
+        let mut document = Document::new();
+        let target = document
+            .try_add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                "x^2 + y^2",
+                "1",
+                RelationOperator::Less,
+            )))
+            .expect("disco unidad");
+        document
+            .try_add_object(GeoObject::ComplexMapping(
+                grafito_core::ComplexMappingObj::new_with_symbol(expr, target, "z"),
+            ))
+            .expect("mapeo");
+        document
+    }
+
+    #[test]
+    fn complex_mapping_identity_and_affine_maps_draw_geometry() {
+        // Regresión: `z`, `2*z` o `z^2+1` no estaban en la lista corta de
+        // `ConformalMap` y el mapeo entero era un no-op silencioso.
+        let view = ViewTransform::new(800.0, 600.0);
+        let mut baseline = Document::new();
+        baseline
+            .try_add_object(GeoObject::ImplicitCurve(ImplicitCurveObj::new(
+                "x^2 + y^2",
+                "1",
+                RelationOperator::Less,
+            )))
+            .expect("disco");
+        let (baseline_vertices, _) =
+            crate::Renderer::build_geometry_static(&baseline, &view, false, false);
+        for expr in ["z", "2*z", "z + 1", "z^2 + 1", "i*z"] {
+            let document = mapping_document(expr);
+            let (vertices, _) =
+                crate::Renderer::build_geometry_static(&document, &view, false, false);
+            assert!(
+                vertices.len() > baseline_vertices.len(),
+                "ComplexMapping[{expr}] debe dibujar geometría (no-op silencioso)"
+            );
+        }
+    }
+
+    #[test]
+    fn complex_mapping_reference_lattice_shows_power_deformation() {
+        // La frontera del disco se preserva bajo z y z^5 (mismo círculo), pero
+        // la retícula de referencia debe verse claramente distinta.
+        let view = ViewTransform::new(800.0, 600.0);
+        let identity = mapping_document("z");
+        let power = mapping_document("z^5");
+        let (identity_vertices, _) =
+            crate::Renderer::build_geometry_static(&identity, &view, false, false);
+        let (power_vertices, _) =
+            crate::Renderer::build_geometry_static(&power, &view, false, false);
+        let identity_signature = geometry_signature(&identity_vertices);
+        let power_signature = geometry_signature(&power_vertices);
+        assert!(!power_signature.is_empty(), "z^5 dibuja retícula");
+        let common = power_signature
+            .iter()
+            .filter(|point| identity_signature.binary_search(point).is_ok())
+            .count();
+        let union = identity_signature.len() + power_signature.len() - common;
+        let distinct = union - common;
+        // La frontera (mismo círculo) y los radios sobre los ejes coinciden;
+        // el resto de la retícula debe deformarse visiblemente (≥25%).
+        assert!(
+            distinct * 100 >= union * 25,
+            "z y z^5 deben diferir en la retícula (distintos {distinct} de {union})"
+        );
     }
 
     #[test]

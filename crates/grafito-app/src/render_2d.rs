@@ -1913,8 +1913,19 @@ mod overlay_layer_tests {
             ))),
             document.add_object(GeoObject::VectorField2D(VectorField2DObj::new("x", "y"))),
         ];
+        // Solo lo no-parseable queda en CPU (el comando ya lo rechaza al
+        // crear). Lo parseable —reconocido o no, p.ej. `z^2+1` o `gamma(z)`—
+        // va a GPU, que dibuja por segmento independiente sin cuerdas.
         for target in targets {
             assert!(!is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^", target)),
+            ));
+            assert!(is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^2+1", target)),
+            ));
+            assert!(is_gpu_base_geometry(
                 &document,
                 &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
             ));
@@ -1944,17 +1955,21 @@ mod overlay_layer_tests {
         for target in targets {
             assert!(!is_gpu_base_geometry(
                 &document,
-                &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^", target)),
             ));
             assert!(is_gpu_base_geometry(
                 &document,
                 &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", target)),
             ));
+            assert!(is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^2+1", target)),
+            ));
         }
     }
 
     #[test]
-    fn complex_mapping_analytic_curves_route_to_gpu_only_when_recognized() {
+    fn complex_mapping_analytic_curves_route_to_gpu_when_parseable() {
         let mut document = Document::new();
         let targets = [
             document.add_object(GeoObject::Ellipse(EllipseObj::new(
@@ -1985,9 +2000,13 @@ mod overlay_layer_tests {
                 &document,
                 &GeoObject::ComplexMapping(ComplexMappingObj::new("1/z", target)),
             ));
+            assert!(is_gpu_base_geometry(
+                &document,
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^2+1", target)),
+            ));
             assert!(!is_gpu_base_geometry(
                 &document,
-                &GeoObject::ComplexMapping(ComplexMappingObj::new("gamma(z)", target)),
+                &GeoObject::ComplexMapping(ComplexMappingObj::new("z^", target)),
             ));
         }
     }
@@ -6713,6 +6732,94 @@ impl GrafitoApp {
                         painter.line_segment([pos1, pos2], stroke);
                     }
                     return;
+                }
+
+                // Camino genérico para ImplicitCurve con expresión NO reconocida
+                // (p.ej. `z^2+1`, que no es un `ConformalMap`): dibujo por
+                // segmento independiente. El camino genérico de abajo aplana
+                // todos los segmentos de marching-squares en una sola
+                // polilínea y une el fin de un segmento con el inicio del
+                // siguiente: esas cuerdas a través del interior son las
+                // "rayas" verticales del reporte. Acá solo se unen puntos
+                // consecutivos DENTRO del mismo segmento fuente, sin
+                // asíntotas inventadas en los cortes (no hay singularidad,
+                // solo fin de segmento). Sin relleno: el mapa no es
+                // globalmente invertible (2 preimágenes), honesto es solo
+                // contorno (la retícula GPU muestra la deformación).
+                if let GeoObject::ImplicitCurve(ic) = target {
+                    if conformal_map.is_none() {
+                        if !implicit_curve_cache_matches_request(
+                            ic,
+                            (xmin, xmax, ymin, ymax),
+                            implicit_curve_grid_size(canvas_rect, self.document.render_quality),
+                            &self.document.variables,
+                            self.document.render_quality,
+                        ) {
+                            return;
+                        }
+                        let mut source_segments = Vec::new();
+                        for (_level, segments) in self.document.implicit_curve_segments(cm.target) {
+                            for (a, b) in segments {
+                                if (a.x - b.x).hypot(a.y - b.y) >= 1e-3 {
+                                    source_segments.push((a, b));
+                                }
+                            }
+                        }
+                        if source_segments.is_empty() {
+                            return;
+                        }
+                        let mut cmap: HashMap<String, Complex64> = self
+                            .document
+                            .variables
+                            .iter()
+                            .map(|(name, val)| (name.clone(), Complex64::new(*val, 0.0)))
+                            .collect();
+                        let base_symbol = self.document.complex_base_symbol.clone();
+                        cmap.insert(base_symbol.clone(), Complex64::new(0.0, 0.0));
+                        let stroke = Stroke::new(2.0, to_color32(cm.color));
+                        let to_screen = |world: Point2| -> Pos2 {
+                            let s = view.world_to_screen(world);
+                            canvas_rect.min + Vec2::new(s.x, s.y)
+                        };
+                        for (a, b) in &source_segments {
+                            let n = 16;
+                            let mut prev: Option<Pos2> = None;
+                            for i in 0..=n {
+                                let t = i as f64 / n as f64;
+                                let z =
+                                    Complex64::new(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y));
+                                if let Some(slot) = cmap.get_mut(base_symbol.as_str()) {
+                                    *slot = z;
+                                }
+                                let w = match parsed_expr.eval(&cmap) {
+                                    Ok(v) if v.re.is_finite() && v.im.is_finite() => {
+                                        grafito_render::interpolate_complex_mapping_point(
+                                            Point2::new(z.re, z.im),
+                                            Point2::new(v.re, v.im),
+                                            homotopy_factor,
+                                        )
+                                    }
+                                    _ => {
+                                        prev = None;
+                                        continue;
+                                    }
+                                };
+                                if !w.x.is_finite() || !w.y.is_finite() {
+                                    prev = None;
+                                    continue;
+                                }
+                                let screen_pt = to_screen(w);
+                                if let Some(p) = prev {
+                                    let d = screen_pt - p;
+                                    if d.x.abs() < 300.0 && d.y.abs() < 300.0 {
+                                        painter.line_segment([p, screen_pt], stroke);
+                                    }
+                                }
+                                prev = Some(screen_pt);
+                            }
+                        }
+                        return;
+                    }
                 }
 
                 // 4) Generar la lista de puntos complejos z que vamos a

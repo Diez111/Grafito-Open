@@ -146,3 +146,12 @@
 - [x] F14.5.1 Gruntz cableado en el comando `Limit` (L'Hôpital + jerarquía; Richardson de fallback) + test `limit_wires_the_gruntz_engine_for_indeterminate_forms`
 - [ ] F14.5.2 export `.ggb` + PDF multipágina + selector ortho (diferido: features M, no bugs; wiring ortho existe en canvas con `allow(dead_code)`)
 - [ ] F14.5.3 Gates Ola 5 + commit
+
+## Ola CX — Contorno complejo dibujado a mano (2026-09-19) [DONE]
+- [x] CX.1 complex: GL16 por segmento + Kahan + `ContourAccumulator` + `resample_path` ≤2048 + `circle_contour_integral` + `format_complex_rounded` (9 tests)
+- [x] CX.2 core/render: `GeoObject::accepts_complex_contour`; `complex_contour::contour_path` (Pencil/Polyline/Spline/Arc/Bézier/Paramétrica/Polígono/Línea; círculo analítico) + etiqueta `∮`/`ΣRes` (3 tests)
+- [x] CX.3 command: validación honesta del target + tests de trazo/círculo/punto (3 tests)
+- [x] CX.4 ui: `Tool::ComplexContour` (89), grupo/slug/icono, i18n 324 claves ×6 idiomas (counts pinneados)
+- [x] CX.5 app: panel “Integral de contorno”, armado con prefill, input con imán/estabilizador/cierre/suavizado, overlay en vivo, modo círculo, undo atómico del par (9 tests)
+- [x] CX.6 snap liviano (`snap_point_light`: objetos/ejes/grid sin features)
+- [x] CX.7 docs: presupuestos en architecture.md + este plan/tasks

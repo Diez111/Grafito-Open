@@ -211,6 +211,67 @@ fn complex_mapping_accepts_label_with_parentheses() {
 }
 
 #[test]
+fn complex_mapping_target_faltante_sugiere_alternativa() {
+    // README mostraba `ComplexMapping[exp(z), c]` sin crear `c`: el error debe
+    // guiar (crear el target o usar la forma de 1 arg con el disco I).
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[exp(z), c]".to_string());
+    match outcome {
+        CommandOutcome::Error(message) => {
+            assert!(message.contains("no encontrado"), "mensaje: {message}");
+            assert!(
+                message.contains("ComplexMapping[expr]") && message.contains("Circle[(0, 0), 3]"),
+                "el error sugiere la salida con sintaxis válida: {message}"
+            );
+        }
+        other => panic!("esperaba error honesto, llegó {other:?}"),
+    }
+    // Y la forma de 1 arg sí funciona en documento vacío.
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[exp(z)]".to_string());
+    assert!(matches!(outcome, CommandOutcome::Message(_)), "{outcome:?}");
+    assert!(doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))));
+}
+
+#[test]
+fn complex_mapping_expression_invalida_da_error_honesto() {
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[z^]".to_string());
+    match outcome {
+        CommandOutcome::Error(message) => {
+            assert!(
+                message.contains("inválida") || message.contains("no se pudo evaluar"),
+                "error honesto: {message}"
+            );
+        }
+        other => panic!("esperaba error honesto, llegó {other:?}"),
+    }
+    assert!(
+        !doc.objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))),
+        "no crea objeto muerto"
+    );
+}
+
+#[test]
+fn complex_mapping_afin_y_polinomio_son_validos() {
+    // `z` y `z^2+1` no eran reconocidos por la lista corta: el objeto quedaba
+    // muerto. Ahora crean un mapeo válido (y el render los dibuja).
+    for expr in ["z", "2*z", "z^2+1"] {
+        let mut doc = Document::new();
+        let outcome = process_input(&mut doc, &mut format!("ComplexMapping[{expr}]"));
+        assert!(
+            matches!(outcome, CommandOutcome::Message(_)),
+            "ComplexMapping[{expr}] debe crear: {outcome:?}"
+        );
+        assert!(doc
+            .objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))));
+    }
+}
+
+#[test]
 fn complex_mapping_single_arg_maps_unit_disk() {
     let mut doc = Document::new();
     doc.add_object(GeoObject::Function(FunctionObj::new("x").with_label("f")));
@@ -261,4 +322,122 @@ fn complex_mapping_rejects_targets_without_a_mappable_2d_geometry() {
         before,
         "unsupported targets must not create invisible mappings"
     );
+}
+
+// snippet para pegar temporalmente
+#[test]
+fn readme_complex_mapping_examples_run_end_to_end() {
+    // El bloque del README debe correr tal cual se lee: primero el target
+    // (la etiqueta es la automática) y después el mapeo.
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "Circle[(0, 0), 3]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_) | CommandOutcome::Ok),
+        "Circle[(0, 0), 3] debe crear: {outcome:?}"
+    );
+    let label = doc
+        .objects_iter()
+        .find_map(|(_, object)| match object {
+            GeoObject::Circle(circle) => Some(circle.label.clone()),
+            _ => None,
+        })
+        .expect("círculo creado");
+    assert!(!label.is_empty(), "etiqueta automática presente");
+    for expr in ["1/z", "exp(z)", "z^2"] {
+        let command = format!("ComplexMapping[{expr}, {label}]");
+        let outcome = process_input(&mut doc, &mut command.clone());
+        assert!(
+            matches!(outcome, CommandOutcome::Message(_)),
+            "{command} debe mapear: {outcome:?}"
+        );
+    }
+    assert!(doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_))));
+}
+
+#[test]
+fn circle_con_etiqueta_inexistente_guia_en_vez_de_fallar_seco() {
+    // El toast viejo sugería `Circle[C, 3]`: si alguien lo prueba, el error
+    // debe explicar que el centro no existe y cómo crearlo.
+    let mut doc = Document::new();
+    let outcome = process_input(&mut doc, &mut "Circle[C, 3]".to_string());
+    match outcome {
+        CommandOutcome::Error(message) => {
+            assert!(message.contains("no existe"), "mensaje: {message}");
+            assert!(
+                message.contains("(0, 0)"),
+                "guía con coordenadas/creación: {message}"
+            );
+        }
+        other => panic!("esperaba error con guía, llegó {other:?}"),
+    }
+    // Con el punto C creado, `Circle[C, 3]` es una construcción válida.
+    process_input(&mut doc, &mut "C = (0, 0)".to_string());
+    let outcome = process_input(&mut doc, &mut "Circle[C, 3]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Ok | CommandOutcome::Message(_)),
+        "Circle[C, 3] con C existente: {outcome:?}"
+    );
+    // Y `c` en minúscula encuentra la etiqueta `C` (variante única).
+    let outcome = process_input(&mut doc, &mut "Circle[c, 2]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Ok | CommandOutcome::Message(_)),
+        "Circle[c, 2] resuelve a C: {outcome:?}"
+    );
+}
+
+#[test]
+fn etiqueta_que_existe_pero_no_es_punto_explica_que_es() {
+    // Escenario real: `Circle[(0,0),3]` deja `C` como círculo; después
+    // `Circle[C, 3]` debe decir que C es un círculo y cómo seguir.
+    let mut doc = Document::new();
+    process_input(&mut doc, &mut "Circle[(0, 0), 3]".to_string());
+    let outcome = process_input(&mut doc, &mut "Circle[C, 3]".to_string());
+    match outcome {
+        CommandOutcome::Error(message) => {
+            assert!(
+                message.contains("no es un punto (es Circle)"),
+                "tipo en el mensaje: {message}"
+            );
+            assert!(message.contains("(0, 0)"), "salida sugerida: {message}");
+        }
+        other => panic!("esperaba error explicativo, llegó {other:?}"),
+    }
+}
+
+#[test]
+fn target_en_minuscula_encuentra_la_etiqueta_mayuscula() {
+    // `Circle[(0,0),3]` auto-etiqueta `C`; el usuario escribe `c`. La
+    // búsqueda compleja cae a case-insensitive única (sin cambiar la
+    // semántica global de etiquetas).
+    let mut doc = Document::new();
+    process_input(&mut doc, &mut "Circle[(0, 0), 3]".to_string());
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/z, c]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "`c` debe resolver a `C`: {outcome:?}"
+    );
+    let outcome = process_input(&mut doc, &mut "ComplexIntegral[1/z, c]".to_string());
+    assert!(
+        matches!(outcome, CommandOutcome::Message(_)),
+        "ComplexIntegral con `c`: {outcome:?}"
+    );
+}
+
+#[test]
+fn asignacion_con_comando_da_error_honesto_sin_objeto_basura() {
+    // `c = Circle[(0, 0), 3]` no es sintaxis válida: antes creaba una curva
+    // implícita basura; ahora responde con error y no toca el documento.
+    let mut doc = Document::new();
+    let before = doc.object_count();
+    let outcome = process_input(&mut doc, &mut "c = Circle[(0, 0), 3]".to_string());
+    match outcome {
+        CommandOutcome::Error(message) => {
+            assert!(message.contains("No se pudo interpretar"), "{message}");
+            assert!(message.contains("x/y"), "guía de sintaxis: {message}");
+        }
+        other => panic!("esperaba error honesto, llegó {other:?}"),
+    }
+    assert_eq!(doc.object_count(), before, "sin objeto fantasma");
 }

@@ -159,9 +159,11 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
-| Toolbar | Tool variantes | 88 | grafito-ui/src/lib.rs `pub enum Tool` (Ola 1.6 suma `Text`; Parallel/Arc/Sector F9 ya incluidos) |
+| Toolbar | Tool variantes | 89 | grafito-ui/src/lib.rs `pub enum Tool` (Ola 1.6 suma `Text`; contorno complejo suma `ComplexContour`) |
 | App | Perspectivas | 10 (Ctrl+Shift+1..9,0) | grafito-app/src/lib.rs:90-111 + app.rs:4236-4242 |
 | Workspace | crates | 18 members (tex incluido) + root; 19 dirs en `crates/` | `Cargo.toml` members (app, agent, anim, assistant, assistant-types, classroom, command, complex, core, geometry, ggb, pedagogy, plugins, profile, render, tex, ui, whiteboard) + `crates/grafito-release-tests/` no listado |
+| Complejo | Contorno a mano (cuadratura) | ≤ `MAX_CONTOUR_POINTS` 10 000 puntos; ≥ 2 puntos; cuadratura ≤ `MAX_QUADRATURE_SEGMENTS` 2 048 segmentos × Gauss–Legendre 16 | complex/src/math/complex_calculus.rs (`contour_integral`, `ContourAccumulator`, `circle_contour_integral`) |
+| Complejo | Guías del contorno | cierre automático ≤ 12 px, muestras cada ≥ 1.5 px, estabilizador 0.0–0.8, suavizado Catmull-Rom ×6 | app/src/complex_contour.rs (`CLOSURE_RADIUS_PX`, `MIN_SAMPLE_STEP_PX`) |
 | UI | BREAKPOINT_COMPACT | 1360 | tokens.rs:142 (is_compact_viewport :188-191) |
 | UI | PANEL_LEFT_DEFAULT | 260 (min 180, max 45% viewport via PANEL_LEFT_MAX_FRACTION) | tokens.rs + panels.rs/algebra.rs |
 | UI | PANEL_LEFT_MIN | 180 | tokens.rs |

@@ -4866,6 +4866,17 @@ fn deferred_file_actions_are_single_slot_and_dialog_decisions_have_priority() {
 // ── AG14: Headless panel render tests + teaching_ui mappings ─────────────────
 
 #[cfg(test)]
+/// Textos visibles de una corrida headless (evidencia de render de UI).
+fn headless_texts(output: &egui::FullOutput) -> impl Iterator<Item = &str> {
+    output.shapes.iter().filter_map(|clipped| {
+        if let egui::epaint::Shape::Text(text) = &clipped.shape {
+            Some(text.galley.text())
+        } else {
+            None
+        }
+    })
+}
+
 fn headless_raw_input() -> egui::RawInput {
     egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(
@@ -5074,6 +5085,22 @@ fn headless_complex_and_statistics_panels_render_without_panic() {
         crate::panels::draw_complex_panel(&mut app, ctx);
     });
     assert!(out_complex.shapes.len() < 10_000);
+    // La sección del contorno a mano existe y se dibuja (título visible).
+    assert!(
+        headless_texts(&out_complex).any(|text| text.contains("Integral de contorno")),
+        "el panel complejo debe mostrar la sección de contorno"
+    );
+    // Armado: la herramienta cambia y el panel guía al lienzo.
+    app.arm_complex_contour(crate::complex_contour::ComplexContourMode::Freehand)
+        .expect("f(z) por defecto es válida");
+    assert_eq!(app.current_tool, grafito_ui::Tool::ComplexContour);
+    let out_armed = ctx.run(headless_raw_input(), |ctx| {
+        crate::panels::draw_complex_panel(&mut app, ctx);
+    });
+    assert!(
+        headless_texts(&out_armed).any(|text| text.contains("Dibujá sobre el lienzo")),
+        "armado: el panel indica dibujar en el lienzo"
+    );
 
     let mut app2 = crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Statistics);
     // inject some data to exercise statistics path without panic

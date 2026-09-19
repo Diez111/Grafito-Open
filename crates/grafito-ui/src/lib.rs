@@ -123,6 +123,8 @@ pub enum Tool {
     DomainColoring,
     HeatMap,
     ComplexGrid,
+    /// Contorno complejo dibujado a mano (integra f(z) sobre el trazo).
+    ComplexContour,
     TrigAnimation,
     // Numeric constraints
     DistanceConstraint,
@@ -218,6 +220,7 @@ impl Tool {
             Tool::DomainColoring => "DomainColoring",
             Tool::HeatMap => "HeatMap",
             Tool::ComplexGrid => "ComplexGrid",
+            Tool::ComplexContour => "ComplexContour",
             Tool::TrigAnimation => "TrigAnimation",
             Tool::DistanceConstraint => "DistanceConstraint",
             Tool::AngleConstraint => "AngleConstraint",
@@ -309,6 +312,7 @@ impl Tool {
             | Tool::DomainColoring
             | Tool::HeatMap
             | Tool::ComplexGrid
+            | Tool::ComplexContour
             | Tool::Coincident
             | Tool::Horizontal
             | Tool::Vertical

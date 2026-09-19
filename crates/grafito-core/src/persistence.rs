@@ -1736,6 +1736,49 @@ mod tests {
     }
 
     #[test]
+    fn contorno_complejo_sobre_trazo_sobrevive_roundtrip() {
+        // El par del contorno a mano (trazo + integral que lo referencia) debe
+        // serializar, releerse y conservar el target exacto.
+        let mut document = Document::new();
+        let pencil = crate::PencilObj::new(vec![
+            Point2::new(-1.0, -1.0),
+            Point2::new(1.0, -1.0),
+            Point2::new(1.0, 1.0),
+            Point2::new(-1.0, -1.0),
+        ])
+        .with_label("trazo");
+        let pencil_id = pencil.id;
+        document
+            .try_add_object(GeoObject::Pencil(pencil))
+            .expect("trazo");
+        document
+            .try_add_object(GeoObject::ComplexIntegral(crate::ComplexIntegralObj::new(
+                "1/z", pencil_id, false,
+            )))
+            .expect("integral");
+
+        let serialized = serialize_document(&document).expect("serializa");
+        let restored = deserialize_document(&serialized).expect("deserializa");
+        let integral = restored
+            .objects_iter()
+            .find_map(|(_, object)| match object {
+                GeoObject::ComplexIntegral(integral) => Some(integral),
+                _ => None,
+            })
+            .expect("integral restaurada");
+        assert_eq!(integral.target, pencil_id, "target conservado");
+        assert_eq!(integral.expr, "1/z");
+        let pencil = restored
+            .objects_iter()
+            .find_map(|(_, object)| match object {
+                GeoObject::Pencil(pencil) => Some(pencil),
+                _ => None,
+            })
+            .expect("trazo restaurado");
+        assert_eq!(pencil.points.len(), 4);
+    }
+
+    #[test]
     fn atomic_write_replaces_destination_only_after_a_complete_write() {
         let path = temporary_path("complete.json");
         fs::write(&path, "old document").expect("seed old document");

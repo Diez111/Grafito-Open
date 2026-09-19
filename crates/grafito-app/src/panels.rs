@@ -3765,6 +3765,109 @@ pub(crate) fn draw_complex_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
             }
 
             ui.add_space(SPACE_SM);
+
+            // ── Integral de contorno dibujada a mano ──────────────────────
+            // f(z) + guías → arma la herramienta `ComplexContour`: el trazo
+            // acumula ∮ f dz en vivo y al soltar quedan Pencil + Integral.
+            ui.label(
+                egui::RichText::new("Integral de contorno")
+                    .color(hdr_col)
+                    .size(TYPE_SM)
+                    .strong(),
+            );
+            ui.add_space(SPACE_XS);
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut app.complex_contour.settings.expr)
+                        .desired_width(ui.available_width() - 30.0)
+                        .hint_text("f(z) — ej. 1/z"),
+                );
+                let can_prefill = app.selected_complex_expr().is_some();
+                if ui
+                    .add_enabled(
+                        can_prefill,
+                        egui::Button::new(egui::RichText::new("↧").size(TYPE_SM))
+                            .frame(false),
+                    )
+                    .on_hover_text("Usar f(z) del objeto seleccionado")
+                    .clicked()
+                {
+                    if let Some(expr) = app.selected_complex_expr() {
+                        app.complex_contour.settings.expr = expr;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut app.complex_contour.settings.residues, "Residuos (Gauss)");
+                ui.checkbox(&mut app.complex_contour.settings.snap, "Imán");
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut app.complex_contour.settings.auto_close,
+                    "Cierre automático",
+                );
+                ui.checkbox(&mut app.complex_contour.settings.smooth, "Suavizar");
+            });
+            let mut stabilizer = app.complex_contour.settings.stabilizer;
+            ui.add(
+                egui::Slider::new(&mut stabilizer, 0.0..=0.8)
+                    .text("Estabilizador")
+                    .show_value(false),
+            );
+            app.complex_contour.settings.stabilizer = stabilizer;
+            let armed = app.current_tool == grafito_ui::Tool::ComplexContour;
+            ui.horizontal(|ui| {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            egui::RichText::new("Dibujar contorno").size(TYPE_XS),
+                        )
+                        .frame(true),
+                    )
+                    .on_hover_text(
+                        "Dibujá con el mouse/stylus: el valor ∮ f(z) dz aparece en vivo; Esc cancela",
+                    )
+                    .clicked()
+                {
+                    let _ = app.arm_complex_contour(
+                        crate::complex_contour::ComplexContourMode::Freehand,
+                    );
+                }
+                if ui
+                    .add(
+                        egui::Button::new(egui::RichText::new("Círculo").size(TYPE_XS))
+                            .frame(true),
+                    )
+                    .on_hover_text("Clic en el centro (con imán) y arrastrá el radio")
+                    .clicked()
+                {
+                    let _ = app.arm_complex_contour(
+                        crate::complex_contour::ComplexContourMode::Circle,
+                    );
+                }
+            });
+            if armed {
+                ui.label(
+                    egui::RichText::new(match app.complex_contour.settings.mode {
+                        crate::complex_contour::ComplexContourMode::Freehand => {
+                            "Dibujá sobre el lienzo · Esc para salir"
+                        }
+                        crate::complex_contour::ComplexContourMode::Circle => {
+                            "Centro y radio sobre el lienzo · Esc para salir"
+                        }
+                    })
+                    .color(accent)
+                    .size(TYPE_XS),
+                );
+            } else if let Some(value) = &app.complex_contour.last_value {
+                ui.label(
+                    egui::RichText::new(format!("Último valor: {value}"))
+                        .color(txt_dim)
+                        .size(TYPE_XS),
+                );
+            }
+
+            ui.add_space(SPACE_SM);
             let content_height = ui.available_height();
             egui::ScrollArea::vertical()
                 .id_salt("complex_panel_content")

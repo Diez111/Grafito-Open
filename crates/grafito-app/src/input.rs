@@ -745,6 +745,13 @@ impl GrafitoApp {
             .map(|p| canvas_rect.contains(p))
             .unwrap_or(false);
 
+        // El trazo de contorno muere si la herramienta cambió (Esc, panel, …):
+        // nunca queda un lazo a medio dibujar colgado del estado.
+        if self.current_tool != Tool::ComplexContour && self.complex_contour.live.is_some() {
+            self.complex_contour.live = None;
+            self.complex_contour.snap_marker = None;
+        }
+
         // ── Drag lifecycle: start / distance / stop ──────────────────────────
         if response.drag_started() {
             #[cfg(feature = "profile")]
@@ -832,6 +839,19 @@ impl GrafitoApp {
             }
         }
 
+        // Inicio del contorno complejo: mismo ciclo de drag que el lápiz, pero
+        // el trazo vive en el estado del contorno (overlay + valor en vivo) y
+        // recién se persiste al soltar.
+        if self.current_tool == Tool::ComplexContour
+            && response.drag_started_by(PointerButton::Primary)
+            && !space_pressed
+        {
+            if let Some(pos) = current_pos {
+                let shift = ui.input(|i| i.modifiers.shift);
+                self.begin_complex_contour_at(pos, canvas_rect, shift);
+            }
+        }
+
         // ── Compatibilidad con tabletas gráficas (stylus) ────────────────
         // Las tabletas y pantallas táctiles emiten presión desde el primer
         // frame, sin movimiento significativo, por lo que egui no marca
@@ -865,6 +885,22 @@ impl GrafitoApp {
                     ui.ctx().input(|input| input.time),
                 );
                 self.tool_state.drawing_pencil = id;
+                self.is_view_changing = true;
+            }
+        }
+
+        // Stylus: el contorno también arranca con `button_down` directo.
+        if !space_pressed
+            && pointer_in_canvas
+            && (pointer.button_down(PointerButton::Primary)
+                || pointer.button_down(PointerButton::Secondary)
+                || pointer.button_down(PointerButton::Middle))
+            && self.current_tool == Tool::ComplexContour
+            && self.complex_contour.live.is_none()
+        {
+            if let Some(pos) = current_pos {
+                let shift = ui.input(|i| i.modifiers.shift);
+                self.begin_complex_contour_at(pos, canvas_rect, shift);
                 self.is_view_changing = true;
             }
         }
@@ -978,6 +1014,20 @@ impl GrafitoApp {
                     }
                 }
                 // Forzamos repintado para que el PencilObj actualizado se vea.
+                self.is_view_changing = true;
+            }
+        }
+
+        // ── Contorno complejo: capturar muestras durante el drag ──────────
+        if !panning
+            && self.current_tool == Tool::ComplexContour
+            && (pointer.button_down(PointerButton::Primary)
+                || pointer.button_down(PointerButton::Secondary)
+                || pointer.button_down(PointerButton::Middle))
+        {
+            if let Some(pos) = current_pos {
+                let shift = ui.input(|i| i.modifiers.shift);
+                self.extend_complex_contour_at(pos, canvas_rect, shift);
                 self.is_view_changing = true;
             }
         }
@@ -1265,6 +1315,22 @@ impl GrafitoApp {
             // el lienzo; el pintor se recorta al canvas para no invadir paneles.
             let overlay_painter = ui.painter().with_clip_rect(canvas_rect);
             self.update_tool_ghost(world, &overlay_painter, canvas_rect);
+
+            // Overlay del contorno vivo: trazo + imán + chip con el valor.
+            if self.current_tool == Tool::ComplexContour {
+                if let Some(live) = self.complex_contour.live.as_ref() {
+                    let theme = grafito_ui::theme::current_theme(ui.ctx());
+                    crate::complex_contour::draw_overlay(
+                        &overlay_painter,
+                        canvas_rect,
+                        self.document.view(),
+                        live,
+                        &self.complex_contour.settings,
+                        self.complex_contour.snap_marker.as_ref(),
+                        theme,
+                    );
+                }
+            }
         }
 
         // ── Cleanup drag state ───────────────────────────────────────────────
@@ -1291,6 +1357,10 @@ impl GrafitoApp {
                         self.document.remove_object(id);
                     }
                 }
+            }
+            if self.current_tool == Tool::ComplexContour {
+                self.finish_complex_contour();
+                self.complex_contour.snap_marker = None;
             }
             self.canvas_is_panning = false;
             self.canvas_drag_start = None;
@@ -1324,6 +1394,10 @@ impl GrafitoApp {
                 if too_short {
                     self.document.remove_object(id);
                 }
+            }
+            if self.current_tool == Tool::ComplexContour {
+                self.finish_complex_contour();
+                self.complex_contour.snap_marker = None;
             }
             // Eraser: al soltar el botón, limpiamos `last_erased` para
             // permitir borrar el mismo objeto en un trazo posterior.
@@ -2377,5 +2451,106 @@ mod coverage_sweep_input_pure {
             egui::Rect::from_min_size(egui::Pos2::new(0.0, 0.0), egui::Vec2::new(200.0, 200.0));
         assert!(canvas_local_pointer(rect, egui::Pos2::new(10.0, 10.0)).is_some());
         assert!(canvas_local_pointer(rect, egui::Pos2::new(500.0, 500.0)).is_none());
+    }
+}
+
+/// Contorno complejo: arranque, captura y guías del trazo dibujado a mano.
+impl GrafitoApp {
+    /// Punto de mundo del puntero dentro del canvas.
+    fn contour_world_at(&self, pos: egui::Pos2, canvas_rect: Rect) -> Point2 {
+        let local = pos - canvas_rect.min;
+        let world = self
+            .document
+            .view()
+            .screen_to_world(GlamVec2::new(local.x, local.y));
+        Point2::new(world.x, world.y)
+    }
+
+    /// Imán liviano (objetos/ejes/cuadrícula) para las muestras del contorno.
+    /// Shift lo libera; con el imán apagado devuelve el punto crudo.
+    fn contour_snap(
+        &self,
+        world: Point2,
+        shift: bool,
+    ) -> (Point2, Option<crate::snap::SnapResult>) {
+        if !self.complex_contour.settings.snap {
+            return (world, None);
+        }
+        let result = crate::snap::snap_point_light(
+            world,
+            &self.document,
+            self.document.view().scale,
+            &self.snap_config,
+            shift,
+        );
+        let point = result.point;
+        (point, Some(result))
+    }
+
+    /// Arranca el trazo vivo del contorno (libre o círculo) con imán.
+    pub(crate) fn begin_complex_contour_at(
+        &mut self,
+        pos: egui::Pos2,
+        canvas_rect: Rect,
+        shift: bool,
+    ) {
+        if self.complex_contour.live.is_some() {
+            return;
+        }
+        let world = self.contour_world_at(pos, canvas_rect);
+        let (point, marker) = self.contour_snap(world, shift);
+        self.complex_contour.snap_marker = marker;
+        let settings = self.complex_contour.settings.clone();
+        let result = match settings.mode {
+            crate::complex_contour::ComplexContourMode::Freehand => {
+                crate::complex_contour::start_freehand(&self.document, point, &settings)
+            }
+            crate::complex_contour::ComplexContourMode::Circle => {
+                crate::complex_contour::start_circle(&self.document, point, &settings)
+            }
+        };
+        match result {
+            Ok(live) => {
+                self.complex_contour.live = Some(live);
+                self.last_interaction_time = Instant::now();
+            }
+            Err(error) => {
+                self.complex_contour.live = None;
+                self.notify(error, grafito_ui::toast::ToastKind::Error);
+            }
+        }
+    }
+
+    /// Captura una muestra del trazo vivo (aplica imán y cierre automático).
+    pub(crate) fn extend_complex_contour_at(
+        &mut self,
+        pos: egui::Pos2,
+        canvas_rect: Rect,
+        shift: bool,
+    ) {
+        let world = self.contour_world_at(pos, canvas_rect);
+        let view_scale = self.document.view().scale;
+        let settings = self.complex_contour.settings.clone();
+        let (mut point, marker) = self.contour_snap(world, shift);
+        self.complex_contour.snap_marker = marker;
+
+        if settings.mode == crate::complex_contour::ComplexContourMode::Circle {
+            self.complex_contour.capture_circle(point);
+            return;
+        }
+
+        // Imán de cierre: si el trazo vuelve cerca del inicio, clava el primer
+        // punto (lazo limpio para ∮); pisa al imán de objetos.
+        if settings.auto_close {
+            let live = self.complex_contour.live.as_ref();
+            if let Some(first) = live.and_then(|live| live.points().first().copied()) {
+                let long_enough = live.map(|live| live.points().len() >= 3).unwrap_or(false);
+                if long_enough && crate::complex_contour::should_close(first, point, view_scale) {
+                    point = first;
+                    self.complex_contour.snap_marker = None;
+                }
+            }
+        }
+        self.complex_contour.capture_freehand(point, view_scale);
     }
 }

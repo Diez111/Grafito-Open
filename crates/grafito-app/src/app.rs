@@ -1699,6 +1699,8 @@ pub struct GrafitoApp {
     pub show_grid: bool,
     pub snap_to_grid: bool,
     pub snap_config: crate::snap::SnapConfig,
+    /// Contorno complejo dibujado a mano: ajustes, trazo vivo y último valor.
+    pub complex_contour: crate::complex_contour::ComplexContourState,
     pub exam_mode: bool,
     /// Salida de examen pendiente de confirmación (modal D2, anti-toque).
     /// `true` = mostrar modal; el lockdown sigue activo hasta confirmar.
@@ -2496,6 +2498,7 @@ impl GrafitoApp {
             show_grid: config.show_grid,
             snap_to_grid: config.snap_to_grid,
             snap_config: config.snap,
+            complex_contour: crate::complex_contour::ComplexContourState::default(),
             exam_mode: false,
             exam_exit_confirm: false,
             dark_mode,
@@ -5213,6 +5216,137 @@ impl GrafitoApp {
             self.document.remove_object(id);
             self.selected_object = None;
         }
+    }
+
+    /// Expresión `f(z)` del objeto complejo seleccionado (si lo hay):
+    /// prefill del contorno a mano.
+    pub(crate) fn selected_complex_expr(&self) -> Option<String> {
+        let id = self.selected_object?;
+        match self.document.get_object(id)? {
+            GeoObject::ComplexGrid(grid) => Some(grid.expr.clone()),
+            GeoObject::ComplexMapping(mapping) => Some(mapping.expr.clone()),
+            _ => None,
+        }
+    }
+
+    /// Arma el contorno complejo: fija el modo, valida `f(z)` y activa la
+    /// herramienta. Con el campo vacío intenta el prefill del seleccionado.
+    /// `Err` honesto (además del toast) para los tests.
+    pub(crate) fn arm_complex_contour(
+        &mut self,
+        mode: crate::complex_contour::ComplexContourMode,
+    ) -> Result<(), String> {
+        if self.complex_contour.settings.expr.trim().is_empty() {
+            if let Some(expr) = self.selected_complex_expr() {
+                self.complex_contour.settings.expr = expr;
+            }
+        }
+        let expr = self.complex_contour.settings.expr.trim().to_string();
+        if expr.is_empty() {
+            let message =
+                "Contorno: escribí f(z) en el panel de Números Complejos (p. ej. 1/z).".to_string();
+            self.notify(message.clone(), grafito_ui::toast::ToastKind::Error);
+            return Err(message);
+        }
+        if grafito_complex::math::complex_expr::parse(&expr).is_err() {
+            let message = format!("Contorno: f(z) inválida: {expr}");
+            self.notify(message.clone(), grafito_ui::toast::ToastKind::Error);
+            return Err(message);
+        }
+        self.complex_contour.settings.mode = mode;
+        self.complex_contour.live = None;
+        self.complex_contour.last_value = None;
+        self.current_tool = Tool::ComplexContour;
+        self.clear_pending_action();
+        self.reset_tool_input();
+        Ok(())
+    }
+
+    /// Desarma el contorno (Esc, cambio de herramienta): tira el trazo vivo.
+    pub(crate) fn disarm_complex_contour(&mut self) {
+        self.complex_contour.live = None;
+    }
+
+    /// Cierra el trazo vivo: inserta `PencilObj` + `ComplexIntegralObj` en un
+    /// solo paso de undo y publica el valor. `time` es el reloj de egui.
+    pub(crate) fn finish_complex_contour(&mut self) {
+        use crate::complex_contour::FinishedContour;
+        if self.complex_contour.live.is_none() {
+            return;
+        }
+        let settings = self.complex_contour.settings.clone();
+        let view_scale = self.document.view().scale;
+        let mut finished = std::mem::take(&mut self.complex_contour).finish(view_scale);
+
+        // Valor final: para el círculo se calcula analítico en el momento; para
+        // el trazo ya lo trae `finish` (acumulador en vivo).
+        let (value, action, empty_hint) = match &finished {
+            FinishedContour::Empty => (None, "", ""),
+            FinishedContour::Freehand { value, .. } => (
+                value.clone(),
+                "Contorno complejo",
+                "Contorno: sin valor (¿polo sobre el trazo?)",
+            ),
+            FinishedContour::Circle { center, radius } => {
+                let value = grafito_complex::math::complex_expr::parse(settings.expr.trim())
+                    .ok()
+                    .and_then(|parsed| {
+                        grafito_complex::math::complex_calculus::circle_contour_integral(
+                            &parsed,
+                            num_complex::Complex64::new(center.x, center.y),
+                            *radius,
+                            grafito_complex::math::complex_calculus::CIRCLE_QUADRATURE_ARCS,
+                            &crate::complex_contour::document_complex_vars(&self.document),
+                            &self.document.complex_base_symbol.clone(),
+                        )
+                        .ok()
+                    })
+                    .map(|raw| crate::complex_contour::displayed_value(raw, settings.residues))
+                    .map(grafito_complex::math::complex_calculus::format_complex_rounded);
+                (
+                    value,
+                    "Contorno circular",
+                    "Círculo: sin valor (¿polo sobre la circunferencia?)",
+                )
+            }
+        };
+
+        let objects = crate::complex_contour::build_contour_objects(
+            std::mem::replace(&mut finished, FinishedContour::Empty),
+            &settings,
+            self.color_favorites[0],
+        );
+        if objects.is_empty() {
+            return;
+        }
+        match crate::app::commit_object_insertions(
+            &mut self.document,
+            &mut self.undo_stack,
+            &mut self.redo_stack,
+            objects,
+        ) {
+            Ok(ids) => {
+                if let Some(id) = ids.first() {
+                    self.selected_object = Some(*id);
+                }
+                self.mark_autosave_dirty();
+                self.complex_contour.last_value = value.clone();
+                let prefix = if settings.residues { "ΣRes" } else { "∮" };
+                let message = match value {
+                    Some(value) => format!("{prefix} = {value}"),
+                    None => empty_hint.to_string(),
+                };
+                self.notify(message, grafito_ui::toast::ToastKind::Info);
+                self.record_construction_step(action, Vec::new(), "");
+            }
+            Err(error) => {
+                self.notify(
+                    format!("Contorno: {error}"),
+                    grafito_ui::toast::ToastKind::Error,
+                );
+            }
+        }
+        // La herramienta queda armada para el siguiente trazo.
     }
 
     pub(crate) fn start_pending_action(&mut self, tool: Tool) {
@@ -9370,6 +9504,7 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         show_grid: true,
         snap_to_grid: true,
         snap_config: crate::snap::SnapConfig::default(),
+        complex_contour: crate::complex_contour::ComplexContourState::default(),
         exam_mode: false,
         exam_exit_confirm: false,
         dark_mode: false,

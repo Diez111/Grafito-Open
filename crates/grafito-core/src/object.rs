@@ -477,6 +477,26 @@ impl GeoObject {
         }
     }
 
+    /// ¿Este objeto puede ser el contorno de `ComplexIntegral`/`Gauss`?
+    ///
+    /// Incluye el círculo (se integra analíticamente, no como polilínea), las
+    /// curvas cerradas o abiertas del documento y el trazo a mano alzada del
+    /// nuevo contorno dibujado. Puro: solo mira la variante.
+    pub fn accepts_complex_contour(&self) -> bool {
+        matches!(
+            self,
+            GeoObject::Circle(_)
+                | GeoObject::Polygon(_)
+                | GeoObject::Line(_)
+                | GeoObject::Polyline(_)
+                | GeoObject::Pencil(_)
+                | GeoObject::Spline(_)
+                | GeoObject::Arc(_)
+                | GeoObject::BezierCurve(_)
+                | GeoObject::ParametricCurve2D(_)
+        )
+    }
+
     pub fn is_visible(&self) -> bool {
         match self {
             GeoObject::Point(o) => o.visible,
@@ -3395,6 +3415,14 @@ impl ComplexMappingObj {
 
     pub fn conformal_map(&self, symbol: &str) -> Option<ConformalMap> {
         conformal_map_from_expr(&self.expr, symbol).or(self.conformal_cache)
+    }
+
+    /// Expresión con el símbolo base normalizado a `z` (lo que entiende el
+    /// parser complejo). Cubre los mapeos que [`ConformalMap`] no reconoce
+    /// (identidad, afines, polinomios con término constante, …): el render
+    /// los aplica con `ComplexExpr` en vez de quedarse en un no-op silencioso.
+    pub fn normalized_expr(&self, symbol: &str) -> String {
+        normalize_complex_symbol(&self.expr, symbol)
     }
 
     pub fn with_label(mut self, l: impl Into<String>) -> Self {

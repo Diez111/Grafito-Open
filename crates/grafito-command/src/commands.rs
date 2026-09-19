@@ -1827,6 +1827,41 @@ fn split_relation(expr: &str) -> (&str, &str, RelationOperator) {
 }
 
 /// Split text on a standalone "=" (not part of <=, >=, ==, !=)
+/// Busca un objeto por etiqueta: coincidencia exacta y, si no hay, una
+/// coincidencia case-insensitive única. Los auto-labels de Grafito son
+/// mayúsculas (`C` círculo, `I` implícita) y el usuario escribe naturalmente
+/// `c`; sin esto el comando fallaba hasta copiando la etiqueta "mal".
+/// Solo lo usan los comandos complejos (no cambia la semántica global).
+fn find_object_by_label_flexible(
+    document: &Document,
+    label: &str,
+) -> Option<grafito_core::ObjectId> {
+    if let Some(id) = find_object_by_label(document, label) {
+        return Some(id);
+    }
+    let wanted = label.to_lowercase();
+    let mut matches: Vec<grafito_core::ObjectId> = document
+        .objects_iter()
+        .filter(|(_, object)| object.label().to_lowercase() == wanted)
+        .map(|(id, _)| *id)
+        .collect();
+    matches.sort_unstable();
+    matches.dedup();
+    (matches.len() == 1).then(|| matches[0])
+}
+
+/// ¿`side` es una expresión válida en x/y para una ecuación implícita?
+/// Acepta cualquier variable del documento y `x`/`y` como incógnitas.
+fn validate_implicit_side(side: &str, document: &Document) -> Result<(), String> {
+    let trimmed = side.trim();
+    if trimmed.is_empty() {
+        return Err("lado vacío".to_string());
+    }
+    prepare_function_ast(trimmed, &document.variables, &["x", "y"])
+        .map(|_| ())
+        .map_err(|error| format!("'{trimmed}' no es una expresión ({error})"))
+}
+
 fn split_on_standalone_eq(text: &str) -> Option<(&str, &str)> {
     let chars: Vec<char> = text.chars().collect();
     for i in 0..chars.len() {
@@ -13910,8 +13945,8 @@ fn handle_remaining_cas_commands(
                 .split_once('(')
                 .map(|(id, _)| id.trim())
                 .unwrap_or(target_label);
-            let resolved = find_object_by_label(document, target_label)
-                .or_else(|| find_object_by_label(document, base_label));
+            let resolved = find_object_by_label_flexible(document, target_label)
+                .or_else(|| find_object_by_label_flexible(document, base_label));
             let resolved = if resolved.is_none() && base_label == "I" {
                 Some(insert_command_object!(
                     document,
@@ -13936,11 +13971,41 @@ fn handle_remaining_cas_commands(
                             target_label
                         ));
                     }
-                    let cm = ComplexMappingObj::new_with_symbol(
-                        expr,
-                        id,
-                        document.complex_base_symbol.as_str(),
-                    );
+                    let symbol = document.complex_base_symbol.as_str();
+                    let cm = ComplexMappingObj::new_with_symbol(expr, id, symbol);
+                    // Validación honesta: el mapeo debe parsear y evaluarse en
+                    // un punto de prueba con el símbolo base (antes, una
+                    // expresión fuera de la lista corta creaba un objeto muerto
+                    // que no dibujaba nada).
+                    let normalized = cm.normalized_expr(symbol);
+                    let parsed = match grafito_complex::math::complex_expr::parse(&normalized) {
+                        Ok(parsed) => parsed,
+                        Err(error) => {
+                            return CommandOutcome::Error(format!(
+                                "ComplexMapping: expresión inválida ({error})"
+                            ))
+                        }
+                    };
+                    let mut scope: std::collections::HashMap<String, num_complex::Complex64> =
+                        std::collections::HashMap::new();
+                    for (name, value) in &document.variables {
+                        scope.insert(name.clone(), num_complex::Complex64::new(*value, 0.0));
+                    }
+                    scope.insert("z".to_string(), num_complex::Complex64::new(0.5, 0.5));
+                    match parsed.eval(&scope) {
+                        Ok(value) if value.re.is_finite() && value.im.is_finite() => {}
+                        Ok(_) => {
+                            return CommandOutcome::Error(
+                                "ComplexMapping: la expresión no es finita en z = 0.5 + 0.5i"
+                                    .into(),
+                            )
+                        }
+                        Err(error) => {
+                            return CommandOutcome::Error(format!(
+                                "ComplexMapping: no se pudo evaluar con el símbolo base '{symbol}' ({error})"
+                            ))
+                        }
+                    }
                     insert_command_object!(document, GeoObject::ComplexMapping(cm));
                     input_text.clear();
                     return CommandOutcome::Message(format!(
@@ -13949,7 +14014,7 @@ fn handle_remaining_cas_commands(
                 }
                 None => {
                     return CommandOutcome::Error(format!(
-                        "ComplexMapping: objeto '{target_label}' no encontrado"
+                        "ComplexMapping: objeto '{target_label}' no encontrado — creá el círculo primero, p. ej. Circle[(0, 0), 3] (auto-etiqueta C), o usá ComplexMapping[expr] sobre el disco unidad I"
                     ));
                 }
             }
@@ -13960,7 +14025,20 @@ fn handle_remaining_cas_commands(
 
             let is_gauss = cmd.command.eq_ignore_ascii_case("Gauss");
 
-            if let Some(target_id) = find_object_by_label(document, target_label) {
+            if let Some(target_id) = find_object_by_label_flexible(document, target_label) {
+                // Validación honesta: antes cualquier objeto era aceptado y el
+                // render lo ignoraba en silencio (no-op). Ahora el comando
+                // exige una curva que el integrador sepa recorrer.
+                let contours = document
+                    .get_object(target_id)
+                    .map(grafito_core::GeoObject::accepts_complex_contour)
+                    .unwrap_or(false);
+                if !contours {
+                    return CommandOutcome::Error(format!(
+                        "Integral: '{}' no es una curva de contorno (usá circunferencia, polígono, recta, trazo, spline, arco o paramétrica)",
+                        target_label
+                    ));
+                }
                 let integral = ComplexIntegralObj::new(expr, target_id, is_gauss);
                 insert_command_object!(document, GeoObject::ComplexIntegral(integral));
                 input_text.clear();
@@ -13977,7 +14055,7 @@ fn handle_remaining_cas_commands(
                 }
             } else {
                 return CommandOutcome::Error(format!(
-                    "Integral: objeto '{}' no encontrado",
+                    "Integral: objeto '{}' no encontrado — creá el contorno primero (p. ej. Circle[(0, 0), 3], auto-etiqueta C) o dibujalo con la herramienta Contorno complejo",
                     target_label
                 ));
             }
@@ -14686,6 +14764,19 @@ fn handle_expression_input(
             }
         }
 
+        // Validación honesta: cada lado debe ser una expresión en x/y (o
+        // variable del documento). Antes, `c = Circle[(0, 0), 3]` creaba una
+        // curva implícita basura en vez de un error.
+        if let Err(error) = validate_implicit_side(name, document) {
+            return CommandOutcome::Error(format!(
+                "No se pudo interpretar '{raw_text}': {error} — una ecuación implícita usa expresiones en x/y (p. ej. x^2 + y^2 = 1); los comandos con corchetes van solos, no a la derecha de '='"
+            ));
+        }
+        if let Err(error) = validate_implicit_side(rest, document) {
+            return CommandOutcome::Error(format!(
+                "No se pudo interpretar '{raw_text}': {error} — una ecuación implícita usa expresiones en x/y (p. ej. x^2 + y^2 = 1); los comandos con corchetes van solos, no a la derecha de '='"
+            ));
+        }
         let mut obj = ImplicitCurveObj::new(name, rest, RelationOperator::Eq);
         obj.label = next_implicit_label(document);
         insert_command_object!(document, GeoObject::ImplicitCurve(obj));
@@ -24359,14 +24450,40 @@ fn resolve_point_arg(
     document: &Document,
     argument: &str,
 ) -> Result<(Point2, Option<ObjectId>), String> {
-    if let Some(id) = find_object_by_label(document, argument.trim()) {
+    let trimmed = argument.trim();
+    // Exacta primero; si no existe, una variante case-insensitive única
+    // (los auto-labels son mayúsculas: `C`; el usuario escribe `c`).
+    if let Some(id) = find_object_by_label_flexible(document, trimmed) {
         return match document.get_object(id) {
             Some(GeoObject::Point(point)) => Ok((point.position, Some(id))),
-            Some(_) => Err(format!("'{}' no es un punto", argument.trim())),
-            None => Err(format!("no se encontró '{}'", argument.trim())),
+            // Existe pero no es punto: decir qué es y cómo salir del paso
+            // (p. ej. `C` es el círculo, no su centro).
+            Some(object) => Err(format!(
+                "'{trimmed}' existe pero no es un punto (es {}) — usá coordenadas directas (p. ej. (0, 0)) o etiquetá el punto con otro nombre (p. ej. O = (0, 0))",
+                object.name()
+            )),
+            None => Err(format!("no se encontró '{trimmed}'")),
         };
     }
+    // Identificador sin objeto: guiar en vez de un "se esperaba (x, y)" seco.
+    if looks_like_identifier(trimmed) {
+        return Err(format!(
+            "'{trimmed}' no existe — creá el punto primero (p. ej. {trimmed} = (0, 0)) o usá coordenadas directas, p. ej. (0, 0)"
+        ));
+    }
     parse_finite_point_arg(argument, &document.variables).map(|point| (point, None))
+}
+
+/// ¿El argumento es un identificador de etiqueta (letras/dígitos guion bajo)?
+/// Sirve para distinguir `Circle[C, 3]` (etiqueta inexistente, guiar) de
+/// `Circle[(0, 0), 3]` (literal, seguir al parser de puntos).
+fn looks_like_identifier(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_alphabetic() || first == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_alphanumeric() || c == '_')
 }
 
 /// Punto resuelto: posición + `Some(id)` si es un objeto del documento
