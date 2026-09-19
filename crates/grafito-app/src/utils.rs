@@ -690,9 +690,18 @@ mod tests {
 
     #[test]
     fn xdg_paths_end_with_grafito_subdir_and_filename() {
-        let cfg = xdg_config_path_for(None, Some(std::path::Path::new("/home/alice")));
+        // Home con forma de su plataforma: en Windows `/home/alice` no es
+        // absoluto (sin prefijo de unidad) y el assert `is_absolute` fallaba
+        // en la matriz MSVC. El contrato (grafito/<archivo> + absoluto) se
+        // verifica igual en ambas.
+        let home = if cfg!(windows) {
+            std::path::Path::new("C:\\Users\\alice")
+        } else {
+            std::path::Path::new("/home/alice")
+        };
+        let cfg = xdg_config_path_for(None, Some(home));
         assert!(cfg.ends_with("grafito/grafito_config.json"));
-        let data = xdg_data_path_for(None, Some(std::path::Path::new("/home/alice")));
+        let data = xdg_data_path_for(None, Some(home));
         assert!(data.ends_with("grafito/grafito_profile.json"));
         // No relativo CWD
         assert!(cfg.is_absolute());

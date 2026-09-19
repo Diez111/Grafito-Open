@@ -5856,9 +5856,13 @@ fn build_hash_no_es_local_ni_vacio() {
             "GRAFITO_BUILD_HASH debe ser el short-hash de git ({esperado}), fue: {hash}"
         );
     } else {
+        // Sin git en runtime se aceptan las dos formas honestas: fallback
+        // `dev-{versión}` o un short-hash real horneado al compilar (p.ej.
+        // binario cruzado ejecutado fuera del repo). `local` sigue prohibido.
         assert!(
-            hash.starts_with("dev-"),
-            "sin repo git el fallback debe ser `dev-{{versión}}`, fue: {hash}"
+            hash.starts_with("dev-")
+                || (hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit())),
+            "hash sin git debe ser `dev-{{versión}}` o short-hash, fue: {hash}"
         );
     }
 }
