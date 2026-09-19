@@ -1834,14 +1834,16 @@ mod tests {
     fn should_offer_autosave_only_when_sidecar_is_newer_or_main_missing() {
         use std::time::{Duration, UNIX_EPOCH};
         let t0 = UNIX_EPOCH + Duration::from_secs(1_000);
-        // Nanosegundos cuentan: mismo segundo, sidecar posterior ⇒ se ofrece.
-        let t0_plus_nanos = t0 + Duration::from_nanos(1);
+        // Precisión sub-segundo cuenta: mismo segundo, sidecar posterior ⇒ se
+        // ofrece. 1 µs y no 1 ns: Windows representa SystemTime en ticks de
+        // 100 ns y `+1ns` trunca al mismo tick (falso empate en la matriz MSVC).
+        let t0_plus_subsec = t0 + Duration::from_micros(1);
         assert!(should_offer_autosave(None, t0));
-        assert!(should_offer_autosave(Some(t0), t0_plus_nanos));
+        assert!(should_offer_autosave(Some(t0), t0_plus_subsec));
         assert!(should_offer_autosave(Some(t0), t0 + Duration::from_secs(5)));
         // Igualdad = el sidecar espeja el último guardado: no ofrecer.
         assert!(!should_offer_autosave(Some(t0), t0));
-        assert!(!should_offer_autosave(Some(t0_plus_nanos), t0));
+        assert!(!should_offer_autosave(Some(t0_plus_subsec), t0));
     }
 
     #[test]
