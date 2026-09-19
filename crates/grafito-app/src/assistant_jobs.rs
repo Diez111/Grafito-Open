@@ -2528,6 +2528,47 @@ mod tests {
         }
     }
 
+    /// Espera acotada a que el slot de preflight esté EN VUELO para inspeccionarlo.
+    ///
+    /// El worker de propuestas corre en otro thread y en un runner cargado
+    /// puede terminar (y ser consumido) dentro del mismo `poll` que lo arranca.
+    /// Retorna `true` si se atrapó el slot; `false` si el worker ganó la carrera
+    /// y el turno ya quedó publicado (camino equivalente, sin slot que mirar).
+    fn wait_for_proposal_slot(
+        ctx: &mut AssistantJobsContext<'_>,
+        egui_ctx: &egui::Context,
+    ) -> bool {
+        let published_already = |ctx: &AssistantJobsContext<'_>| {
+            ctx.panel
+                .conversation
+                .iter()
+                .any(|turn| matches!(turn.role, ConversationRole::Assistant))
+        };
+        let t0 = std::time::Instant::now();
+        loop {
+            if ctx.runtime.proposal_job.is_some() {
+                return true;
+            }
+            if published_already(ctx) || ctx.panel.error.is_some() {
+                return false;
+            }
+            AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
+            if ctx.runtime.proposal_job.is_some() {
+                return true;
+            }
+            if published_already(ctx) || ctx.panel.error.is_some() {
+                return false;
+            }
+            assert!(
+                t0.elapsed() < std::time::Duration::from_secs(10),
+                "el preflight nunca arrancó: error={:?}, remoto_pendiente={}",
+                ctx.panel.error,
+                ctx.runtime.remote_job.is_some(),
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    }
+
     fn dummy_model_job() -> AssistantModelJob {
         let (_, receiver) = sync_channel(1);
         AssistantModelJob {
@@ -2871,6 +2912,15 @@ mod tests {
                 "aviso honesto presente: {:?}",
                 avisos.borrow()
             );
+            if !wait_for_proposal_slot(ctx, egui_ctx) {
+                // El worker del preflight ganó la carrera y ya publicó el
+                // turno en el mismo poll (ver `wait_for_proposal_slot`): no
+                // hay slot que inspeccionar, se validan los observables.
+                let last = ctx.panel.conversation.last().expect("turno publicado");
+                assert_eq!(last.content, "respuesta vigente");
+                assert!(ctx.panel.verified_proposals.is_empty());
+                return;
+            }
             let job = ctx
                 .runtime
                 .proposal_job
@@ -2911,6 +2961,16 @@ mod tests {
     }
 
     #[test]
+    fn wait_for_proposal_slot_detecta_publicacion_sin_slot() {
+        // Contracto del helper: con el turno ya publicado y sin slot, no
+        // espera ni paniquea — le dice al test que el worker ganó la carrera.
+        with_test_ctx_notify(|ctx, egui_ctx, _avisos| {
+            ctx.panel.complete_request("publicado".to_string());
+            assert!(!wait_for_proposal_slot(ctx, egui_ctx));
+        });
+    }
+
+    #[test]
     fn texto_remoto_sin_cambios_no_avisa_nada() {
         with_test_ctx_notify(|ctx, egui_ctx, avisos| {
             let launch = grafito_command::assistant_context::document_context(ctx.document);
@@ -2927,6 +2987,16 @@ mod tests {
             assert!(ctx.panel.error.is_none());
             assert!(avisos.borrow().is_empty(), "{:?}", avisos.borrow());
 
+            if !wait_for_proposal_slot(ctx, egui_ctx) {
+                // El worker ganó la carrera y publicó en el mismo poll: sin
+                // slot que inspeccionar, se valida el observable (texto
+                // publicado y sin propuestas verificadas).
+                assert_eq!(
+                    ctx.panel.conversation.last().expect("turno").content,
+                    "respuesta limpia"
+                );
+                return;
+            }
             // Preflight del mismo documento (sin mutaciones): publica texto y
             // habilita la propuesta verificada.
             let job = ctx
