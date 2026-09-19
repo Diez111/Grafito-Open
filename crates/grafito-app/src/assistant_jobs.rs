@@ -2485,19 +2485,29 @@ mod tests {
         f(&mut ctx, &egui_ctx, &avisos);
     }
 
-    /// Pulsa `poll_assistant_jobs` hasta que el job remoto asiente (propuesta,
-    /// error o repregunta) o 10 s. Un solo poll es flaky bajo carga: el worker
-    /// de preflight y el scheduler de tests compiten y el settle a veces llega
-    /// tarde. El timeout paniquea con el estado completo para diagnosticar.
-    fn poll_until_remote_settled(
+    /// Pulsa `poll_assistant_jobs` hasta que el texto `needle` quede publicado
+    /// en la conversación, o aparezca error/repregunta, o pasen 10 s.
+    ///
+    /// Por qué no alcanza un poll: el preflight de propuestas corre en un
+    /// thread y, en un runner cargado, puede terminar DENTRO del mismo poll
+    /// que arranca el job — el slot `proposal_job` se toma y consume en la
+    /// misma llamada. El estado observable estable es el turno publicado,
+    /// no el slot interno (que era la fuente del flaky).
+    fn poll_until_remote_published(
         ctx: &mut AssistantJobsContext<'_>,
         egui_ctx: &egui::Context,
         avisos: &std::cell::RefCell<Vec<String>>,
+        needle: &str,
     ) {
         let t0 = std::time::Instant::now();
         loop {
             AssistantJobsController::poll_assistant_jobs(ctx, egui_ctx);
-            let settled = ctx.runtime.proposal_job.is_some()
+            let published = ctx
+                .panel
+                .conversation
+                .iter()
+                .any(|turn| turn.content.contains(needle));
+            let settled = published
                 || ctx.panel.error.is_some()
                 || avisos
                     .borrow()
@@ -2508,11 +2518,11 @@ mod tests {
             }
             assert!(
                 t0.elapsed() < std::time::Duration::from_secs(10),
-                "el job remoto nunca asentó: propuesta={}, error={:?}, avisos={:?}, remoto_pendiente={}",
-                ctx.runtime.proposal_job.is_some(),
+                "el turno remoto nunca asentó: publicado={published}, error={:?}, avisos={:?}, remoto_pendiente={}, propuesta_pendiente={}",
                 ctx.panel.error,
                 avisos.borrow(),
                 ctx.runtime.remote_job.is_some(),
+                ctx.runtime.proposal_job.is_some(),
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -3134,7 +3144,7 @@ mod tests {
             }))
             .expect("envío del completado");
 
-            poll_until_remote_settled(ctx, egui_ctx, avisos);
+            poll_until_remote_published(ctx, egui_ctx, avisos, "x^2");
 
             assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
             assert!(
@@ -3145,10 +3155,21 @@ mod tests {
                 "{:?}",
                 avisos.borrow()
             );
-            // Sin repair: el texto va al preflight de propuestas.
+            // Sin repair: el texto remoto se publica tal cual (vía el
+            // preflight de propuestas; el slot puede estar en vuelo o
+            // consumido según cuándo terminó el worker, el turno es lo
+            // observable).
+            let last = ctx
+                .panel
+                .conversation
+                .iter()
+                .rev()
+                .find(|turn| matches!(turn.role, ConversationRole::Assistant))
+                .expect("respuesta publicada");
             assert!(
-                ctx.runtime.proposal_job.is_some(),
-                "publica directo sin repregunta"
+                last.content.contains("x^2"),
+                "publica directo sin repregunta: {}",
+                last.content
             );
         });
     }
@@ -3171,7 +3192,7 @@ mod tests {
             }))
             .expect("envío del completado");
 
-            poll_until_remote_settled(ctx, egui_ctx, avisos);
+            poll_until_remote_published(ctx, egui_ctx, avisos, "Antes de mostrarte");
 
             assert!(ctx.panel.error.is_none(), "{:?}", ctx.panel.error);
             assert!(
