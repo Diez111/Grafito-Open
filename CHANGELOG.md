@@ -11,6 +11,25 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-09-19
+
+#### Corregido
+- **ComplexMapping sin rayas**: el camino genérico CPU aplanaba los segmentos de
+  marching-squares en una sola polilínea y unía el fin de un segmento con el inicio
+  del siguiente; esas cuerdas se veían como rayas verticales densas en
+  `ComplexMapping[z^2+1]`. Ahora el overlay CPU dibuja por segmento independiente
+  y el gate `gpu_2d_base_owns` acepta toda expresión parseable, así el builder GPU
+  (por segmento, sin cuerdas) dibuja el contorno real: el círculo `|w−1|=1` con su
+  retícula de referencia plegada en el valor crítico `(1, 0)`.
+
+#### Agregado
+- **Herramienta Contorno complejo** (89.ª): dibujo a mano del lazo e integral
+  `∮ f(z) dz` por Gauss–Legendre 16 con suma Kahan.
+- **Asignaciones honestas**: los lados de `=` se validan con `prepare_function_ast`;
+  etiquetas inexistentes o con tipo wrong guían con el comando válido.
+- **README de mapeos ejecutable**: ejemplos `Circle[(0,0),3]` + `ComplexMapping`
+  pineados por test end-to-end (el ejemplo viejo `Circle[c, 3]` nunca fue sintaxis válida).
+
 ## [1.2.0] - 2026-09-18
 
 #### Agregado
