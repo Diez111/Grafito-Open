@@ -131,6 +131,13 @@ jobs:
           cache-all-crates: true
 
       - name: Run workspace tests
+        # Los readbacks GPU del harness usan el presupuesto de frame (250 ms)
+        # en producción; en un runner con Metal/D3D recién arrancado la
+        # compilación de shaders puede superarlo y el test da un falso
+        # "must execute on the GPU" (visto en macos arm64). El override
+        # explícito documentado en `gpu_readback` da 10 s solo a los tests.
+        env:
+          GRAFITO_GPU_READBACK_TIMEOUT_MS: "10000"
         run: cargo test --workspace --locked
 
       - name: Build release
