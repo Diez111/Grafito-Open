@@ -77,10 +77,10 @@ const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
 /// block the prepare thread forever. Returns `true` if the buffer was mapped
 /// before the deadline.
 ///
-/// El deadline sale de [`gpu_readback::sync_timeout`]: 250 ms de frame salvo
-/// cobertura requerida (10 s en lavapipe; un error real sigue devolviendo
-/// `false`, solo la lentitud del software deja de ser un falso fallo).
-/// El path asíncrono (`PendingGpuReadback`) conserva siempre los 250 ms.
+/// El deadline sale de [`gpu_readback::effective_readback_timeout`]: 250 ms
+/// de frame salvo cobertura requerida (10 s en lavapipe; un error real sigue
+/// devolviendo `false`, solo la lentitud del software deja de ser un falso
+/// fallo). El path asíncrono (`PendingGpuReadback`) comparte la misma regla.
 ///
 /// Path síncrono legacy: solo para callers sin slot background (tests,
 /// `evaluate_*` directos). El prepare 2D usa `PendingGpuReadback` (ver
@@ -92,7 +92,7 @@ pub(crate) fn sync_readback_with_timeout(
     map_ok: &std::sync::atomic::AtomicBool,
 ) -> bool {
     pollster::block_on(async {
-        let timeout = crate::gpu_readback::sync_timeout();
+        let timeout = crate::gpu_readback::effective_readback_timeout();
         let deadline = std::time::Instant::now() + timeout;
         while !map_ok.load(std::sync::atomic::Ordering::SeqCst) {
             if std::time::Instant::now() >= deadline {

@@ -25,11 +25,11 @@
 //! `owned`/`Send`, como el marching-squares del resolve implícito—.
 //!
 //! Presupuestos (ver `docs/architecture.md:8`):
-//! - [`GPU_READBACK_TIMEOUT`]: 250 ms de frame. El path asíncrono
-//!   (`PendingGpuReadback::submit`) y la app lo usan siempre.
-//! - [`REQUIRED_GPU_READBACK_TIMEOUT`]: 10 s para cobertura requerida. El path
-//!   síncrono legacy lo usa vía `sync_timeout` cuando
-//!   `GRAFITO_REQUIRE_GPU_TESTS` está seteada (CI sobre lavapipe).
+//! - [`GPU_READBACK_TIMEOUT`]: 250 ms de frame (producción, sin env).
+//! - [`REQUIRED_GPU_READBACK_TIMEOUT`]: 10 s para cobertura requerida.
+//!   Ambos paths (síncrono legacy y dispatch asíncrono) usan la regla única
+//!   de [`effective_readback_timeout`] cuando `GRAFITO_REQUIRE_GPU_TESTS`
+//!   está seteada (CI sobre lavapipe).
 //! - [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]: 1. Si llega otro job, se descarta el
 //!   viejo por generación: nunca hay cola infinita.
 //!
@@ -49,8 +49,8 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 /// Timeout de un readback GPU antes de caer al fallback CPU (honesto, acotado).
-/// Origen único del presupuesto 250 ms compartido con el path síncrono legacy.
-/// El hilo UI nunca espera más que esto por frame (ver `sync_timeout`).
+/// Origen del presupuesto 250 ms de producción; el efectivo sale de
+/// [`effective_readback_timeout`].
 pub const GPU_READBACK_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Presupuesto extendido para cobertura requerida (`GRAFITO_REQUIRE_GPU_TESTS`).
@@ -65,11 +65,15 @@ pub const GPU_READBACK_TIMEOUT: Duration = Duration::from_millis(250);
 /// La app sin esa env conserva los 250 ms intactos.
 pub const REQUIRED_GPU_READBACK_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Timeout efectivo del path síncrono legacy (`sync_readback_with_timeout`).
+/// Timeout efectivo de todo readback GPU (síncrono legacy vía
+/// `sync_readback_with_timeout` Y dispatch asíncrono vía
+/// `PendingGpuReadback::submit`).
 /// Orden: override explícito `GRAFITO_GPU_READBACK_TIMEOUT_MS` (ms, entero;
 /// ignorado si ausente o inválido) > cobertura requerida (10 s) > frame (250 ms).
 /// Puro salvo lectura de env (sin panic, sin unwrap: valor inválido = ignorado).
-pub(crate) fn sync_timeout() -> Duration {
+/// Sin la env de cobertura el frame conserva sus 250 ms intactos: producción
+/// no cambia; solo los tests/CI con `GRAFITO_REQUIRE_GPU_TESTS` esperan 10 s.
+pub(crate) fn effective_readback_timeout() -> Duration {
     if let Some(ms) = std::env::var_os("GRAFITO_GPU_READBACK_TIMEOUT_MS")
         .and_then(|value| value.into_string().ok())
         .and_then(|text| text.trim().parse::<u64>().ok())
@@ -127,9 +131,12 @@ pub struct PendingGpuReadback {
 impl PendingGpuReadback {
     /// Registra la espera y retorna **inmediatamente** (no toca la GPU).
     /// `map_ok` es el mismo `Arc<AtomicBool>` que el callback de `map_async`
-    /// marca en éxito.
+    /// marca en éxito. El deadline sigue la regla de
+    /// [`effective_readback_timeout`]: 250 ms en producción, 10 s con
+    /// cobertura requerida (antes hardcodeaba 250 ms y lavapipe caía en
+    /// `Failed` espurio pasado ese punto).
     pub fn submit(map_ok: &Arc<AtomicBool>) -> Self {
-        Self::submit_with_timeout(map_ok, GPU_READBACK_TIMEOUT)
+        Self::submit_with_timeout(map_ok, effective_readback_timeout())
     }
 
     /// Variante con timeout explícito (tests).
@@ -218,6 +225,27 @@ mod tests {
         assert_eq!(GPU_READBACK_TIMEOUT, Duration::from_millis(250));
     }
 
+    /// Regresión del flaky de CI (`domain_coloring_async_dispatch_...`):
+    /// `submit` compartía el hardcode de 250 ms y lavapipe caía en `Failed`
+    /// espurio cuando mapear tardaba más; el loop del test (10 s) ya no
+    /// podía recuperarse. Con cobertura requerida el submit debe seguir
+    /// `Pending` pasados los 250 ms.
+    #[test]
+    fn submit_shares_required_budget_instead_of_frame_hardcode() {
+        with_env(
+            &[
+                ("GRAFITO_REQUIRE_GPU_TESTS", Some("1")),
+                ("GRAFITO_GPU_READBACK_TIMEOUT_MS", None),
+            ],
+            || {
+                let map_ok = Arc::new(AtomicBool::new(false));
+                let mut pending = PendingGpuReadback::submit(&map_ok);
+                std::thread::sleep(Duration::from_millis(300));
+                assert_eq!(pending.poll(), ReadbackPoll::Pending);
+            },
+        );
+    }
+
     /// El env es global del proceso y los tests corren en paralelo: este lock
     /// serializa solo los tests que mutan `GRAFITO_REQUIRE_GPU_TESTS` /
     /// `GRAFITO_GPU_READBACK_TIMEOUT_MS`.
@@ -259,7 +287,7 @@ mod tests {
             ],
             || {
                 assert!(!coverage_is_required());
-                assert_eq!(sync_timeout(), Duration::from_millis(250));
+                assert_eq!(effective_readback_timeout(), Duration::from_millis(250));
             },
         );
     }
@@ -277,7 +305,7 @@ mod tests {
                 ],
                 || {
                     assert!(coverage_is_required());
-                    assert_eq!(sync_timeout(), Duration::from_secs(10));
+                    assert_eq!(effective_readback_timeout(), Duration::from_secs(10));
                 },
             );
         }
@@ -295,7 +323,7 @@ mod tests {
                 ],
                 || {
                     assert!(!coverage_is_required());
-                    assert_eq!(sync_timeout(), Duration::from_millis(250));
+                    assert_eq!(effective_readback_timeout(), Duration::from_millis(250));
                 },
             );
         }
@@ -311,14 +339,14 @@ mod tests {
                 ("GRAFITO_REQUIRE_GPU_TESTS", Some("1")),
                 ("GRAFITO_GPU_READBACK_TIMEOUT_MS", Some("33")),
             ],
-            || assert_eq!(sync_timeout(), Duration::from_millis(33)),
+            || assert_eq!(effective_readback_timeout(), Duration::from_millis(33)),
         );
         with_env(
             &[
                 ("GRAFITO_REQUIRE_GPU_TESTS", Some("1")),
                 ("GRAFITO_GPU_READBACK_TIMEOUT_MS", Some("no-es-numero")),
             ],
-            || assert_eq!(sync_timeout(), Duration::from_secs(10)),
+            || assert_eq!(effective_readback_timeout(), Duration::from_secs(10)),
         );
     }
 }
