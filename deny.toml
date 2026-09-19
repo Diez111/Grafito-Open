@@ -31,7 +31,6 @@ ignore = [
 # windows-sys, syn, calloop have legitimate multi-major duplicates via windows/wayland/egui ecosystem.
 multiple-versions = "deny"
 skip = [
-    { name = "bincode", version-req = "=1.3.3", reason = "bincode 1.3.3 required by puffin 0.19.1, no maintained alternative" },
     # quick-xml: 0.30.0 (zbus_xml) y 0.41.0 (wayland-scanner) + 0.42.0
     # (grafito-ggb, dep directa revisada) — RUSTSEC-2026-0194/0195
     { name = "quick-xml", version-req = "=0.30.0", reason = "quick-xml 0.30.0 required by zbus_xml 4, blocked from 0.41 by RUSTSEC advisories" },
@@ -40,6 +39,41 @@ skip = [
     { name = "windows-sys", version-req = "*", reason = "windows-sys multiple versions via windows/egui ecosystem" },
     { name = "syn", version-req = "*", reason = "syn multiple versions via proc-macro ecosystem" },
     { name = "calloop", version-req = "*", reason = "calloop multiple versions via wayland/egui ecosystem" },
+    # async/rustix: 1.x (polling 3, wayland 0.31, async-io) convive con 0.38
+    # (winit 0.30 / smithay 0.19); unificar exige un major de winit
+    { name = "rustix", version-req = "=1.1.4", reason = "rustix 1.x via polling/wayland/async line; winit stack keeps 0.38" },
+    { name = "linux-raw-sys", version-req = "=0.12.1", reason = "linux-raw-sys 0.12 follows rustix 1.x; rustix 0.38 keeps 0.4" },
+    { name = "redox_syscall", version-req = "=0.5.18", reason = "redox_syscall 0.5 via parking_lot; winit keeps 0.4.1" },
+    { name = "redox_syscall", version-req = "=0.9.3", reason = "redox_syscall 0.9 via libredox; winit keeps 0.4.1" },
+    # android: ndk-sys 0.6 (winit android-activity) convive con 0.5 (wgpu-hal)
+    { name = "ndk-sys", version-req = "=0.6.0", reason = "ndk-sys 0.6 via winit android-activity; wgpu-hal keeps 0.5" },
+    # wayland: smithay 0.20 (smithay-clipboard de egui-winit) convive con 0.19
+    { name = "smithay-client-toolkit", version-req = "=0.20.0", reason = "sctk 0.20 via smithay-clipboard; winit keeps 0.19.2" },
+    { name = "calloop-wayland-source", version-req = "=0.4.1", reason = "calloop-wayland-source 0.4 follows sctk 0.20; sctk 0.19 keeps 0.3" },
+    # hashbrown triple: 0.15 (wgpu gpu-descriptor) + 0.16 (spade 2.15) + 0.17
+    { name = "hashbrown", version-req = "=0.15.5", reason = "hashbrown 0.15 pinned by wgpu gpu-descriptor" },
+    { name = "hashbrown", version-req = "=0.16.1", reason = "hashbrown 0.16 via spade 2.15 line" },
+    # geometría/render: geo 0.33 (bump RUSTSEC-2025-0165, ver SECURITY.md)
+    { name = "float_next_after", version-req = "=2.0.0", reason = "float_next_after 2.0 via geo 0.33; lyon keeps 1.0" },
+    # imagen/pdf: flate2 trae 0.9, el stack image/png de eframe queda en 0.8
+    { name = "miniz_oxide", version-req = "=0.9.1", reason = "miniz_oxide 0.9 via flate2; image/png stack keeps 0.8.9" },
+    # pdf (printpdf/lopdf, export propio) vs gif/tiff del stack de eframe
+    { name = "weezl", version-req = "=0.2.1", reason = "weezl 0.2 via printpdf/lopdf; gif/tiff keep 0.1.12" },
+    { name = "cbc", version-req = "=0.2.1", reason = "cbc 0.2 via lopdf; secret-service keeps 0.1.2" },
+    # macOS: arboard/webbrowser (egui-winit) traen objc2 0.3, winit queda en 0.2
+    { name = "objc2-app-kit", version-req = "=0.3.2", reason = "objc2-app-kit 0.3 via arboard/webbrowser; winit keeps 0.2.2" },
+    # windows: accesskit trae 0.58, wgpu gpu-allocator queda en 0.52
+    { name = "windows", version-req = "=0.58.0", reason = "windows 0.58 via accesskit; gpu-allocator keeps 0.52" },
+    { name = "windows-core", version-req = "=0.58.0", reason = "windows-core 0.58 via accesskit; windows 0.52 keeps 0.52" },
+]
+# skip-tree: duplicate versions *inside* a third-party subtree are that
+# subtree's upstream unification problem, not ours. Only the duplicate lint
+# is scoped here — advisories/licenses still check every version in the
+# graph. iroh 1.2.0 (transporte P2P del aula, feature aula-iroh) arrastra su
+# propio árbol (reqwest 0.13, quinn/noq, rand 0.9, windows 0.61) que duplica
+# las líneas del ecosistema eframe/wgpu; unificarlo exige un major de iroh.
+skip-tree = [
+    { name = "iroh", reason = "iroh 1.2.0 tree (reqwest 0.13, rand 0.9, windows 0.61) duplicates eframe/wgpu lines; unification needs an iroh major" },
 ]
 
 [licenses]

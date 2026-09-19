@@ -2460,7 +2460,7 @@ fn check_arith_syntax(expr: &str, what: &str) -> Result<(), String> {
 }
 
 /// Valida sintaxis de condición (comparación partida por
-/// [`split_comparison`] o expresión suelta). No evalúa: una condición puede
+/// `split_comparison` o expresión suelta). No evalúa: una condición puede
 /// referenciar variables que existen y valer `false` hoy sin ser inválida.
 pub fn check_condition_syntax(cond: &str) -> Result<(), String> {
     let clean = cond.trim();
