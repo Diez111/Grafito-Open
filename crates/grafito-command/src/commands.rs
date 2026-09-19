@@ -13898,9 +13898,12 @@ fn handle_remaining_cas_commands(
             input_text.clear();
             return CommandOutcome::Message("Complex grid created — scroll/zoom to explore".into());
         }
-        "ComplexMapping" if cmd.args.len() == 2 => {
+        "ComplexMapping" if cmd.args.len() == 1 || cmd.args.len() == 2 => {
             let expr = cmd.args[0].trim();
-            let target_label = cmd.args[1].trim();
+            // Sin target se mapea sobre el disco unidad "I" (se crea si
+            // falta, igual que ComplexMapping[expr, I]): ComplexMapping[z^2]
+            // funciona en documento vacío.
+            let target_label = cmd.args.get(1).map(|arg| arg.trim()).unwrap_or("I");
             // Aceptar tanto "x" como "x(t)" como "x" simple para tolerar
             // notación matemática (consistente con Root[...]).
             let base_label = target_label
@@ -32242,6 +32245,27 @@ mod tests {
             !matches!(outcome, CommandOutcome::Error(_)),
             "ComplexMapping should find the implicit curve by label 'I'"
         );
+        let has_cm = doc
+            .objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)));
+        assert!(has_cm, "ComplexMapping object should have been created");
+    }
+
+    #[test]
+    fn test_complex_mapping_single_arg_uses_unit_disk() {
+        // `ComplexMapping[z^2]` sin target mapea sobre el disco unidad "I"
+        // (creado si falta): funciona en documento vacío.
+        let mut doc = Document::new();
+        let mut out = "ComplexMapping[z^2]".to_string();
+        let outcome = process_input(&mut doc, &mut out);
+        assert!(
+            !matches!(outcome, CommandOutcome::Error(_)),
+            "ComplexMapping de 1 arg no debe fallar: {outcome:?}"
+        );
+        let has_target = doc
+            .objects_iter()
+            .any(|(_, o)| matches!(o, GeoObject::ImplicitCurve(ic) if ic.label == "I"));
+        assert!(has_target, "el disco unidad I debe crearse");
         let has_cm = doc
             .objects_iter()
             .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)));

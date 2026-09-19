@@ -151,7 +151,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `FunctionStudy[f]`: Recorrido visual de f: ceros, extremos, AV y tabla de signos; marca puntos en el canvas. Mutacion: crea objetos. Riesgo: medio. Alias: `estudiofuncion`, `estudio`.
 ## Complejos
 
-- `ComplexMapping[expr_compleja, target]`: Aplica un mapeo complejo a un objetivo. Mutacion: crea objetos. Riesgo: alto. Alias: `complex_mapping`, `mapeocomplejo`.
+- `ComplexMapping[expr_compleja, target]`: Aplica un mapeo complejo a un objetivo (sin target usa el disco unidad I, creado si falta). Mutacion: crea objetos. Riesgo: alto. Alias: `complex_mapping`, `mapeocomplejo`.
 - `Gauss[expr_compleja, curva]`: Calcula una integral compleja por residuos. Mutacion: crea objetos. Riesgo: alto. Alias: `residuos`, `residue`.
 - `ComplexIntegral[expr_compleja, curva]`: Calcula una integral compleja sobre una curva. Mutacion: crea objetos. Riesgo: alto. Alias: `integralcompleja`, `contourintegral`.
 ## AM1

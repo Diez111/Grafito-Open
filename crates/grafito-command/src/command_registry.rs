@@ -1643,13 +1643,13 @@ const COMMANDS: &[CommandSpec] = &[
         "ComplexMapping",
         ["complex_mapping", "mapeocomplejo"],
         "Complejos",
-        "Aplica un mapeo complejo a un objetivo.",
+        "Aplica un mapeo complejo a un objetivo (sin target usa el disco unidad I, creado si falta).",
         CreatesObject,
         High,
         true,
         "ComplexMapping",
         [
-            signature!("ComplexMapping[expr_compleja, target]"; "expr_compleja": ComplexExpression required, "target": Object required)
+            signature!("ComplexMapping[expr_compleja, target]"; "expr_compleja": ComplexExpression required, "target": Object optional)
         ]
     ),
     command!(

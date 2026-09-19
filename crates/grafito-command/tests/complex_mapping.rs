@@ -211,26 +211,20 @@ fn complex_mapping_accepts_label_with_parentheses() {
 }
 
 #[test]
-fn complex_mapping_wrong_arg_count_does_not_create_object() {
+fn complex_mapping_single_arg_maps_unit_disk() {
     let mut doc = Document::new();
     doc.add_object(GeoObject::Function(FunctionObj::new("x").with_label("f")));
-    // Sólo 1 argumento: el normalizer cae en el default porque no es
-    // un comando válido de 2 args. Verificamos que NO se crea un
-    // ComplexMappingObj (es el comportamiento funcionalmente correcto:
-    // un comando mal formado no debe crear objetos fantasma).
-    let before = doc
-        .objects_iter()
-        .filter(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)))
-        .count();
-    let _ = process_input(&mut doc, &mut "ComplexMapping[1/z]".to_string());
-    let after = doc
-        .objects_iter()
-        .filter(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)))
-        .count();
-    assert_eq!(
-        before, after,
-        "malformed ComplexMapping should not create objects"
+    // 1 argumento: target por defecto = disco unidad "I" (se crea si
+    // falta). Debe crear el ComplexMapping, no fallar.
+    let outcome = process_input(&mut doc, &mut "ComplexMapping[1/z]".to_string());
+    assert!(
+        !matches!(outcome, CommandOutcome::Error(_)),
+        "ComplexMapping de 1 arg debe mapear el disco unidad, got {outcome:?}"
     );
+    let has_cm = doc
+        .objects_iter()
+        .any(|(_, o)| matches!(o, GeoObject::ComplexMapping(_)));
+    assert!(has_cm, "single-arg ComplexMapping should create the object");
 }
 
 #[test]
