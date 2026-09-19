@@ -315,7 +315,11 @@ jobs:
           persist-credentials: false
 
       - name: Download artifacts
-        uses: actions/download-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        # Pin correcto de download-artifact (v4.3.0, último v4): el SHA
+        # anterior era de upload-artifact v4.6.2 y el job moría al resolverlo
+        # ("unable to find version"), recién visible cuando la matriz entera
+        # llegó verde.
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
         with:
           path: artifacts
 
