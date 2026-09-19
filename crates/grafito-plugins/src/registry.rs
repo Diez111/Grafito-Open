@@ -645,7 +645,6 @@ budget_bytes = 64
     fn collect_manifests_rejects_symlink_dirs() {
         let root = std::env::temp_dir().join("grafito_plugins_symlink_fixture");
         let real_dir = root.join("real");
-        let link_dir = root.join("link");
         fs::create_dir_all(&real_dir).unwrap();
         fs::write(
             real_dir.join(PLUGIN_MANIFEST_FILENAME),
@@ -661,6 +660,7 @@ activation = "auto"
         // Crea symlink `link -> real` y verifica que collect_manifests no lo sigue
         #[cfg(unix)]
         {
+            let link_dir = root.join("link");
             let _ = fs::remove_file(&link_dir);
             let _ = fs::remove_dir_all(&link_dir);
             symlink(&real_dir, &link_dir).unwrap();
