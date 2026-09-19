@@ -222,7 +222,9 @@ fn locus_equation_mensaje_es_aproximacion_no_exacta() {
 #[test]
 fn markdown_reference_is_the_registry_projection() {
     const RUNTIME_VALIDITY_NOTES: &str = "\n## Valores validos\n";
-    let documentation = include_str!("../../../docs/commands.md");
+    // Normalizado a LF: en el checkout de Windows (CRLF) la comparación
+    // exacta contra `render_markdown()` (LF) fallaba en la matriz MSVC.
+    let documentation = include_str!("../../../docs/commands.md").replace("\r\n", "\n");
     let (generated_reference, notes) = documentation
         .split_once(RUNTIME_VALIDITY_NOTES)
         .expect("docs must contain the runtime validity notes");

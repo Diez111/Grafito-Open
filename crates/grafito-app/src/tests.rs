@@ -824,7 +824,9 @@ fn complex_perspective_uses_panel_input_instead_of_bottom_bar() {
 
 #[test]
 fn complex_panel_recommends_executable_domain_coloring() {
-    let source = include_str!("panels.rs");
+    // Normalizado a LF: en Windows el checkout puede traer CRLF y las
+    // búsquedas multilínea fallaban (o pasaban por ausencia).
+    let source = include_str!("panels.rs").replace("\r\n", "\n");
 
     assert!(source.contains("DomainColoring[1/z, -2, 2, -2, 2, 160]"));
     assert!(!source.contains("ComplexGrid[1/z]\nColoración por fase"));
@@ -3788,8 +3790,10 @@ fn wide_shell_keeps_the_panel_rail_available_when_its_drawer_is_closed() {
 
 #[test]
 fn shell_and_keyboard_gates_use_window_dimensions_before_panels_reserve_space() {
-    let app_source = include_str!("app.rs");
-    let keyboard_source = include_str!("keyboard.rs");
+    // Normalizado a LF: `include_str!` embebe el archivo tal cual y en el
+    // checkout de Windows (CRLF) las búsquedas multilínea no matcheaban.
+    let app_source = include_str!("app.rs").replace("\r\n", "\n");
+    let keyboard_source = include_str!("keyboard.rs").replace("\r\n", "\n");
 
     assert!(app_source.contains("let viewport_width = ctx.screen_rect().width();"));
     assert!(
