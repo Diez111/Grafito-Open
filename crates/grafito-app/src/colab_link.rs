@@ -115,6 +115,10 @@ fn req(id: u64, method: &str, params: Value) -> String {
 
 /// Llama un método y devuelve `result` (los errores de tool viajan como
 /// `Err` con el texto; notificaciones intermedias se ignoran).
+///
+/// Tolerante al ruido: `uvx`/wheels imprimen progreso a stdout en la primera
+/// corrida; las líneas que no son JSON se saltean hasta el deadline en vez
+/// de abortar (ese era el "respuesta no-JSON" que rompía el pareo).
 pub fn mcp_call(
     pipe: &mut dyn McpPipe,
     id: u64,
@@ -124,17 +128,28 @@ pub fn mcp_call(
 ) -> Result<Value, String> {
     pipe.send_line(&req(id, method, params))?;
     let deadline = Instant::now() + timeout;
+    let mut noise = 0u32;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
+            if noise > 0 {
+                return Err(format!(
+                    "timeout en '{method}' tras saltear {noise} líneas de ruido (¿uvx descargando?)"
+                ));
+            }
             return Err(format!("timeout en '{method}'"));
         }
         let line = pipe.recv_line(left)?;
         if line.trim().is_empty() {
             continue;
         }
-        let msg: Value =
-            serde_json::from_str(&line).map_err(|e| format!("respuesta no-JSON: {e}"))?;
+        let msg: Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => {
+                noise += 1;
+                continue; // ruido de arranque (uvx/pip), no es la respuesta
+            }
+        };
         if msg.get("id") != Some(&json!(id)) {
             continue; // notificación u otro turno
         }
@@ -234,23 +249,39 @@ pub struct ToolInfo {
     pub input_schema: Value,
 }
 
+/// Intentos de pareo (cada uno espera 60 s en Chrome; la pestaña sigue
+/// abierta entre intentos porque el token es del proceso).
+pub const PAIR_ATTEMPTS: u32 = 3;
+
 /// Secuencia completa de pareo sobre un tubo ya abierto. Devuelve las tools
 /// descubiertas tras parear (o el error honesto para mostrar).
-pub fn pair_flow(pipe: &mut dyn McpPipe) -> Result<Vec<ToolInfo>, String> {
+///
+/// `on_attempt` se llama con (intento, total) para pintar progreso en la UI.
+pub fn pair_flow(
+    pipe: &mut dyn McpPipe,
+    on_attempt: &dyn Fn(u32),
+) -> Result<Vec<ToolInfo>, String> {
     let mut id = 0u64;
     let before = mcp_list_tools(pipe, &mut id, CALL_TIMEOUT)?;
     if !before.iter().any(|t| t.name == OPEN_TOOL) {
         return Err("el server no expone open_colab_browser_connection".into());
     }
-    let opened = mcp_call_tool(pipe, &mut id, OPEN_TOOL, json!({}), PAIR_TIMEOUT)?;
-    let ok = opened
-        .get("result")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if !ok {
-        return Err("no se completó el pareo en 60 s: aceptá en Chrome y reintentá".into());
+    for attempt in 1..=PAIR_ATTEMPTS {
+        on_attempt(attempt);
+        let opened = mcp_call_tool(pipe, &mut id, OPEN_TOOL, json!({}), PAIR_TIMEOUT)?;
+        let ok = opened
+            .get("result")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if ok {
+            return mcp_list_tools(pipe, &mut id, CALL_TIMEOUT);
+        }
+        // `false` = no llegaste a parear en 60 s; la pestaña sigue abierta
+        // con el mismo token y el siguiente intento la reutiliza.
     }
-    mcp_list_tools(pipe, &mut id, CALL_TIMEOUT)
+    Err(format!(
+        "no se completó el pareo en {PAIR_ATTEMPTS} intentos (60 s c/u): revisá que Chrome abra la pestaña de Colab con tu cuenta Pro y elegí entorno con GPU antes de aceptar"
+    ))
 }
 
 /// Heurística documentada: primer parámetro string cuyo nombre sugiera
@@ -499,7 +530,17 @@ fn connect_worker(cmd_rx: mpsc::Receiver<ColabCmd>, evt_tx: mpsc::Sender<ColabEv
         return;
     }
     log("servidor ColabMCP listo; abriendo Chrome para parear…");
-    match pair_flow(&mut pipe) {
+    let evt_tx2 = evt_tx.clone();
+    let on_attempt = move |attempt: u32| {
+        let _ = evt_tx2.send(ColabEvt::Phase(
+            ColabPhase::Busy,
+            format!("Esperando pareo en Chrome (intento {attempt}/{PAIR_ATTEMPTS})…"),
+        ));
+        let _ = evt_tx2.send(ColabEvt::Log(format!(
+            "intento {attempt}/{PAIR_ATTEMPTS}: Chrome abierto, pareá con tu Pro (60 s)"
+        )));
+    };
+    match pair_flow(&mut pipe, &on_attempt) {
         Ok(tools) => {
             let n = tools.len();
             let _ = evt_tx.send(ColabEvt::Tools(tools));
@@ -652,10 +693,13 @@ mod tests {
         tx: mpsc::Sender<String>,
         rx: mpsc::Receiver<String>,
         paired: Arc<Mutex<bool>>,
-        fail_open: bool,
+        /// Cuántas aperturas fallan antes de parear (reintentos del cliente).
+        fail_open_times: Arc<Mutex<u32>>,
+        /// Líneas de ruido (uvx) antes de la primera respuesta.
+        noise: usize,
     }
 
-    fn script_pair(fail_open: bool) -> (ScriptPipe, ScriptPeer) {
+    fn script_pair(fail_open_times: u32, noise: usize) -> (ScriptPipe, ScriptPeer) {
         let (a_tx, a_rx) = mpsc::channel();
         let (b_tx, b_rx) = mpsc::channel();
         (
@@ -664,7 +708,8 @@ mod tests {
                 tx: b_tx,
                 rx: a_rx,
                 paired: Arc::new(Mutex::new(false)),
-                fail_open,
+                fail_open_times: Arc::new(Mutex::new(fail_open_times)),
+                noise,
             },
         )
     }
@@ -682,12 +727,22 @@ mod tests {
 
     /// El peer corre en el hilo del test: responde como colab-mcp real.
     fn drive_peer(peer: ScriptPeer) {
+        let mut first = true;
         while let Ok(line) = peer.rx.recv() {
             let msg: Value = serde_json::from_str(&line).unwrap();
             let id = msg.get("id").cloned().unwrap_or(Value::Null);
             let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
             if method.starts_with("notifications/") {
                 continue;
+            }
+            if first {
+                first = false;
+                for _ in 0..peer.noise {
+                    // Ruido tipo uvx (progreso a stdout): el cliente lo saltea.
+                    if peer.tx.send("  Downloading pair… 42%".to_string()).is_err() {
+                        return;
+                    }
+                }
             }
             let resp = match method {
                 "initialize" => {
@@ -713,7 +768,9 @@ mod tests {
                         .and_then(Value::as_str)
                         .unwrap_or("");
                     if name == OPEN_TOOL {
-                        if peer.fail_open {
+                        let mut fails = peer.fail_open_times.lock().unwrap();
+                        if *fails > 0 {
+                            *fails -= 1;
                             json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": "false"}], "structuredContent": {"result": false}}})
                         } else {
                             *peer.paired.lock().unwrap() = true;
@@ -735,27 +792,60 @@ mod tests {
 
     #[test]
     fn pareo_ok_descubre_tools() {
-        let (mut pipe, peer) = script_pair(false);
+        let (mut pipe, peer) = script_pair(0, 0);
         let handle = std::thread::spawn(move || drive_peer(peer));
         let mut id = 0u64;
         mcp_init(&mut pipe, &mut id, Duration::from_secs(5)).unwrap();
-        let tools = pair_flow(&mut pipe).unwrap();
+        let attempts = Arc::new(Mutex::new(0u32));
+        let attempts2 = attempts.clone();
+        let tools = pair_flow(&mut pipe, &|_| {
+            *attempts2.lock().unwrap() += 1;
+        })
+        .unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "nb_execute");
         assert_eq!(
             pick_string_arg(&tools[0].input_schema).as_deref(),
             Some("code")
         );
+        assert_eq!(*attempts.lock().unwrap(), 1);
         drop(pipe);
         handle.join().unwrap();
     }
 
     #[test]
-    fn pareo_fallido_es_honesto() {
-        let (mut pipe, peer) = script_pair(true);
+    fn pareo_reintenta_y_parea_al_tercero() {
+        let (mut pipe, peer) = script_pair(2, 0);
         let handle = std::thread::spawn(move || drive_peer(peer));
-        let err = pair_flow(&mut pipe).unwrap_err();
-        assert!(err.contains("60 s"), "{err}");
+        let attempts = Arc::new(Mutex::new(0u32));
+        let attempts2 = attempts.clone();
+        let tools = pair_flow(&mut pipe, &|_| {
+            *attempts2.lock().unwrap() += 1;
+        })
+        .unwrap();
+        assert_eq!(tools[0].name, "nb_execute");
+        assert_eq!(*attempts.lock().unwrap(), 3);
+        drop(pipe);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn pareo_agotado_es_honesto() {
+        let (mut pipe, peer) = script_pair(99, 0);
+        let handle = std::thread::spawn(move || drive_peer(peer));
+        let err = pair_flow(&mut pipe, &|_| {}).unwrap_err();
+        assert!(err.contains("3 intentos"), "{err}");
+        drop(pipe);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn ruido_uvx_no_rompe_init() {
+        let (mut pipe, peer) = script_pair(0, 3);
+        let handle = std::thread::spawn(move || drive_peer(peer));
+        let mut id = 0u64;
+        // 3 líneas de ruido antes del initialize: se saltean, no es error.
+        mcp_init(&mut pipe, &mut id, Duration::from_secs(5)).unwrap();
         drop(pipe);
         handle.join().unwrap();
     }

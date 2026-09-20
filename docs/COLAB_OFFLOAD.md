@@ -9,7 +9,7 @@
 
 ```
 Grafito (este box, dueño ÚNICO del proxy: un solo pareo)
- ├─ Más > Colab Pro… → [Conectar Colab Pro]: la app lanza colab-mcp
+ ├─ Herramientas > Colab Pro… → [Conectar Colab Pro]: la app lanza colab-mcp
  │    (proxy local, googlecolab/colab-mcp, Apache-2.0, vía uvx) y abre
  │    TU Chrome con tu cuenta Pro; pareás la pestaña (60 s).
  ├─ Jobs: el agente los empaqueta (export_colab_job → lab_jobs/), vos los
@@ -26,7 +26,7 @@ vía `export_colab_job` / `import_colab_result` de `grafito-mcp`.
 
 ## 1. Conexión de tu cuenta Pro (un clic)
 
-1. En Grafito: **Más > Colab Pro…** → **[Conectar Colab Pro]**.
+1. En Grafito: **Herramientas > Colab Pro…** → **[Conectar Colab Pro]**.
    (La primera vez `uvx` descarga el server; el estado lo dice.)
 2. Se abre Chrome en un notebook vacío con el token de pareo: logueate
    con tu cuenta Pro si hace falta, elegí entorno con **GPU** y aceptá.

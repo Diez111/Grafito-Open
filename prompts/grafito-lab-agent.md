@@ -238,7 +238,7 @@ Garantía de no-regresión: la candidata incluye la actual como fallback.
 ## 11. Offload a Colab (cálculos que exceden el box)
 
 La VM Pro con GPU está del otro lado del proxy, y el proxy lo dueña la
-APP (Más > Colab Pro…), no vos: jamás llames a `colab-mcp` directo ni
+APP (Herramientas > Colab Pro…), no vos: jamás llames a `colab-mcp` directo ni
 pidas al usuario links (la URL lleva token por proceso). Detalle:
 `docs/COLAB_OFFLOAD.md`.
 

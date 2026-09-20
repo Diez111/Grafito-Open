@@ -1,5 +1,9 @@
 //! Ventana "Colab Pro": pareo en un clic + jobs pesados del lab.
 //!
+//! Estilo escandinavo quiet (patrón `draw_about_window`): título centrado,
+//! ritmo SPACE_MD/LG, hairlines, cards sutiles sobre `toolbar_bg`, botón
+//! primario en acento y secundario en `panel_bg`. Sin adornos.
+//!
 //! Regla de la casa: cero I/O en el dibujado — los botones solo mandan
 //! comandos al worker de `colab_link` y el `poll` drena eventos. El trabajo
 //! pesado (spawn, stdio, timeouts) vive en el hilo worker.
@@ -11,7 +15,9 @@ use crate::colab_link::{
 use crate::GrafitoApp;
 use grafito_ui::i18n::t;
 use grafito_ui::theme::{current_theme, Theme};
-use grafito_ui::tokens::{SPACE_SM, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS};
+use grafito_ui::tokens::{
+    RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS,
+};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -26,6 +32,7 @@ pub struct ColabPanelState {
 /// Dibuja la ventana Colab. Llamar una vez por frame cuando visible.
 pub fn draw_colab_window(app: &mut GrafitoApp, ctx: &egui::Context) {
     let locale = app.config_locale();
+    let theme = current_theme(ctx);
     // Drena eventos del worker antes de dibujar (cambia fase/tools/log).
     let changed = app.colab.poll();
     if changed || app.colab.is_busy() {
@@ -33,21 +40,87 @@ pub fn draw_colab_window(app: &mut GrafitoApp, ctx: &egui::Context) {
     }
     let mut open = app.show_colab_window;
     egui::Window::new(t("colab.title", locale))
+        .id(egui::Id::new("colab_window"))
         .open(&mut open)
-        .default_width(480.0)
+        .collapsible(false)
+        .resizable(true)
+        .default_width(460.0)
+        .frame(
+            egui::Frame::window(&ctx.style())
+                .fill(theme.toolbar_bg)
+                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                .inner_margin(egui::Margin::symmetric(20.0, 16.0)),
+        )
         .show(ctx, |ui| {
-            draw_status(ui, app, ctx);
-            ui.add_space(SPACE_SM);
-            ui.separator();
-            draw_tools(ui, app);
-            ui.add_space(SPACE_SM);
-            ui.separator();
-            draw_jobs(ui, app, ctx);
-            ui.add_space(SPACE_SM);
-            ui.separator();
-            draw_log(ui, app);
+            ui.vertical_centered(|ui| {
+                ui.label(
+                    egui::RichText::new("Colab Pro")
+                        .size(TYPE_LG)
+                        .strong()
+                        .color(theme.accent),
+                );
+                ui.add_space(SPACE_XS);
+                ui.label(
+                    egui::RichText::new("cómputo pesado · cuenta Pro")
+                        .size(TYPE_XS)
+                        .color(theme.text_secondary),
+                );
+            });
+            ui.add_space(SPACE_MD);
+            draw_status_card(ui, app, ctx, theme);
+            ui.add_space(SPACE_MD);
+            section(ui, theme, "Notebook", |ui| draw_tools(ui, app, theme));
+            ui.add_space(SPACE_MD);
+            section(ui, theme, "Jobs del lab", |ui| {
+                draw_jobs(ui, app, ctx, theme)
+            });
+            ui.add_space(SPACE_MD);
+            section(ui, theme, "Registro", |ui| draw_log(ui, app, theme));
         });
     app.show_colab_window = open;
+}
+
+/// Sección quiet: título en acento + hairline + contenido con aire.
+fn section(ui: &mut egui::Ui, theme: &Theme, title: &str, content: impl FnOnce(&mut egui::Ui)) {
+    ui.label(
+        egui::RichText::new(title)
+            .strong()
+            .size(TYPE_SM)
+            .color(theme.accent),
+    );
+    ui.add_space(SPACE_XS);
+    ui.separator();
+    ui.add_space(SPACE_SM);
+    content(ui);
+}
+
+/// Botón primario (acento) y secundario (panel) del sistema.
+fn primary_button(ui: &mut egui::Ui, theme: &Theme, label: &str) -> egui::Response {
+    ui.add_sized(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(TYPE_SM)
+                .color(egui::Color32::WHITE)
+                .strong(),
+        )
+        .rounding(RADIUS_MD)
+        .fill(theme.accent)
+        .stroke(egui::Stroke::NONE),
+    )
+}
+
+fn secondary_button(ui: &mut egui::Ui, theme: &Theme, label: String) -> egui::Response {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .size(TYPE_SM)
+                .color(theme.text_secondary),
+        )
+        .rounding(RADIUS_MD)
+        .fill(theme.panel_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator)),
+    )
 }
 
 fn status_dot(ui: &mut egui::Ui, phase: ColabPhase, theme: &Theme) {
@@ -60,56 +133,56 @@ fn status_dot(ui: &mut egui::Ui, phase: ColabPhase, theme: &Theme) {
     ui.label(egui::RichText::new(label).size(TYPE_LG).color(color));
 }
 
-fn draw_status(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context) {
+fn draw_status_card(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context, theme: &Theme) {
     let locale = app.config_locale();
-    let theme = current_theme(ctx);
-    ui.horizontal(|ui| {
-        status_dot(ui, app.colab.phase, theme);
-        ui.label(
-            egui::RichText::new(app.colab.status.clone())
-                .strong()
-                .size(TYPE_SM),
-        );
-    });
-    ui.label(
-        egui::RichText::new(t("colab.connect_hint", locale))
-            .size(TYPE_XS)
-            .color(theme.text_secondary),
-    );
-    ui.add_space(SPACE_XS);
-    ui.horizontal(|ui| {
-        let busy = app.colab.is_busy();
-        if app.colab.phase == ColabPhase::Ready {
-            if ui.button("Desconectar").clicked() {
-                app.colab.request_disconnect();
-            }
-        } else {
-            let label = if app.colab.phase == ColabPhase::Failed {
-                t("colab.retry", locale)
+    egui::Frame::none()
+        .fill(theme.panel_bg)
+        .rounding(RADIUS_SM)
+        .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                status_dot(ui, app.colab.phase, theme);
+                ui.label(
+                    egui::RichText::new(app.colab.status.clone())
+                        .strong()
+                        .size(TYPE_SM),
+                );
+                if app.colab.is_busy() {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spinner();
+                    });
+                }
+            });
+            ui.add_space(SPACE_XS);
+            ui.label(
+                egui::RichText::new(t("colab.connect_hint", locale))
+                    .size(TYPE_XS)
+                    .color(theme.text_secondary),
+            );
+            ui.add_space(SPACE_SM);
+            if app.colab.phase == ColabPhase::Ready {
+                if secondary_button(ui, theme, "Desconectar".to_string()).clicked() {
+                    app.colab.request_disconnect();
+                }
             } else {
-                t("colab.connect", locale)
-            };
-            if ui.add_enabled(!busy, egui::Button::new(label)).clicked() {
-                app.colab.output.clear();
-                app.colab_panel.import_note.clear();
-                app.colab.request_connect();
-                ctx.request_repaint();
+                let label = if app.colab.phase == ColabPhase::Failed {
+                    t("colab.retry", locale)
+                } else {
+                    t("colab.connect", locale)
+                };
+                ui.add_enabled_ui(!app.colab.is_busy(), |ui| {
+                    if primary_button(ui, theme, label).clicked() {
+                        app.colab.output.clear();
+                        app.colab_panel.import_note.clear();
+                        app.colab.request_connect();
+                        ctx.request_repaint();
+                    }
+                });
             }
-        }
-        if busy {
-            ui.spinner();
-        }
-    });
+        });
 }
 
-fn draw_tools(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    let theme = current_theme(ui.ctx());
-    ui.label(
-        egui::RichText::new("Notebook")
-            .strong()
-            .size(TYPE_SM)
-            .color(theme.accent),
-    );
+fn draw_tools(ui: &mut egui::Ui, app: &mut GrafitoApp, theme: &Theme) {
     if app.colab.tools.is_empty() {
         ui.label(
             egui::RichText::new("Sin tools: pareá primero.")
@@ -146,6 +219,7 @@ fn draw_tools(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             .iter()
             .find(|t| t.name == exec)
             .and_then(|t| pick_string_arg(&t.input_schema));
+        ui.add_space(SPACE_XS);
         ui.label(
             egui::RichText::new(format!(
                 "Ejecutor: {exec} (arg: {})",
@@ -157,23 +231,17 @@ fn draw_tools(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     }
 }
 
-fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context) {
-    let theme = current_theme(ctx);
-    ui.label(
-        egui::RichText::new("Jobs del lab")
-            .strong()
-            .size(TYPE_SM)
-            .color(theme.accent),
-    );
+fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context, theme: &Theme) {
     ui.label(
         egui::RichText::new(format!("carpeta: {}", lab_jobs_dir().display()))
             .size(TYPE_XS)
             .color(theme.text_secondary),
     );
+    ui.add_space(SPACE_XS);
     let jobs: Vec<JobMeta> = list_lab_jobs();
     if jobs.is_empty() {
         ui.label(
-            egui::RichText::new("Sin jobs: el agente los crea con export_colab_job.")
+            egui::RichText::new("Sin jobs todavía: el agente los crea con export_colab_job.")
                 .size(TYPE_XS)
                 .color(theme.text_secondary),
         );
@@ -184,30 +252,43 @@ fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context) {
         .show(ui, |ui| {
             for job in &jobs {
                 let selected = app.colab_panel.selected_job.as_deref() == Some(&job.job_id);
-                let short = format!("{}… · {}", &job.job_id[..12], job.kind);
-                if ui.radio(selected, short).clicked() {
-                    app.colab_panel.selected_job = Some(job.job_id.clone());
-                    app.colab_panel.script_preview =
-                        read_job_script(&job.job_id, 1200).unwrap_or_default();
-                    app.colab_panel.import_note.clear();
-                }
+                ui.horizontal(|ui| {
+                    if ui.radio(selected, &job.job_id[..12]).clicked() {
+                        app.colab_panel.selected_job = Some(job.job_id.clone());
+                        app.colab_panel.script_preview =
+                            read_job_script(&job.job_id, 1200).unwrap_or_default();
+                        app.colab_panel.import_note.clear();
+                    }
+                    ui.label(
+                        egui::RichText::new(format!("… · {}", job.kind))
+                            .size(TYPE_XS)
+                            .color(theme.text_secondary),
+                    );
+                });
             }
         });
     if app.colab_panel.selected_job.is_none() {
         return;
     }
-    ui.add_space(SPACE_XS);
-    egui::ScrollArea::vertical()
-        .max_height(120.0)
+    ui.add_space(SPACE_SM);
+    egui::Frame::none()
+        .fill(theme.panel_bg)
+        .rounding(RADIUS_SM)
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(app.colab_panel.script_preview.clone())
-                    .monospace()
-                    .size(TYPE_XS),
-            );
+            egui::ScrollArea::vertical()
+                .max_height(110.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(app.colab_panel.script_preview.clone())
+                            .monospace()
+                            .size(TYPE_XS),
+                    );
+                });
         });
+    ui.add_space(SPACE_SM);
     ui.horizontal(|ui| {
-        if ui.button("Copiar script").clicked() {
+        if secondary_button(ui, theme, "Copiar script".to_string()).clicked() {
             if let Some(id) = app.colab_panel.selected_job.clone() {
                 let full = read_job_script(&id, 1_000_000).unwrap_or_default();
                 ctx.copy_text(full);
@@ -216,37 +297,43 @@ fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context) {
         let can_run = app.colab.phase == ColabPhase::Ready
             && app.colab.executor.is_some()
             && !app.colab.is_busy();
-        if ui
-            .add_enabled(can_run, egui::Button::new("Ejecutar en Colab"))
-            .clicked()
-        {
-            run_selected_job(app);
-            ctx.request_repaint();
-        }
+        ui.add_enabled_ui(can_run, |ui| {
+            if primary_button(ui, theme, "Ejecutar en Colab").clicked() {
+                run_selected_job(app);
+                ctx.request_repaint();
+            }
+        });
     });
     if !app.colab.output.is_empty() {
-        ui.add_space(SPACE_XS);
+        ui.add_space(SPACE_SM);
         ui.label(
             egui::RichText::new("Salida (recorte):")
                 .strong()
                 .size(TYPE_XS),
         );
-        egui::ScrollArea::vertical()
-            .max_height(120.0)
+        ui.add_space(SPACE_XS);
+        egui::Frame::none()
+            .fill(theme.panel_bg)
+            .rounding(RADIUS_SM)
+            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
             .show(ui, |ui| {
-                ui.label(
-                    egui::RichText::new(app.colab.output.clone())
-                        .monospace()
-                        .size(TYPE_XS),
-                );
+                egui::ScrollArea::vertical()
+                    .max_height(110.0)
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(app.colab.output.clone())
+                                .monospace()
+                                .size(TYPE_XS),
+                        );
+                    });
             });
-        ui.horizontal(|ui| {
-            if ui.button("Importar y verificar").clicked() {
-                import_last_output(app);
-            }
-        });
+        ui.add_space(SPACE_SM);
+        if secondary_button(ui, theme, "Importar y verificar".to_string()).clicked() {
+            import_last_output(app);
+        }
     }
     if !app.colab_panel.import_note.is_empty() {
+        ui.add_space(SPACE_XS);
         ui.label(egui::RichText::new(app.colab_panel.import_note.clone()).size(TYPE_XS));
     }
 }
@@ -388,20 +475,19 @@ fn looks_like_result(v: &Value) -> bool {
     v.get("runs").is_some() || v.get("results").is_some() || v.get("verdict").is_some()
 }
 
-fn draw_log(ui: &mut egui::Ui, app: &mut GrafitoApp) {
-    let theme = current_theme(ui.ctx());
-    ui.label(
-        egui::RichText::new("Registro")
-            .strong()
-            .size(TYPE_SM)
-            .color(theme.accent),
-    );
-    egui::ScrollArea::vertical()
-        .max_height(90.0)
+fn draw_log(ui: &mut egui::Ui, app: &mut GrafitoApp, theme: &Theme) {
+    egui::Frame::none()
+        .fill(theme.panel_bg)
+        .rounding(RADIUS_SM)
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
         .show(ui, |ui| {
-            for line in app.colab.log.iter() {
-                ui.label(egui::RichText::new(line).monospace().size(TYPE_XS));
-            }
+            egui::ScrollArea::vertical()
+                .max_height(90.0)
+                .show(ui, |ui| {
+                    for line in app.colab.log.iter() {
+                        ui.label(egui::RichText::new(line).monospace().size(TYPE_XS));
+                    }
+                });
         });
 }
 
