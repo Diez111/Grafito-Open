@@ -128,6 +128,12 @@
     "context7": {
       "type": "remote",
       "url": "https://mcp.context7.com/mcp"
+    },
+    "grafito-mcp": {
+      "type": "local",
+      "command": ["cargo", "run", "-p", "grafito-mcp", "--offline"],
+      "enabled": true,
+      "timeout": 30000
     }
   },
   "provider": {

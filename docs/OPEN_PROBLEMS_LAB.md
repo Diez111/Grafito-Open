@@ -1,9 +1,15 @@
 # Lab de problemas abiertos — protocolo de uso (harness + loop de 1 problema)
 
-> Motor: `crates/grafito-geometry/src/search.rs`. Comandos: `UnitPairs`,
-> `DistinctDistances`, `UnitGraphEdges`, `ChromaticCheck`, `HalvingEdges`,
-> `EmptyTriangle`, `Topp39Scan` (categoría Discreta). Tools del agente:
-> `search_topp39`, `export_dimacs`.
+> Motor: `crates/grafito-geometry/src/search.rs`. Servidor MCP:
+> `crates/grafito-mcp` (stdio, binario `grafito-mcp`, 33 tools + 8 recursos).
+> Comandos: `UnitPairs`, `DistinctDistances`, `UnitGraphEdges`,
+> `ChromaticCheck`, `HalvingEdges`, `EmptyTriangle`, `Topp39Scan` (categoría
+> Discreta). Tools MCP: 7 lab (`search_topp39`, `export_dimacs`,
+> `verify_search_run`, `topp39_best_of`, `sat_check`, `check_bounds`,
+> `execute_command`) + 21 proxedas del asistente (análisis, pedagógicas y
+> base, paridad automática vía `SafeGrafitoDispatcher`). Excluidas a
+> propósito: `web_search` (red) y el harness-2 viejo (reemplazado).
+> Prompt del agente: `prompts/grafito-lab-agent.md`.
 
 ## Regla de oro (anti-alucinación)
 
@@ -36,10 +42,41 @@ cierra con la doble puerta sobre el mejor. Datos de referencia n=12:
 grilla `unit=17 distinct=8`, triangular `unit=23 distinct=7` (la
 triangular domina en pares unitarios a este tamaño; el azar da 0).
 
+## Servidor MCP (`grafito-mcp`)
+
+```bash
+cargo run -p grafito-mcp --offline
+```
+
+Protocolo: MCP 2024-11-05 por stdio (una línea JSON-RPC por mensaje).
+`initialize` → `tools/list` (33) → `tools/call` / `resources/read`.
+Recursos: `grafito://ledger`, `grafito://run/{id}`, `.../cnf/{k}`,
+`.../result`, `grafito://bounds/known`, `grafito://catalog/commands`
+(650 comandos, 25 categorías). El server es el único escritor del
+ledger (`$XDG_DATA_HOME/grafito/lab_ledger.jsonl` o `GRAFITO_LAB_LEDGER`) y
+solo guarda lo verificado. Sin `ledger_append` a propósito.
+
+Cobertura total: `execute_command` corre de verdad los 650 comandos sobre
+un doc efímero (1 paso o hasta 32 secuenciales con inventario final de
+etiquetas; I/O de archivos bloqueado con guía); las 21 del asistente
+(`evaluate_expr`, `diff`, `integrate`, `limit`, `solve_*`, `verify_step`,
+`groebner_gate`, pedagógicas, `run_command` como propuesta pura) van por
+proxy sin duplicar lógica. Límite honesto: el MCP es stateless, no ve el
+documento abierto en la ventana de Grafito (cada llamada parte de un doc
+vacío salvo sus propios `steps`).
+
+Topes altos configurables (sin presupuesto artificial, con resistencia):
+100k puntos (índice espacial O(n)), 2M aristas, 500k vars DIMACS, 50 MiB CNF,
+100k seeds, SAT hasta 24 h (`timeout_ms: 0` = sin timeout explícito).
+Env: `GRAFITO_LAB_MAX_POINTS/EDGES/DIMACS_VARS/CNF_BYTES/SEEDS/LEDGER`.
+Lo O(n²)/O(n³)/O(n⁴) imposible sigue honesto: distintas topa en 10k,
+halving/triángulo piden muestreo.
+
 ## Verificación externa (TOPP 57)
 
-1. `export_dimacs(points, k)` genera el CNF de la k-coloración.
-2. Se corre `kissat` o `cadical` fuera de Grafito con ese CNF.
+1. `export_dimacs(points, k)` genera el CNF (SHA-256 `cnf_hash`, guardado).
+2. `sat_check(cnf_hash, solver, timeout_ms)` corre `kissat`/`cadical` sidecar;
+   si falta el binario da error honesto con guía (estilo `FfmpegMissing`).
 3. Grafito jamás declara "no coloreable" más allá de backtracking n≤24;
    fuera de ahí la palabra final la tiene el SAT solver, no el LLM.
 
@@ -64,3 +101,12 @@ EmptyTriangle[{0,0,1,0,0,1}]
 | Triángulo vacío | n≤80 | `Err`, muestrear |
 | DIMACS | 20 000 vars / 512 KiB tool | achicar n/k |
 | Loop | 4096 seeds | partir en tandas |
+
+## Bucle RSI (dream loop)
+Detalle completo: `docs/RSI_ROADMAP.md`.
+Tools nuevas (propuesta): `lean_check`, `lean_submit`,
+`policy_suggest`, `replay_score`.
+Recursos: `lean://proofs/{id}`, `policy://archive`.
+El dream loop solo muta la política; nunca el cerebro ni el ledger.
+La candidata incluye la actual como fallback (no-regresión).
+Sin `verify_search_run` OK no hay evidencia; sin `lean_check` OK no hay `[PRUEBA]`.

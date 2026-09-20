@@ -2816,6 +2816,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-mcp"
+version = "1.2.1"
+dependencies = [
+ "grafito-agent",
+ "grafito-assistant",
+ "grafito-command",
+ "grafito-core",
+ "grafito-geometry",
+ "pollster",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "wgpu",
+]
+
+[[package]]
 name = "grafito-pedagogy"
 version = "1.2.1"
 dependencies = [
