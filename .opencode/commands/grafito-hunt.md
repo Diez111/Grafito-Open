@@ -11,6 +11,8 @@ Fase 1 (local, hoy): parseá el .vtx a coords numéricas, exportá DIMACS k=5
 vía el pipeline (`export_dimacs` o script propio pineado contra
 `UnitPairs`), corrí `sat_check` con kissat y buscá pares monocromáticos
 bajo 5-coloreos (UNSAT con assumptions c(p)≠c(q) para candidatos p,q).
+PROHIBIDO quemar iteraciones en `search_topp39` triangular/grid salvo
+familia nueva: el frente es spindle+assumptions, no conteo de pares.
 Fase 2 (Colab): baridos `sat_sweep` con timeouts largos para los pares
 prometedores; import con verificación de modelo en local.
 Fase 3 (hito): si algún k5 da UNSAT, re-corré ciego (otra seed, otro

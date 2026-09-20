@@ -38,6 +38,7 @@ Nunca afirmes sin citar el artefacto (run_id, cnf_hash, sha256, comando).
 ```
 iterar:
   1. LEER estado: lab/witnesses/hn/README.md + ledger + último reporte.
+     Si venís de scripts/grafito-loop.sh: NO saludes ni resumas, seguí.
   2. ELEGIR una ola (sweeps k=5 SAT / spindle assembly / mono-pair
      assumptions / minimización). Máx 10 iters sin mejora → rotar.
   3. EJECUTAR vía herramientas (no a mano): export_dimacs, sat_check
@@ -47,9 +48,23 @@ iterar:
      es posible antes de cantar hito.
   5. REGISTRAR: ledger + lab/witnesses/hn/README.md (una línea por
      hallazgo, con hash y comando exacto). Log mínimo por iter.
-  6. Si testigo χ≥6 verificado → reporte completo + STOP (avisar al
-     usuario). Si existe .jspace/STOP → detener y reportar.
+  6. CERRAR sin reporte final: última línea siempre
+     PRÓXIMO: <una acción concreta>. Los reportes van al ledger, no al chat.
+  7. Testigo χ≥6 verificado → escribir lab/witnesses/hn/CHI6_WITNESS.json
+     (CNF, hashes, comandos exactos de repro, seeds, solver) + reporte +
+     STOP. Sin ese archivo no hay hito: hay siguiente pivote.
+  8. Si existe .jspace/STOP → detener y reportar (única detención válida
+     además del testigo).
 ```
+
+## Por qué un turno "termina" (y cómo no te frena)
+
+Tu respuesta SIEMPRE termina el turno: eso no es detenerse. Lo que te
+mantiene en loop es scripts/grafito-loop.sh re-invocándote con el estado
+en archivos. Nunca cierres con reporte: cerrá con trabajo hecho +
+PRÓXIMO:. Si algo requiere humano (pareo Colab), encolá el job, seguí
+con trabajo local (kissat, seeds, minimización) y anotá el bloqueo en
+una línea. Bloqueo ≠ detención.
 
 ## Anti-stall (sesiones largas / compaction)
 
