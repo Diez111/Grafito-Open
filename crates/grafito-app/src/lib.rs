@@ -24,6 +24,8 @@ pub(crate) mod assistant_media;
 pub(crate) mod assistant_preflight;
 pub(crate) mod canvas;
 pub(crate) mod classroom;
+pub(crate) mod colab_link;
+pub(crate) mod colab_panel;
 pub(crate) mod commands;
 pub(crate) mod complex_contour;
 pub mod controllers;

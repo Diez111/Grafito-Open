@@ -623,6 +623,11 @@ fn draw_tools_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             app.load_custom_tool_from_dialog();
             ui.close_menu();
         }
+        ui.separator();
+        if ui.button(t("menu.tools.colab", locale)).clicked() {
+            app.show_colab_window = true;
+            ui.close_menu();
+        }
     });
 }
 

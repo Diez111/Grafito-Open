@@ -8,41 +8,47 @@
 ## 0. Cómo encaja (leer antes de usar)
 
 ```
-Muse Spark (opencode, este box)
- ├─ grafito-mcp (33+2 tools): export_colab_job → script .py autocontenido
- ├─ colab-mcp (proxy local, googlecolab/colab-mcp, Apache-2.0):
- │    open_colab_browser_connection → abre TU Chrome con tu cuenta Pro,
- │    vos pareás la pestaña (60 s), y re-publica las tools del notebook
+Grafito (este box, dueño ÚNICO del proxy: un solo pareo)
+ ├─ Más > Colab Pro… → [Conectar Colab Pro]: la app lanza colab-mcp
+ │    (proxy local, googlecolab/colab-mcp, Apache-2.0, vía uvx) y abre
+ │    TU Chrome con tu cuenta Pro; pareás la pestaña (60 s).
+ ├─ Jobs: el agente los empaqueta (export_colab_job → lab_jobs/), vos los
+ │    corrés desde el panel [Ejecutar en Colab] y el panel los importa
+ │    ([Importar y verificar] → import_colab_result en grafito-mcp).
  └─ import_colab_result: re-verifica en local y registra en lab_colab.jsonl
 ```
 
-`colab-mcp` corre en tu máquina (`uvx`, ya instalado: uv 0.12.10) y manda el
-código a TU sesión de Colab en el browser — la GPU Pro la pone tu cuenta,
-no este repo. Tu cliente opencode ya maneja `notifications/tools/list_changed`
-(PR anomalyco/opencode#5913, mergeado 2025-12-24): al parear, las tools del
-notebook aparecen solas sin reiniciar la sesión.
+`colab-mcp` corre en tu máquina (`uvx`) y manda el código a TU sesión de
+Colab en el browser — la GPU Pro la pone tu cuenta, no este repo. No hay
+link fijo que guardar: la URL lleva un token por proceso, por eso el botón
+la abre por vos. El agente (opencode) JAMÁS toca Colab directo: orquesta
+vía `export_colab_job` / `import_colab_result` de `grafito-mcp`.
 
-## 1. Conexión de tu cuenta Pro (una vez)
+## 1. Conexión de tu cuenta Pro (un clic)
 
-1. En opencode, llamá `open_colab_browser_connection` (server `colab-mcp`).
-   Se abre Chrome en una URL de Colab con el token de pareo.
-2. En esa pestaña: logueate con tu cuenta Pro si hace falta, elegí el
-   entorno (CPU/GPU — con Pro podés pedir GPU: A100/L4 según disponibilidad)
-   y aceptá la conexión. Tenés 60 s; si expira, repetí el paso 1.
-3. Verificá que llegaron las tools del notebook (`tools/list` las muestra).
-   Recién ahí mandes trabajo.
+1. En Grafito: **Más > Colab Pro…** → **[Conectar Colab Pro]**.
+   (La primera vez `uvx` descarga el server; el estado lo dice.)
+2. Se abre Chrome en un notebook vacío con el token de pareo: logueate
+   con tu cuenta Pro si hace falta, elegí entorno con **GPU** y aceptá.
+   Tenés 60 s; si expira, **[Reintentar]**.
+3. El punto se pone verde: "Pareado (N tools del notebook)". Elegí el
+   ejecutor (auto si hay uno obvio) y corre jobs. **[Desconectar]** apaga
+   el proxy.
 
 Primera vez, `uvx` descarga el server de GitHub (necesita red una sola vez;
 después queda en caché local).
 
 ## 2. Protocolo de offload (siempre igual)
 
-1. `export_colab_job(kind, params)` → `{job_id, script}`. El script solo usa
+1. El agente empaqueta: `export_colab_job(kind, params)` → `{job_id,
+   script}` en `lab_jobs/` (el panel los lista solo). El script solo usa
    lo preinstalado en Colab (numpy; `pip install python-sat` solo en
    `sat_sweep`, corre en la VM, no acá).
-2. Pegá/ejecutá el script con las tools del notebook pareado. El script
-   imprime UNA línea JSON a stdout.
-3. `import_colab_result(job_id, result)` con ese JSON. Niveles:
+2. En el panel Colab: elegí el job, **[Ejecutar en Colab]** con el ejecutor
+   descubierto (o [Copiar script] si preferís pegarlo a mano). La salida
+   queda en el panel (recorte).
+3. **[Importar y verificar]** (= `import_colab_result` contra el
+   `grafito-mcp` instalado). Niveles:
    - `full-local`: re-generado y re-medido acá, idéntico (incl. hash).
    - `model-checked`: modelo SAT chequeado cláusula por cláusula acá.
    - `cross`: veredicto sympy (segunda opinión, no prueba).

@@ -1939,6 +1939,12 @@ pub struct GrafitoApp {
     pub autocomplete: InputAutocomplete,
     /// Visibilidad de la ventana modal "Acerca de Grafito".
     pub show_about: bool,
+    /// Visibilidad de la ventana "Colab Pro" (pareo + jobs pesados).
+    pub show_colab_window: bool,
+    /// Enlace Colab (dueño único del proxy; estado + worker en background).
+    pub(crate) colab: crate::colab_link::ColabLink,
+    /// Selección del panel Colab (efímera, no persiste).
+    pub(crate) colab_panel: crate::colab_panel::ColabPanelState,
     /// Visibilidad de la hoja de atajos de teclado (claves `cheat.*` i18n).
     pub show_cheat_sheet: bool,
     /// Visibilidad del panel de animación trigonométrica (círculo unitario).
@@ -2627,6 +2633,9 @@ impl GrafitoApp {
             statistics_input_error: None,
             autocomplete: InputAutocomplete::default(),
             show_about: false,
+            show_colab_window: false,
+            colab: crate::colab_link::ColabLink::default(),
+            colab_panel: crate::colab_panel::ColabPanelState::default(),
             show_cheat_sheet: false,
             show_trig_animation: false,
             trig_angle: 0.0,
@@ -7763,6 +7772,10 @@ impl eframe::App for GrafitoApp {
         if self.show_about {
             self.draw_about_window(ctx);
         }
+        // Colab Pro: pareo en un clic + jobs pesados (Más > Colab Pro…).
+        if self.show_colab_window {
+            crate::colab_panel::draw_colab_window(self, ctx);
+        }
         // Ola 0.6: hoja de atajos (Ayuda > Atajos de teclado).
         if self.show_cheat_sheet {
             self.draw_cheat_sheet_window(ctx);
@@ -9625,6 +9638,9 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         statistics_input_error: None,
         autocomplete: InputAutocomplete::default(),
         show_about: false,
+        show_colab_window: false,
+        colab: crate::colab_link::ColabLink::default(),
+        colab_panel: crate::colab_panel::ColabPanelState::default(),
         show_cheat_sheet: false,
         show_trig_animation: false,
         trig_angle: 0.0,
