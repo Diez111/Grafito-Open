@@ -16,6 +16,7 @@ use grafito_geometry::Point2;
 use std::collections::BTreeMap;
 
 pub mod bridge;
+pub mod colab;
 pub mod gpu;
 pub mod lean;
 pub mod ledger;

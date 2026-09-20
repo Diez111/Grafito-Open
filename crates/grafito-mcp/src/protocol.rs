@@ -110,13 +110,14 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-/// Todas las tools: 7 lab + execute_command + 21 proxedas + 2 Lean + 2 policy + 1 GPU.
+/// Todas las tools: 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
 pub fn all_tool_defs() -> Vec<Value> {
     let mut defs = tool_defs();
     defs.extend(crate::bridge::proxied_tool_defs());
     defs.extend(crate::lean::lean_tool_defs());
     defs.extend(crate::policy::policy_tool_defs());
     defs.extend(crate::gpu::gpu_tool_defs());
+    defs.extend(crate::colab::colab_tool_defs());
     defs
 }
 
@@ -172,6 +173,12 @@ fn resource_defs() -> Vec<Value> {
             "description": "Historial de políticas de exploración con su replay score (dream loop)",
             "mimeType": "application/json"
         }),
+        json!({
+            "uriTemplate": "colab://jobs/{job_id}",
+            "name": "colab-job",
+            "description": "Manifiesto de un job de offload a Colab (kind, params, tamaño del script)",
+            "mimeType": "application/json"
+        }),
     ]
 }
 
@@ -190,6 +197,9 @@ fn read_resource(uri: &str, limits: &LabLimits) -> Result<Value, String> {
     }
     if uri == "policy://archive" {
         return Ok(crate::policy::read_policy_archive());
+    }
+    if let Some(job_id) = uri.strip_prefix("colab://jobs/") {
+        return crate::colab::read_colab_job(job_id);
     }
     if let Some(proof_id) = uri.strip_prefix("lean://proofs/") {
         return crate::lean::read_lean_proof(proof_id);
@@ -362,6 +372,8 @@ fn call_tool(name: &str, args: &Value, limits: &LabLimits) -> Result<Value, Stri
         "policy_suggest" => crate::policy::policy_suggest(args, limits),
         "replay_score" => crate::policy::policy_replay(args, limits),
         "gpu_probe" => crate::gpu::gpu_probe(),
+        "export_colab_job" => crate::colab::export_colab_job(args, limits),
+        "import_colab_result" => crate::colab::import_colab_result(args, limits),
         _ if crate::bridge::is_proxied(name) => crate::bridge::dispatch_proxied(name, args),
         _ => Err(format!("tool '{name}' desconocida")),
     }
@@ -401,8 +413,8 @@ mod tests {
             .and_then(|r| r.get("tools"))
             .and_then(Value::as_array)
             .unwrap();
-        // 7 lab + execute_command + 21 proxedas + 2 Lean + 2 policy + 1 GPU.
-        assert_eq!(tools.len(), 33);
+        // 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+        assert_eq!(tools.len(), 35);
         // Notificaciones no responden.
         assert!(dispatch(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),

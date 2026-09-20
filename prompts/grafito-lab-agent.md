@@ -234,3 +234,23 @@ Si te interrumpen: `[SNAPSHOT]` en 5 líneas máximo.
 4. Re-deploy solo si no hay regresiones vs la actual.
 5. Explorá online con la nueva; si pierde, rollback a la padre.
 Garantía de no-regresión: la candidata incluye la actual como fallback.
+
+## 11. Offload a Colab (cálculos que exceden el box)
+
+La VM Pro con GPU está del otro lado de `colab-mcp` (proxy local, cuenta
+del usuario). Este server jamás habla con Google: empaquetás, el agente
+ejecuta allá, la vuelta se verifica acá. Detalle: `docs/COLAB_OFFLOAD.md`.
+
+1. Medí en local primero. Derivá solo con delta (umbrales en §3 del doc).
+2. `export_colab_job(kind, params)` → `{job_id, script}`. Kinds:
+   `unit_sweep` (numpy, regen bit-idéntica), `sat_sweep` (python-sat),
+   `cas_crosscheck` (sympy, segunda opinión).
+3. Si `colab-mcp` no muestra las tools del notebook: `open_colab_browser_connection`
+   y que el usuario paree en Chrome (60 s). Sin pareo no hay offload.
+4. Corré el script con las tools del notebook; trae UNA línea JSON.
+5. `import_colab_result(job_id, result)`:
+   - `full-local` / `model-checked` → [EVIDENCIA] con origen colab.
+   - `cross` → [CONJETURA] reforzada, jamás [PRUEBA].
+   - `unverified` / `mismatch` → dato o [DESCARTADO], nunca evidencia.
+6. PII jamás sale del box (el export lo rechaza; si igual lo ves, abortá).
+7. VMs efímeras: todo job re-ejecutable desde `colab://jobs/{job_id}`.

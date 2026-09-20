@@ -58,14 +58,14 @@ fn contrato_completo_con_ledger_temporal() {
         &limits,
     )
     .unwrap();
-    // 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU.
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 33);
+    // 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 35);
     let res = protocol::dispatch(
         &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}),
         &limits,
     )
     .unwrap();
-    assert_eq!(res["result"]["resources"].as_array().unwrap().len(), 8);
+    assert_eq!(res["result"]["resources"].as_array().unwrap().len(), 9);
 
     // search triangular n=12 → referencia unit=23 distinct=7
     let s = call(
@@ -154,13 +154,35 @@ fn contrato_completo_con_ledger_temporal() {
     );
     assert!(rp["result"]["structuredContent"]["winner"] == json!(0));
 
-    // resources/read ledger + run + bounds + catalog + policy archive
+    // Colab: export job + import simulado + recurso del job.
+    let cj = call(
+        &limits,
+        27,
+        "export_colab_job",
+        json!({"kind": "unit_sweep", "params": {"family": "seeded", "n": 8, "seeds": [3]}}),
+    );
+    let cjob = cj["result"]["structuredContent"]["job_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(cjob.len(), 64);
+    // PII se rechaza antes de empaquetar.
+    let pii = call(
+        &limits,
+        28,
+        "export_colab_job",
+        json!({"kind": "cas_crosscheck", "params": {"expression": "a@b.com", "claim": "1", "check": "identity"}}),
+    );
+    assert_eq!(pii["result"]["isError"], json!(true));
+
+    // resources/read ledger + run + bounds + catalog + policy archive + colab job
     for (id, uri) in [
         (8, "grafito://ledger".to_string()),
         (9, format!("grafito://run/{run_id}")),
         (10, "grafito://bounds/known".to_string()),
         (11, "grafito://catalog/commands".to_string()),
         (26, "policy://archive".to_string()),
+        (29, format!("colab://jobs/{cjob}")),
     ] {
         let r = protocol::dispatch(
             &json!({"jsonrpc": "2.0", "id": id, "method": "resources/read",
