@@ -55,6 +55,13 @@
       "temperature": 0.2,
       "permission": "allow"
     },
+    "grafito-mode": {
+      "description": "Caza χ=6 Hadwiger-Nelson en loop autónomo: propone, mide, verifica, registra. No pregunta, no se detiene sin testigo o STOP.",
+      "mode": "primary",
+      "model": "opencode-go/muse-spark-1.3-contributor",
+      "temperature": 0.1,
+      "permission": "allow"
+    },
     "cerebro-audit": {
       "description": "Auditor cerebro puro Rust: core/geometry/command sin egui/wgpu, invariants type-safety",
       "mode": "subagent",
