@@ -5206,6 +5206,57 @@ fn headless_cas_and_trig_panels_render_without_panic() {
     assert!(!crate::app::trig_animation_supported(app_d3.current_view));
 }
 
+/// Acumula textos pintados más allá del ancho disponible (borde del panel).
+fn collect_trig_text_overflow(shape: &egui::Shape, limit: f32, out: &mut Vec<String>) {
+    match shape {
+        egui::Shape::Text(text) => {
+            let right = text.pos.x + text.galley.size().x;
+            if right > limit + 0.5 {
+                out.push(format!("{:?} bordes right={right:.1}", text.galley.text()));
+            }
+        }
+        egui::Shape::Vec(shapes) => {
+            for shape in shapes {
+                collect_trig_text_overflow(shape, limit, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// El explorador trigonométrico no desborda su ancho en ningún tamaño de
+/// ventana: todo texto pintado queda dentro del borde derecho del panel
+/// (= borde de la ventana). Atrapa la regresión de los chips `sin(t)…csc(t)`,
+/// el prompt "Auto" y los sliders recortados.
+#[test]
+fn trig_panel_text_never_overflows_its_width() {
+    for width in [480.0_f32, 560.0, 640.0, 960.0, 1080.0, 1280.0, 1600.0] {
+        let ctx = egui::Context::default();
+        grafito_ui::theme::DARK.apply(&ctx);
+        let mut app =
+            crate::app::dummy_grafito_app_with_perspective(crate::Perspective::Geometry2D);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 720.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run(input, |ctx| {
+            crate::panels::draw_trig_animation_panel(&mut app, ctx);
+        });
+        let mut overflow = Vec::new();
+        for clipped in &output.shapes {
+            collect_trig_text_overflow(&clipped.shape, width, &mut overflow);
+        }
+        assert!(
+            overflow.is_empty(),
+            "ancho {width}: {} textos fuera del panel: {overflow:?}",
+            overflow.len()
+        );
+    }
+}
+
 #[test]
 fn headless_teaching_overlay_renders_without_panic() {
     let ctx = egui::Context::default();

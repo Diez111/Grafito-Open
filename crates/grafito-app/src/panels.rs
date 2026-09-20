@@ -2788,55 +2788,227 @@ pub(crate) fn draw_view_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
     ctx.data_mut(|data| data.insert_temp(layer_panel_id, layer_state));
 }
 
+// ── Explorador trigonométrico: grilla responsive y centrado ─────────────
+/// Ancho mínimo del lienzo 2D con el explorador abierto: el panel nunca lo
+/// aplasta más allá de esto.
+const TRIG_CANVAS_MIN_W: f32 = 320.0;
+/// Ancho por defecto del explorador (drawer derecho).
+const TRIG_PANEL_DEFAULT_W: f32 = 300.0;
+/// Piso y techo del explorador: legible en ventanas chicas, sin muro en anchas.
+const TRIG_PANEL_MIN_W: f32 = 248.0;
+const TRIG_PANEL_MAX_W: f32 = 400.0;
+/// Ancho mínimo de un chip de función (texto + padding 16×8 del sistema).
+const TRIG_CHIP_MIN_W: f32 = 74.0;
+/// Ancho del botón «Aplicar» del prompt de velocidad (texto + padding).
+const TRIG_APPLY_W: f32 = 76.0;
+/// Alto único de los controles del explorador (≥ `HIT_TARGET_MIN`).
+const TRIG_CONTROL_H: f32 = PANEL_BUTTON_H;
+
+/// Columnas del selector de funciones según el ancho real: 6 en una fila si
+/// entran, 3×2 en paneles normales y 2×3 en el piso. Nunca hay recorte.
+fn trig_function_columns(available: f32) -> usize {
+    let fits = |cols: usize| {
+        available >= cols as f32 * TRIG_CHIP_MIN_W + (cols.saturating_sub(1) as f32) * SPACE_SM
+    };
+    if fits(6) {
+        6
+    } else if fits(3) {
+        3
+    } else {
+        2
+    }
+}
+
+/// Ancho exacto de cada celda del grid para `columns` columnas separadas por
+/// `SPACE_SM`: celdas + gaps nunca superan `available`.
+fn trig_grid_cell_w(available: f32, columns: usize) -> f32 {
+    let cols = columns.max(1) as f32;
+    ((available - (cols - 1.0) * SPACE_SM) / cols).max(0.0)
+}
+
+/// Etiqueta alineada por el layout (centro/derecha) sin el corrimiento de
+/// egui 0.29: `Label` pinta el galley en el borde alineado en vez de `rect.min`,
+/// así que se fuerza `halign(LEFT)` y el layout ubica el rect.
+fn aligned_label(ui: &mut egui::Ui, text: egui::RichText) {
+    ui.add(egui::Label::new(text).halign(egui::Align::LEFT));
+}
+
+/// Rótulo de sección centrado (micro tipo, mayúsculas, terciario).
+fn trig_section_label(ui: &mut egui::Ui, text: &str) {
+    let color = current_theme(ui.ctx()).text_tertiary;
+    ui.vertical_centered(|ui| {
+        aligned_label(
+            ui,
+            egui::RichText::new(text)
+                .color(color)
+                .size(TYPE_XS)
+                .strong(),
+        );
+    });
+    ui.add_space(SPACE_XS);
+}
+
+/// Chip seleccionable del explorador: pill con contraste AA en ambos estados.
+fn trig_chip(ui: &mut egui::Ui, width: f32, label: &str, selected: bool) -> egui::Response {
+    let theme = current_theme(ui.ctx());
+    let text_color = if selected {
+        theme.text_primary
+    } else {
+        theme.text_secondary
+    };
+    ui.add_sized(
+        [width, TRIG_CONTROL_H],
+        egui::Button::new(egui::RichText::new(label).size(TYPE_SM).color(text_color))
+            .selected(selected)
+            .rounding(RADIUS_PILL),
+    )
+}
+
+/// Tarjeta quieta: `input_bg` + borde `separator` + radio medio, ancho completo.
+/// El borde es 1 px opaco (mismo token que los botones) para que la tarjeta se
+/// lea sobre `panel_bg` sin dramatismo; la hairline 10 % no alcanza en oscuro.
+fn trig_card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let theme = current_theme(ui.ctx());
+    egui::Frame::none()
+        .fill(theme.input_bg)
+        .stroke(egui::Stroke::new(1.0, theme.separator))
+        .rounding(egui::Rounding::same(RADIUS_MD))
+        .inner_margin(egui::Margin::same(SPACE_MD))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            add(ui)
+        })
+        .inner
+}
+
+/// Fila etiqueta a la izquierda + valor mono a la derecha, sin desborde.
+fn trig_value_row(ui: &mut egui::Ui, label: &str, value: &str) {
+    let theme = current_theme(ui.ctx());
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        ui.label(
+            egui::RichText::new(label)
+                .color(theme.text_tertiary)
+                .size(TYPE_XS)
+                .strong(),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            aligned_label(
+                ui,
+                egui::RichText::new(value)
+                    .color(theme.text_primary)
+                    .size(TYPE_XS)
+                    .monospace(),
+            );
+        });
+    });
+}
+
+/// Header centrado: título al medio con cierre simétrico a la derecha + hairline.
+/// Devuelve `true` si se pidió cerrar.
+fn trig_header(ui: &mut egui::Ui, title: &str, accent: Color32, close_color: Color32) -> bool {
+    let side = HIT_TARGET_MIN + SPACE_SM;
+    let mut close = false;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.add_space(side);
+        let center_w = (ui.available_width() - side).max(64.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2(center_w, 0.0),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                aligned_label(
+                    ui,
+                    egui::RichText::new(title)
+                        .color(accent)
+                        .size(TYPE_MD)
+                        .strong(),
+                );
+            },
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if action_icon_button(ui, Icon::Close, close_color, "Cerrar animación").clicked() {
+                close = true;
+            }
+        });
+    });
+    ui.add_space(SPACE_XS);
+    ui.painter().line_segment(
+        [
+            ui.cursor().min,
+            ui.cursor().min + egui::vec2(ui.available_width(), 0.0),
+        ],
+        current_theme(ui.ctx()).hairline_stroke(),
+    );
+    ui.add_space(SPACE_SM);
+    close
+}
+
+/// Slider a ancho completo y sin texto de valor (el valor se lee arriba, mono).
+/// El raíl usa `separator` (el `button_bg` por defecto se funde con la tarjeta).
+fn trig_full_slider(
+    ui: &mut egui::Ui,
+    value: &mut f64,
+    range: std::ops::RangeInclusive<f64>,
+    decimals: usize,
+) -> bool {
+    ui.visuals_mut().widgets.inactive.bg_fill = current_theme(ui.ctx()).separator;
+    ui.spacing_mut().slider_width = ui.available_width();
+    ui.add(
+        egui::Slider::new(value, range)
+            .fixed_decimals(decimals)
+            .show_value(false),
+    )
+    .changed()
+}
+
 /// Panel derecho: controles de la animación trigonométrica.
 ///
 /// El círculo y la función se dibujan como overlay del canvas 2D para compartir
 /// exactamente la grilla, escala y perspectiva de Geometry2D.
 pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
-    let (_is_dark, accent, alg_fill, _sep_col, _txt_col, txt_dim, hdr_col) = panel_theme_local(ctx);
+    let theme = current_theme(ctx);
+    let accent = theme.accent;
+    let panel_bg = theme.panel_bg;
 
-    egui::SidePanel::right("right_trig_animation").show_separator_line(false)
-        .default_width(280.0)
-        .min_width(220.0)
-        .max_width((ctx.available_rect().width() * 0.45).max(240.0))
+    // Responsive: reserva un lienzo mínimo y evita el panel-muro en anchos grandes.
+    let viewport_w = ctx.available_rect().width();
+    let max_w = (viewport_w - TRIG_CANVAS_MIN_W)
+        .min(viewport_w * 0.6)
+        .clamp(TRIG_PANEL_MIN_W, TRIG_PANEL_MAX_W);
+
+    egui::SidePanel::right("right_trig_animation")
+        .show_separator_line(false)
+        .default_width(TRIG_PANEL_DEFAULT_W)
+        .min_width(TRIG_PANEL_MIN_W)
+        .max_width(max_w)
         .resizable(true)
         .frame(
             egui::Frame::none()
-                .fill(alg_fill)
-                .stroke(egui::Stroke::NONE),
+                .fill(panel_bg)
+                .inner_margin(egui::Margin::symmetric(SPACE_MD, SPACE_SM)),
         )
         .show(ctx, |ui| {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.add_space(SPACE_SM);
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(if app.perspective == crate::Perspective::Complex {
-                                "Animación Compleja"
-                            } else {
-                                "Explorador Trigonométrico"
-                            })
-                                .color(accent)
-                                .size(TYPE_MD)
-                                .strong(),
-                        );
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui
-                                .small_button("x")
-                                .on_hover_text("Cerrar animación")
-                                .clicked()
-                            {
-                                app.set_trig_animation_visible(false);
-                            }
-                        });
-                    });
-                    ui.add_space(6.0);
+                    // Nada se recorta: etiquetas envueltas y controles con ancho exacto.
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                    ui.spacing_mut().item_spacing = egui::vec2(SPACE_SM, SPACE_XS);
+
+                    let title = if app.perspective == crate::Perspective::Complex {
+                        "Animación Compleja"
+                    } else {
+                        "Explorador Trigonométrico"
+                    };
+                    if trig_header(ui, title, accent, theme.text_secondary) {
+                        app.set_trig_animation_visible(false);
+                    }
 
                     if app.perspective == crate::Perspective::Complex {
                         ui.label(
                             egui::RichText::new("z(t) = cos(t) + i sin(t) = e^(it)")
-                                .color(hdr_col)
+                                .color(theme.text_secondary)
                                 .size(TYPE_SM)
                                 .strong(),
                         );
@@ -2844,123 +3016,112 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                             egui::RichText::new(
                                 "El punto rojo recorre el círculo unitario; el punto violeta muestra su imagen por la transformación compleja activa.",
                             )
-                            .color(txt_dim)
-                            .size(grafito_ui::tokens::TYPE_XS),
+                            .color(theme.text_tertiary)
+                            .size(TYPE_XS),
                         );
                         ui.add_space(SPACE_SM);
                     }
 
-                    ui.label(
-                        egui::RichText::new("Función activa")
-                            .color(hdr_col)
-                            .size(TYPE_SM),
-                    );
-                    ui.horizontal_wrapped(|ui| {
-                        for (idx, spec) in crate::app::TRIG_FUNCTIONS.iter().enumerate() {
-                            let label = format!("{}(t)", spec.name);
-                            if ui
-                                .selectable_label(app.trig_function as usize == idx, label)
-                                .clicked()
-                            {
-                                app.set_trig_function(idx as u8);
-                                            }
-                                        }
-                                    });
-                                    // W3 — la exportación deja de ser muda: revela
-                                    // la carpeta de la última exportación exitosa.
-                                    if app.last_export_dir.is_some() {
-                                        ui.add_space(SPACE_XS);
-                                        ui.horizontal(|ui| {
-                                            if ui
-                                                .small_button("Mostrar en carpeta")
-                                                .on_hover_text(
-                                                    "Abre la carpeta de tu última exportación.",
-                                                )
-                                                .clicked()
-                                            {
-                                                app.reveal_last_export();
-                                            }
-                                        });
-                                    }
-
-                    ui.add_space(6.0);
+                    // ── Función activa: grilla responsive de chips ──
+                    trig_section_label(ui, "FUNCIÓN ACTIVA");
+                    let columns = trig_function_columns(ui.available_width());
+                    let cell_w = trig_grid_cell_w(ui.available_width(), columns);
+                    egui::Grid::new("trig_function_grid")
+                        .num_columns(columns)
+                        .spacing([SPACE_SM, SPACE_XS])
+                        .show(ui, |ui| {
+                            let total = crate::app::TRIG_FUNCTIONS.len();
+                            for (idx, spec) in crate::app::TRIG_FUNCTIONS.iter().enumerate() {
+                                let label = format!("{}(t)", spec.name);
+                                let selected = app.trig_function as usize == idx;
+                                if trig_chip(ui, cell_w, &label, selected).clicked() {
+                                    app.set_trig_function(idx as u8);
+                                }
+                                if (idx + 1) % columns == 0 || idx + 1 == total {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                    ui.add_space(SPACE_SM);
 
                     let spec = GrafitoApp::trig_spec(app.trig_function);
 
-                    ui.horizontal_wrapped(|ui| {
-                        if action_icon_button(
-                            ui,
-                            if app.trig_animating { Icon::Pause } else { Icon::Play },
-                            if app.trig_animating { accent } else { txt_dim },
-                            if app.trig_animating {
-                                "Pausar animación"
+                    // ── Velocidad: play/pausa, slider y pedido en palabras ──
+                    trig_card(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = SPACE_SM;
+                            let (icon, color, tip) = if app.trig_animating {
+                                (Icon::Pause, accent, "Pausar animación")
                             } else {
-                                "Iniciar animación"
-                            },
-                        )
-                        .clicked()
-                        {
-                            app.trig_animating = !app.trig_animating;
-                        }
-                        ui.label(egui::RichText::new("Velocidad").color(txt_dim).size(TYPE_XS));
-                        let speed_changed = ui
-                            .add(
-                                egui::Slider::new(&mut app.trig_speed, -6.0..=6.0)
-                                    .fixed_decimals(1)
-                                    .suffix(" rad/s"),
-                            )
-                            .changed();
-                        if speed_changed {
+                                (Icon::Play, theme.text_secondary, "Iniciar animación")
+                            };
+                            if action_icon_button(ui, icon, color, tip).clicked() {
+                                app.trig_animating = !app.trig_animating;
+                                ctx.request_repaint();
+                            }
+                            trig_value_row(
+                                ui,
+                                "VELOCIDAD",
+                                &format!("{:.1} rad/s", app.trig_speed),
+                            );
+                        });
+                        ui.add_space(SPACE_XS);
+                        if trig_full_slider(ui, &mut app.trig_speed, -6.0..=6.0, 1) {
                             ctx.request_repaint();
                         }
-                        // Prompt auto (G-C): palabras o números → velocidad honesta.
+                        ui.add_space(SPACE_SM);
                         draw_trig_speed_prompt(ui, app);
                     });
 
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label(egui::RichText::new("Vista").color(txt_dim).size(TYPE_XS));
-                        if ui
-                            .selectable_label(
-                                app.trig_view_mode == crate::app::TrigViewMode::Didactic,
-                                "Didáctica",
-                            )
-                            .on_hover_text("Círculo unitario siempre visible en una tarjeta flotante")
-                            .clicked()
-                        {
-                            app.trig_view_mode = crate::app::TrigViewMode::Didactic;
-                            ctx.request_repaint();
-                        }
-                        if ui
-                            .selectable_label(
-                                app.trig_view_mode == crate::app::TrigViewMode::Grid,
-                                "Sobre grilla",
-                            )
-                            .on_hover_text("Dibuja el círculo unitario en coordenadas reales")
-                            .clicked()
-                        {
-                            app.trig_view_mode = crate::app::TrigViewMode::Grid;
+                    // ── Vista: segmento de dos opciones ──
+                    ui.add_space(SPACE_SM);
+                    trig_section_label(ui, "VISTA");
+                    let segment_w = trig_grid_cell_w(ui.available_width(), 2);
+                    egui::Grid::new("trig_view_mode_grid")
+                        .num_columns(2)
+                        .spacing([SPACE_SM, SPACE_XS])
+                        .show(ui, |ui| {
+                            let modes = [
+                                (
+                                    crate::app::TrigViewMode::Didactic,
+                                    "Didáctica",
+                                    "Círculo unitario siempre visible en una tarjeta flotante",
+                                ),
+                                (
+                                    crate::app::TrigViewMode::Grid,
+                                    "Sobre grilla",
+                                    "Dibuja el círculo unitario en coordenadas reales",
+                                ),
+                            ];
+                            for (mode, label, tip) in modes {
+                                let selected = app.trig_view_mode == mode;
+                                if trig_chip(ui, segment_w, label, selected)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    app.trig_view_mode = mode;
+                                    ctx.request_repaint();
+                                }
+                            }
+                            ui.end_row();
+                        });
+
+                    // ── Ángulo ──
+                    ui.add_space(SPACE_SM);
+                    trig_card(ui, |ui| {
+                        trig_value_row(ui, "ÁNGULO", &format!("{:.2} rad", app.trig_angle));
+                        ui.add_space(SPACE_XS);
+                        if trig_full_slider(
+                            ui,
+                            &mut app.trig_angle,
+                            -2.0 * std::f64::consts::PI..=2.0 * std::f64::consts::PI,
+                            2,
+                        ) {
                             ctx.request_repaint();
                         }
                     });
 
-                    let angle_changed = ui
-                        .horizontal(|ui| {
-                            ui.label(egui::RichText::new("Ángulo").color(txt_dim).size(TYPE_XS));
-                            ui.add(
-                                egui::Slider::new(
-                                    &mut app.trig_angle,
-                                    -2.0 * std::f64::consts::PI..=2.0 * std::f64::consts::PI,
-                                )
-                                .fixed_decimals(2)
-                                .suffix(" rad"),
-                            )
-                            .changed()
-                        })
-                        .inner;
-                    if angle_changed {
-                        ctx.request_repaint();
-                    }
-
+                    // ── Lectura del punto vivo ──
                     let t = app.trig_angle;
                     let fn_val = GrafitoApp::trig_value(app.trig_function, t);
                     let cos_t = t.cos();
@@ -2970,54 +3131,57 @@ pub(crate) fn draw_trig_animation_panel(app: &mut GrafitoApp, ctx: &egui::Contex
                     } else {
                         format!("{}({:.2}) no está definido", spec.name, t)
                     };
-                    ui.add_space(6.0);
-                    egui::Frame::none()
-                        .fill(current_theme(ctx).input_bg)
-                        .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_SM))
-                        .inner_margin(egui::Margin::same(grafito_ui::tokens::SPACE_SM))
-                        .show(ui, |ui| {
-                            ui.label(egui::RichText::new(value_text).color(accent).size(TYPE_SM).strong());
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "Punto: (cos θ, sin θ) = ({:.3}, {:.3})",
-                                    cos_t, sin_t
-                                ))
-                                .color(hdr_col)
-                                .size(TYPE_XS),
-                            );
-                            ui.label(
-                                egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
-                                    .color(txt_dim)
-                                    .size(grafito_ui::tokens::TYPE_XS),
-                            );
-                            // Lectura de traza (G-C): el punto vivo bajo el "puntero" animado.
-                            grafito_ui::trace::draw_trace_readout(
-                                ui,
-                                grafito_ui::trace::trace_from_hover(cos_t, sin_t, spec.name)
-                                    .as_ref(),
-                            );
-                        });
-
-                    if app.perspective == crate::Perspective::Complex {
-                        ui.add_space(6.0);
+                    ui.add_space(SPACE_SM);
+                    trig_card(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(value_text)
+                                .color(accent)
+                                .size(TYPE_MD)
+                                .strong(),
+                        );
+                        ui.add_space(SPACE_XS);
                         ui.label(
                             egui::RichText::new(format!(
-                                "z = {:.3} {:+.3}i  |z| = 1  arg(z) = {:.2}",
-                                cos_t, sin_t, t
+                                "Punto: (cos θ, sin θ) = ({:.3}, {:.3})",
+                                cos_t, sin_t
                             ))
-                            .color(hdr_col)
-                            .size(grafito_ui::tokens::TYPE_XS),
+                            .color(theme.text_secondary)
+                            .size(TYPE_XS),
                         );
-                    }
+                        ui.add_space(SPACE_XS);
+                        ui.label(
+                            egui::RichText::new(GrafitoApp::trig_identity(app.trig_function))
+                                .color(theme.text_tertiary)
+                                .size(TYPE_XS),
+                        );
+                        if app.perspective == crate::Perspective::Complex {
+                            ui.add_space(SPACE_XS);
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "z = {:.3} {:+.3}i  |z| = 1  arg(z) = {:.2}",
+                                    cos_t, sin_t, t
+                                ))
+                                .color(theme.text_secondary)
+                                .size(TYPE_XS),
+                            );
+                        }
+                        // Lectura de traza: el punto vivo bajo el "puntero" animado.
+                        grafito_ui::trace::draw_trace_readout(
+                            ui,
+                            grafito_ui::trace::trace_from_hover(cos_t, sin_t, spec.name).as_ref(),
+                        );
+                    });
 
-                    ui.add_space(SPACE_SM);
-                    if ui.button("Centrar vista en la gráfica").clicked() {
+                    // ── Centrar la vista (acción primaria) ──
+                    ui.add_space(SPACE_LG);
+                    if panel_primary_button(ui, "Centrar vista en la gráfica").clicked() {
                         app.document.set_view(grafito_geometry::ViewTransform::default());
                         app.document.bump_version();
                         if let Ok(mut cache) = app.trig_graph_cache.write() {
                             *cache = None;
                         }
                     }
+                    ui.add_space(SPACE_SM);
                 });
         });
 }
@@ -9030,25 +9194,29 @@ pub(crate) fn draw_trig_speed_prompt(ui: &mut egui::Ui, app: &mut GrafitoApp) {
     let mut prompt: TrigPromptState = ctx
         .data_mut(|data| data.get_temp::<TrigPromptState>(id))
         .unwrap_or_default();
-    let (_is_dark, _accent, _fill, _sep, _txt_col, txt_dim, _hdr_col) = panel_theme_local(&ctx);
+    let theme = current_theme(&ctx);
 
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new("Auto").color(txt_dim).size(TYPE_XS));
-        // Ancho acotado inferior: en pantallas mínimas el disponible puede
-        // achicarse y egui exige desired_size ≥ 0.
-        let field_w = (ui.available_width() - 76.0).max(80.0);
+        ui.spacing_mut().item_spacing.x = SPACE_SM;
+        ui.label(
+            egui::RichText::new("Auto")
+                .color(theme.text_tertiary)
+                .size(TYPE_XS),
+        );
+        // Ancho exacto: label + campo + botón nunca superan la tarjeta.
+        let field_w = (ui.available_width() - TRIG_APPLY_W - 2.0 * SPACE_SM).max(56.0);
         let resp = ui.add_sized(
-            [field_w, TYPE_SM + SPACE_SM],
-            egui::TextEdit::singleline(&mut prompt.text)
-                .hint_text("1.5 · medio · 2 vueltas en 10 s"),
+            [field_w, TRIG_CONTROL_H],
+            egui::TextEdit::singleline(&mut prompt.text).hint_text("1.5 · medio"),
         );
         let enter_pressed =
             resp.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
         resp.on_hover_text("Pedí una velocidad con palabras o números y pulsa Aplicar");
         if ui
             .add_sized(
-                [68.0, TYPE_SM + SPACE_SM],
-                egui::Button::new(egui::RichText::new("Aplicar").size(TYPE_SM)),
+                [TRIG_APPLY_W, TRIG_CONTROL_H],
+                egui::Button::new(egui::RichText::new("Aplicar").size(TYPE_SM))
+                    .rounding(RADIUS_PILL),
             )
             .on_hover_text("Convierte el pedido en velocidad del slider")
             .clicked()
@@ -9065,11 +9233,7 @@ pub(crate) fn draw_trig_speed_prompt(ui: &mut egui::Ui, app: &mut GrafitoApp) {
         }
     });
     if let Some(error) = &prompt.error {
-        ui.label(
-            egui::RichText::new(error)
-                .color(current_theme(&ctx).danger)
-                .size(TYPE_XS),
-        );
+        ui.label(egui::RichText::new(error).color(theme.danger).size(TYPE_XS));
     }
     ctx.data_mut(|data| data.insert_temp(id, prompt));
 }
