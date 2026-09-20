@@ -544,6 +544,11 @@ impl Camera3D {
 
     /// Plano cercano/lejosano efectivo que siempre contiene el target y evita clipping negro.
     /// Mantiene `near < distance < far` con margen 100× para profundidad estable, ahora infinito.
+    ///
+    /// Además acota el ratio `far/near ≤ 1e6`: con zoom muy cercano `near`
+    /// cae a 1e-8 pero `far` quedaba ≥100 por el margen absoluto (ratio
+    /// 1e10) y el depth buffer de 24 bits colapsaba — z-fighting y recortes
+    /// falsos, "se rompe todo" al acercar. `keep` garantiza no recortar el target.
     pub fn effective_clip(&self) -> (f32, f32) {
         let d = self.sanitized_distance();
         // near ≈ 1% de la distancia, nunca <1e-9 ni >1e4 para conservar precisión en infinito.
@@ -552,10 +557,12 @@ impl Camera3D {
         let mut far = (d * 100.0).clamp(1.0, 1e12);
         // Si la escena se ha pandeado lejos del origen, asegura que far supere la distancia + extents.
         let target_dist = self.target.length().abs();
+        let mut keep = (d * 10.0 + near * 100.0).max(near * 10.0);
         if target_dist.is_finite() {
             far = far.max(target_dist + d * 10.0 + 100.0);
-            far = far.clamp(near * 10.0, 1e12);
+            keep = (target_dist + d * 10.0 + near * 100.0).max(near * 10.0);
         }
+        far = far.clamp(near * 10.0, 1e12).min((near * 1e6).max(keep));
         if !near.is_finite() || !far.is_finite() || far <= near {
             return (0.1, 10000.0);
         }
@@ -994,6 +1001,44 @@ pub fn curve_3d_segment_is_continuous(a: Point3D, b: Point3D, camera: &Camera3D)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effective_clip_bounds_depth_ratio_when_zoomed_close() {
+        // Zoom máximo (d = 1e-6): antes near caía a 1e-8 con far ≥ 100
+        // (ratio 1e10) y el depth buffer de 24 bits colapsaba — z-fighting
+        // y recortes falsos al acercar mucho en 3D.
+        let cam = Camera3D {
+            distance: 1e-6,
+            target: Vec3::ZERO,
+            ..Default::default()
+        };
+        let (near, far) = cam.effective_clip();
+        assert!(near > 0.0 && far > near);
+        assert!(
+            far / near <= 1e6 + 1e-3,
+            "ratio far/near = {} explota el depth buffer",
+            far / near
+        );
+        // El target (a profundidad d) nunca queda recortado.
+        assert!(far > 1e-6, "el target quedaría recortado con far = {far}");
+    }
+
+    #[test]
+    fn effective_clip_keeps_normal_and_far_panned_scenes() {
+        // Escena normal intacta: d = 10 → near 0.1, far 1000.
+        let cam = Camera3D::default();
+        let (near, far) = cam.effective_clip();
+        assert!((near - 0.1).abs() < 1e-6, "near = {near}");
+        assert!((far - 1000.0).abs() < 1.0, "far = {far}");
+        // Target paneado lejos del origen: sigue sin recorte (sin regresión).
+        let far_cam = Camera3D {
+            target: Vec3::new(1e6, 0.0, 0.0),
+            ..Default::default()
+        };
+        let (near2, far2) = far_cam.effective_clip();
+        assert!(far2 >= 1e6, "target paneado recortado con far = {far2}");
+        assert!(far2 > near2);
+    }
 
     #[test]
     fn regular_tetrahedron_derives_centered_outward_faces_and_equal_edges() {

@@ -3040,7 +3040,11 @@ fn geometry_3d_polytope_inspectors_expose_labeled_scrollable_controls() {
     assert!(!polytope.contains("fill_color"));
     assert!(polytope.contains("app.open_object_color_picker(id)"));
     assert!(!polytope.contains("color_edit_button_srgba_unmultiplied"));
-    assert!(polytope.contains("polytope.dimension == 4"));
+    // La tarjeta de animación sale siempre (todas las dimensiones): el
+    // interruptor también orbita la cámara; la descripción honesta distingue
+    // R4 ("misma velocidad") del resto ("solo órbita").
+    assert!(polytope.contains("La cámara orbita sin alterar el documento."));
+    assert!(polytope.contains("La cámara y la proyección 4D usan la misma velocidad."));
     assert!(polytope.contains("draw_multidimensional_motion_card"));
     assert!(polytope.contains("ui.push_id"));
     assert!(inspector.contains("right_properties_scroll"));

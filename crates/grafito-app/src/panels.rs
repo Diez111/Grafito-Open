@@ -1283,7 +1283,11 @@ fn draw_multidimensional_motion_card(
     can_animate: bool,
 ) {
     let theme = current_theme(ui.ctx());
-    let mut is_moving = can_animate && app.multidimensional_motion_enabled;
+    // El interruptor global siempre está disponible ("reproducir siempre"):
+    // `is_moving` indica reproducción EFECTIVA acá (objeto visible en vista
+    // 3D); el estado del flag global se muestra honesto abajo.
+    let global_on = app.multidimensional_motion_enabled;
+    let mut is_moving = can_animate && global_on;
     let card_fill = if is_moving {
         theme.accent_muted
     } else {
@@ -1316,7 +1320,7 @@ fn draw_multidimensional_motion_card(
             });
             ui.add_space(SPACE_SM);
 
-            let action_label = if is_moving {
+            let action_label = if global_on {
                 "Pausar animación"
             } else {
                 "Iniciar animación"
@@ -1336,11 +1340,7 @@ fn draw_multidimensional_motion_card(
                 theme.keyboard_enter_bg
             })
             .stroke(egui::Stroke::new(1.0, card_stroke));
-            let response = ui
-                .add_enabled_ui(can_animate, |ui| {
-                    ui.add_sized([ui.available_width(), 30.0], action_button)
-                })
-                .inner;
+            let response = ui.add_sized([ui.available_width(), 30.0], action_button);
             if response.clicked() {
                 is_moving = crate::app::toggle_default_multidimensional_motion(
                     &mut app.multidimensional_motion_enabled,
@@ -1363,6 +1363,8 @@ fn draw_multidimensional_motion_card(
                 ui.label(
                     egui::RichText::new(if is_moving {
                         "En reproducción"
+                    } else if global_on {
+                        "Activada"
                     } else if can_animate {
                         "En pausa"
                     } else {
@@ -4691,23 +4693,30 @@ pub(crate) fn draw_right_properties_contents(app: &mut GrafitoApp, ui: &mut egui
                             .changed();
                         });
 
-                        if polytope.dimension == 4 {
-                            ui.add_space(SPACE_MD);
-                            draw_inspector_section(
-                                ui,
-                                "Proyección",
-                                "La cámara y la proyección 4D comparten velocidad.",
-                                |ui| {
-                                    draw_multidimensional_motion_card(
-                                        ui,
-                                        app,
-                                        "Animación de proyección",
-                                        "La cámara y la proyección 4D usan la misma velocidad.",
-                                        polytope.visible && app.current_view == crate::ViewMode::D3,
-                                    );
-                                },
-                            );
-                        }
+                        // La tarjeta de animación se muestra siempre (todas las
+                        // dimensiones): el interruptor global también orbita la
+                        // cámara en vista 3D; la rotación 4D automática aplica
+                        // a proyecciones R4 y el resto usa rotación manual.
+                        ui.add_space(SPACE_MD);
+                        draw_inspector_section(
+                            ui,
+                            "Proyección",
+                            "La cámara y la proyección 4D comparten velocidad.",
+                            |ui| {
+                                draw_multidimensional_motion_card(
+                                    ui,
+                                    app,
+                                    "Animación de proyección",
+                                    if polytope.dimension == 4 {
+                                        "La cámara y la proyección 4D usan la misma velocidad."
+                                    } else {
+                                        "La cámara orbita sin alterar el documento."
+                                    },
+                                    polytope.visible
+                                        && app.current_view == crate::ViewMode::D3,
+                                );
+                            },
+                        );
 
                         ui.add_space(SPACE_MD);
                         draw_inspector_section(ui, "Apariencia", "Estilo de aristas", |ui| {
