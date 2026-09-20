@@ -227,11 +227,16 @@ pub fn export_colab_job(args: &Value, limits: &LabLimits) -> Result<Value, Strin
         .get("kind")
         .and_then(Value::as_str)
         .ok_or("export_colab_job: 'kind' requerido (unit_sweep|sat_sweep|cas_crosscheck)")?;
-    let params = args
-        .get("params")
-        .and_then(Value::as_object)
+    // Tolerancia: los modelos a veces mandan `params` como string JSON.
+    let params_value: Value = match args.get("params") {
+        Some(Value::Object(_)) => args.get("params").cloned().unwrap_or(Value::Null),
+        Some(Value::String(raw)) => serde_json::from_str(raw)
+            .map_err(|_| "export_colab_job: 'params' string no es JSON válido".to_string())?,
+        _ => return Err("export_colab_job: 'params' debe ser objeto (o string JSON)".into()),
+    };
+    let params = params_value
+        .as_object()
         .ok_or("export_colab_job: 'params' debe ser objeto")?;
-    let params_value = Value::Object(params.clone());
     reject_pii(&canonical_json(&params_value))?;
     let (script, verify_how) = match kind {
         "unit_sweep" => build_unit_sweep(params, limits)?,
@@ -439,10 +444,28 @@ print(json.dumps({{"runs": runs}}))
 }
 
 fn build_sat_sweep(params: &serde_json::Map<String, Value>) -> Result<(String, String), String> {
-    let cnfs = params
-        .get("cnfs")
-        .and_then(Value::as_array)
-        .ok_or("sat_sweep: 'cnfs' debe ser [{name, text}, ...]")?;
+    // Tolerancia: un solo {name, text} o {"cnf_hash": …} (CNF ya guardado
+    // por export_dimacs, sin re-pegar MBs).
+    let owned: Vec<Value>;
+    let cnfs: &[Value] = match params.get("cnfs").and_then(Value::as_array) {
+        Some(arr) => arr,
+        None => {
+            if let Some(obj) = params.get("cnfs").and_then(Value::as_object) {
+                owned = vec![Value::Object(obj.clone())];
+                &owned
+            } else if let Some(hash) = params.get("cnf_hash").and_then(Value::as_str) {
+                let text = crate::ledger::load_cnf(hash).map_err(|e| format!("sat_sweep: {e}"))?;
+                let name = &hash[..16.min(hash.len())];
+                owned = vec![json!({"name": name, "text": text})];
+                &owned
+            } else {
+                return Err(
+                    "sat_sweep: 'cnfs' debe ser [{name, text}, ...] (o un objeto solo, o {cnf_hash})"
+                        .into(),
+                );
+            }
+        }
+    };
     if cnfs.is_empty() || cnfs.len() > MAX_COLAB_CNFS {
         return Err(format!("sat_sweep: cnfs fuera de [1, {MAX_COLAB_CNFS}]"));
     }
@@ -795,20 +818,25 @@ fn verify_sat_sweep(
     params: &Value,
     result: &serde_json::Map<String, Value>,
 ) -> Result<(bool, &'static str, String), String> {
-    let cnfs = params
-        .get("cnfs")
-        .and_then(Value::as_array)
-        .ok_or("import: manifiesto sin cnfs")?;
+    let mut by_name = std::collections::BTreeMap::new();
+    if let Some(cnfs) = params.get("cnfs").and_then(Value::as_array) {
+        for c in cnfs {
+            let name = c.get("name").and_then(Value::as_str).unwrap_or("");
+            let text = c.get("text").and_then(Value::as_str).unwrap_or("");
+            by_name.insert(name.to_string(), text.to_string());
+        }
+    } else if let Some(hash) = params.get("cnf_hash").and_then(Value::as_str) {
+        // Manifiesto por referencia: el texto vive en el almacén local.
+        let text = crate::ledger::load_cnf(hash).map_err(|e| format!("import: {e}"))?;
+        let name = &hash[..16.min(hash.len())];
+        by_name.insert(name.to_string(), text);
+    } else {
+        return Err("import: manifiesto sin cnfs".into());
+    }
     let results = result
         .get("results")
         .and_then(Value::as_array)
         .ok_or("import: result.results requerido")?;
-    let mut by_name = std::collections::BTreeMap::new();
-    for c in cnfs {
-        let name = c.get("name").and_then(Value::as_str).unwrap_or("");
-        let text = c.get("text").and_then(Value::as_str).unwrap_or("");
-        by_name.insert(name.to_string(), text.to_string());
-    }
     let mut checked = 0usize;
     let mut trusted = 0usize;
     for r in results {
@@ -959,6 +987,33 @@ mod tests {
         )
         .unwrap();
         assert!(out["script"].as_str().unwrap().contains("python-sat"));
+    }
+
+    #[test]
+    fn params_string_y_cnf_hash_tolerados() {
+        // params como string JSON (los modelos lo mandan así a veces).
+        let out = export_colab_job(
+            &json!({"kind": "cas_crosscheck", "params": r#"{"expression": "x**2", "claim": "2*x", "check": "derivative_of"}"#}),
+            &LabLimits::default(),
+        )
+        .unwrap();
+        assert!(out["script"].as_str().unwrap().contains("sympy"));
+        // cnf_hash resuelve el CNF guardado sin re-pegarlo.
+        let cnf = "p cnf 1 1\n1 0\n";
+        let h = crate::sha256_hex(cnf);
+        crate::ledger::store_cnf(&h, cnf).unwrap();
+        let out2 = export_colab_job(
+            &json!({"kind": "sat_sweep", "params": {"cnf_hash": h, "timeout_s": 5}}),
+            &LabLimits::default(),
+        )
+        .unwrap();
+        assert!(out2["script"].as_str().unwrap().contains(&h[..16]));
+        // Un solo objeto también vale como cnfs.
+        let out3 = export_colab_job(
+            &json!({"kind": "sat_sweep", "params": {"cnfs": {"name": "solo", "text": cnf}}}),
+            &LabLimits::default(),
+        );
+        assert!(out3.is_ok());
     }
 
     #[test]

@@ -1486,6 +1486,22 @@ pub fn sanitize_template(template: &str, concept: &str) -> ProtocolResult<String
     if t == "pythagoras" {
         return Ok("pitagoras".to_string());
     }
+    // Alias de modelo: nombres coloquiales que los LLMs inventan para las
+    // canónicas (pineado por el error real `template: "graph"`).
+    match t.as_str() {
+        "graph" | "plot" | "plot2d" | "function" | "generic" => return Ok("universal".to_string()),
+        "slope" | "tangent" => return Ok("derivative-slope".to_string()),
+        "area" | "riemann" => return Ok("integral-area".to_string()),
+        "series" | "polynomial" => return Ok("taylor-series".to_string()),
+        "complex" => return Ok("conformal-map".to_string()),
+        "triangle" | "pythagoras_theorem" => return Ok("pitagoras".to_string()),
+        "bifurcation" | "logistic" | "chaos" => return Ok("logistic-bifurcation".to_string()),
+        "field" | "vector" | "vector_field" => return Ok("gradient-field".to_string()),
+        "mobius" => return Ok("mobius-transform".to_string()),
+        "span" | "linear" | "subspace_span" => return Ok("subspace".to_string()),
+        "mandelbrot" | "julia" | "koch" => return Ok("fractal".to_string()),
+        _ => {}
+    }
     // Canónicas v3 con renderer nativo propio (sync con anim_native):
     // pasan literales para que el dispatcher nativo las atienda en vez
     // de degradarlas por concepto. "universal" también pasa literal: el
@@ -1689,6 +1705,13 @@ mod universal_tests {
         );
         // R6d: desconocido no vacío es `Err` (antes degradaba a concepto).
         assert!(sanitize_template("unknown", "taylor serie").is_err());
+        // Alias de modelo (pineado por `template: "graph"` real).
+        assert_eq!(sanitize_template("graph", "x").expect("alias"), "universal");
+        assert_eq!(sanitize_template("PLOT", "x").expect("alias"), "universal");
+        assert_eq!(
+            sanitize_template("vector_field", "x").expect("alias"),
+            "gradient-field"
+        );
     }
 
     // ── v3: params vivos + timeline + sync plantillas + webm ────────────

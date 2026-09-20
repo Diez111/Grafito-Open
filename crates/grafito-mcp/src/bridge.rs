@@ -73,8 +73,12 @@ pub fn dispatch_proxied(name: &str, args: &Value) -> Result<Value, String> {
     if !result.ok {
         return Err(result.content);
     }
+    // structuredContent DEBE ser objeto: varios clientes (opencode) validan
+    // `record` y rechazan escalares (ej. evaluate_expr → `4`). Todo lo que
+    // no sea objeto se envuelve en {"value": …}.
     match serde_json::from_str::<Value>(&result.content) {
-        Ok(parsed) => Ok(parsed),
+        Ok(Value::Object(map)) => Ok(Value::Object(map)),
+        Ok(parsed) => Ok(json!({"value": parsed})),
         Err(_) => Ok(json!({"text": result.content})),
     }
 }
@@ -271,6 +275,8 @@ mod tests {
     #[test]
     fn evaluate_proxeda_computa() {
         let out = dispatch_proxied("evaluate_expr", &json!({"expression": "2+2"})).unwrap();
+        // structuredContent siempre objeto (clientes validan `record`).
+        assert!(out.is_object(), "debe ser objeto: {out}");
         assert!(out.to_string().contains('4'), "evaluate 2+2 dio: {out}");
         let d = dispatch_proxied("diff", &json!({"expression": "x^2"})).unwrap();
         assert!(d.to_string().contains('x'), "diff x^2 dio: {d}");

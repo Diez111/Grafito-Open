@@ -1505,6 +1505,34 @@ fn canonical_keywords_overlay(canonical: &str) -> &'static [&'static str] {
                 "factorizar",
             ]
         }
+        // Familia Discreta: keywords bilingües para temas clásicos que los
+        // modelos piden en inglés (pineado por "Hadwiger-Nelson chromatic
+        // number plane unit distance graph" sin resultados).
+        "ChromaticCheck" => &[
+            "cromatico",
+            "cromático",
+            "coloreo",
+            "colorear",
+            "chromatic",
+            "coloring",
+            "hadwiger",
+            "nelson",
+            "plane",
+            "plano",
+        ],
+        "UnitPairs" | "UnitGraphEdges" => &[
+            "unit",
+            "unidad",
+            "distancia",
+            "distance",
+            "grafo",
+            "graph",
+            "hadwiger",
+            "nelson",
+        ],
+        "DistinctDistances" => &["distancias", "distances", "distintas", "distinct", "erdos"],
+        "Topp39Scan" => &["topp", "barrido", "sweep", "unit", "hadwiger", "nelson"],
+        "HalvingEdges" | "EmptyTriangle" => &["halving", "vacio", "vacío", "empty", "combinatoria"],
         _ => &[],
     }
 }
@@ -1798,6 +1826,24 @@ mod tests {
     use super::*;
     use grafito_core::{CasWorksheetStatus, DataTableObj, Document, GeoObject, PointObj};
     use grafito_geometry::Point2;
+
+    #[test]
+    fn catalog_encuentra_hadwiger_nelson_en_ingles() {
+        // Pineado por "sin resultados para 'Hadwiger-Nelson chromatic number
+        // plane unit distance graph'": el overlay bilingüe debe rankear la
+        // familia Discreta.
+        let catalog = assistant_tool_catalog(
+            "Hadwiger-Nelson chromatic number plane unit distance graph",
+            8_192,
+        );
+        assert!(!catalog.trim().is_empty(), "catálogo vacío");
+        assert!(
+            catalog.contains("ChromaticCheck")
+                || catalog.contains("UnitPairs")
+                || catalog.contains("Topp39Scan"),
+            "sin familia Discreta: {catalog}"
+        );
+    }
 
     #[test]
     fn context_digest_changes_with_document_revision_or_variables() {

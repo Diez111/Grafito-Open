@@ -243,6 +243,15 @@ fn lean_binary() -> Result<(PathBuf, bool), String> {
     if let Some(path) = crate::sat::find_in_path("lean") {
         return Ok((path, false));
     }
+    // Instalación estándar de elan (no siempre está en el PATH heredado).
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for name in ["lake", "lean"] {
+            let cand = home.join(".elan/bin").join(name);
+            if is_executable_file(&cand) {
+                return Ok((cand, name == "lake"));
+            }
+        }
+    }
     Err(missing_msg())
 }
 
