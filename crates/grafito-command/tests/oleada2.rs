@@ -149,8 +149,9 @@ fn oleada2_todos_visibles_en_paleta() {
     // Ola 0.2 (Groebner/GroebnerLex: +2 visibles S): 599 → 601, 639 → 641.
     // Ola 0.3 (StartAnimation/StopAnimation/Delete visibles: +3): 601 → 604.
     // Ola 2.3 (ZTest2/FTest visibles): 604 → 606, 641 → 643.
-    assert_eq!(command_registry::palette_commands().count(), 606);
-    assert_eq!(command_registry::all().len(), 643);
+    // Harness Fase A (+7 visibles S): 606 → 613, 643 → 650.
+    assert_eq!(command_registry::palette_commands().count(), 613);
+    assert_eq!(command_registry::all().len(), 650);
 }
 
 #[test]

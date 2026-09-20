@@ -151,7 +151,8 @@ fn oleada1_todos_visibles_en_paleta() {
     // Ola 0.2 (Groebner/GroebnerLex parten spec único: +2 visibles S): 599 → 601.
     // Ola 0.3 (StartAnimation/StopAnimation/Delete dejan stub oculto: +3): 601 → 604.
     // Ola 2.3 (ZTest2/FTest visibles): 604 → 606.
-    assert_eq!(command_registry::palette_commands().count(), 606);
+    // Harness Fase A (medición TOPP 39/57/7: +7 visibles S): 606 → 613.
+    assert_eq!(command_registry::palette_commands().count(), 613);
 }
 
 #[test]

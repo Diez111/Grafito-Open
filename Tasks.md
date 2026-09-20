@@ -155,3 +155,20 @@
 - [x] CX.5 app: panel “Integral de contorno”, armado con prefill, input con imán/estabilizador/cierre/suavizado, overlay en vivo, modo círculo, undo atómico del par (9 tests)
 - [x] CX.6 snap liviano (`snap_point_light`: objetos/ejes/grid sin features)
 - [x] CX.7 docs: presupuestos en architecture.md + este plan/tasks
+
+## Harness de problemas abiertos (2026-09-20)
+
+**Fase A — herramientas verificables [DONE]**
+- [x] A.1 `geometry::search`: unit_pairs/distinct_distances/unit_graph_edges + `seeded_point_set`/`grid_point_set` (7 tests)
+- [x] A.2 `export_dimacs_kcoloring` + `is_k_colorable_bruteforce` (n≤24/k≤8) con test K4/triángulo (2 tests)
+- [x] A.3 `halving_edges_count`/`has_three_colinear`/`empty_triangle_exists` (TOPP 7) con definición estricta
+- [x] A.4 `run_topp39_scan` (hash FNV + JSONL) + `verify_search_run` + `topp39_best_of` (loop) (2 tests)
+- [x] A.5 7 comandos Discreta (UnitPairs/DistinctDistances/UnitGraphEdges/ChromaticCheck/HalvingEdges/EmptyTriangle/Topp39Scan) + smoke
+- [x] A.6 tools harness2 `search_topp39`/`export_dimacs` (23 tools) + tests de verificación
+- [x] A.7 `docs/OPEN_PROBLEMS_LAB.md` + architecture.md §8/§13 + docs/commands.md regenerado
+
+**Fase B — loop de 1 problema [EN CURSO: TOPP 39 primero]**
+- [x] B.1 Correr `topp39_best_of` con seeds reales vía `examples/search_lab` (JSONL verificado)
+- [x] B.2 Comparación de construcciones: grilla vs triangular vs polígono vs azar (n=12: triangular unit=23/distinct=7, grilla 17/8)
+- [ ] B.3 TOPP 57: export DIMACS + verificación externa kissat/cadical (sin declarar nada desde Grafito)
+- [ ] B.4 Cierre de fase: docs + ledger + gates

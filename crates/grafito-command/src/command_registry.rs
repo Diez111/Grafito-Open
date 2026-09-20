@@ -3482,6 +3482,91 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("ShortestDistance[punto, objeto]"; "punto": Point required, "objeto": Object required)
         ]
     ),
+    // ---- Harness de problemas abiertos (Fase A): TOPP 39/57/7, solo medición ----
+    command!(
+        "discrete.unit-pairs",
+        "UnitPairs",
+        ["unit_pairs", "paresunitarios"],
+        "Discreta",
+        "Cuenta pares a distancia 1 en un conjunto de puntos (TOPP 39 f2); informa el conteo sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "UnitPairs",
+        [signature!("UnitPairs[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.distinct-distances",
+        "DistinctDistances",
+        ["distinct_distances", "distanciasdistintas"],
+        "Discreta",
+        "Cuenta distancias distintas en un conjunto de puntos (TOPP 39 g2); informa el conteo sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "DistinctDistances",
+        [signature!("DistinctDistances[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.unit-graph-edges",
+        "UnitGraphEdges",
+        ["unit_graph_edges", "aristasunitarias"],
+        "Discreta",
+        "Lista cuántas aristas tiene el grafo unit-distance del conjunto (TOPP 57); informa el conteo sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "UnitGraphEdges",
+        [signature!("UnitGraphEdges[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.chromatic-check",
+        "ChromaticCheck",
+        ["chromatic_check", "chequeocromatico"],
+        "Discreta",
+        "Verifica por backtracking si el grafo unit-distance es k-coloreable (n<=24); si es más grande indica exportar DIMACS.",
+        ReadOnly,
+        Low,
+        true,
+        "ChromaticCheck",
+        [signature!("ChromaticCheck[puntos, k]"; "puntos": Data required, "k": Integer required)]
+    ),
+    command!(
+        "discrete.halving-edges",
+        "HalvingEdges",
+        ["halving_edges", "aristashalving"],
+        "Discreta",
+        "Cuenta halving edges no dirigidas de un conjunto de puntos (TOPP 7, n par); informa el conteo sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "HalvingEdges",
+        [signature!("HalvingEdges[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.empty-triangle",
+        "EmptyTriangle",
+        ["empty_triangle", "triangulovacio"],
+        "Discreta",
+        "Informa si el conjunto contiene un triángulo vacío (sin puntos dentro); informa sí/no sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "EmptyTriangle",
+        [signature!("EmptyTriangle[puntos]"; "puntos": Data required)]
+    ),
+    command!(
+        "discrete.topp39-scan",
+        "Topp39Scan",
+        ["topp39_scan", "barridotopp39"],
+        "Discreta",
+        "Corrida reproducible TOPP 39: genera n puntos con semilla, mide pares unitarios y distancias distintas, devuelve el registro con hash.",
+        ReadOnly,
+        Low,
+        true,
+        "Topp39Scan",
+        [signature!("Topp39Scan[semilla, n]"; "semilla": Integer required, "n": Integer required)]
+    ),
     // ---- Lista funcional (P2.5) — operaciones puras sin tocar Document ----
     // Frente P1b: constructor persistible de primera clase.
     command!(
@@ -8873,6 +8958,13 @@ mod registry_tests {
             "MinimumSpanningTree",
             "TravelingSalesman",
             "ShortestDistance",
+            "UnitPairs",
+            "DistinctDistances",
+            "UnitGraphEdges",
+            "ChromaticCheck",
+            "HalvingEdges",
+            "EmptyTriangle",
+            "Topp39Scan",
             "Sequence",
             "SequenceLive",
             "Zip",
@@ -9884,11 +9976,14 @@ mod registry_tests {
         // GroebnerDegRevLex: un orden real por nombre, motor Buchberger).
         // Ola 0.3: +3 visibles S (StartAnimation/StopAnimation/Delete dejan de
         // ser stub oculto: semántica real GeoGebra).
-        assert_eq!(all().len(), 643, "COMMANDS registrados (docs §8)");
+        // Harness abiertos Fase A: +7 visibles S (UnitPairs/DistinctDistances/
+        // UnitGraphEdges/ChromaticCheck/HalvingEdges/EmptyTriangle/Topp39Scan,
+        // TOPP 39/57/7, solo medición + corrida reproducible con hash).
+        assert_eq!(all().len(), 650, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            606,
-            "comandos visibles en paleta (docs §8: 606 + 15 UI = 621)"
+            613,
+            "comandos visibles en paleta (docs §8: 613 + 15 UI = 628)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

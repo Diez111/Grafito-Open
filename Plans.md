@@ -32,6 +32,35 @@ grafito-profile/pedagogy/plugins/assistant-types
 - Render: `ComplexIntegral` acepta Pencil/Polyline/Spline/Arc/Bézier/Paramétrica (+círculo analítico) y deja de ser no-op silencioso; comando valida el tipo de curva con error honesto (`GeoObject::accepts_complex_contour`).
 - Piel: 89.ª `Tool::ComplexContour`, panel “Integral de contorno” con guías (imán liviano, cierre automático, estabilizador, suavizado, residuos) y overlay en vivo (trazo + chip ∅/ΣRes).
 
+## Harness de problemas abiertos (2026-09-20) — Fase A hecha, Fase B en curso
+
+**Goal**: usar Grafito como harness de descubrimiento + verificación para
+problemas abiertos lógicos (TOPP 39/57/7, Erdős, galería), sin vender humo:
+el LLM propone números, el motor mide, el hash decide.
+
+**Fase A — herramientas (sin resolver nada) [✅ DONE]**
+- Núcleo `crates/grafito-geometry/src/search.rs`: `unit_pairs`,
+  `distinct_distances`, `unit_graph_edges`, `export_dimacs_kcoloring`
+  (CNF), `is_k_colorable_bruteforce` (n≤24), `halving_edges_count`,
+  `has_three_colinear`, `empty_triangle_exists`, `seeded_point_set`,
+  `grid_point_set`, `run_topp39_scan` (hash FNV + JSONL) y
+  `verify_search_run` (doble puerta).
+- Comandos Discreta: `UnitPairs`, `DistinctDistances`, `UnitGraphEdges`,
+  `ChromaticCheck`, `HalvingEdges`, `EmptyTriangle`, `Topp39Scan`
+  (650 specs / 613 paleta).
+- Tools del agente harness2: `search_topp39` (verificado) y
+  `export_dimacs` (CNF para kissat/cadical); `all_safe_tool_schemas` 23.
+- Cotas honestas: 2000 puntos, 200k aristas, n≤24 backtracking, halving 400,
+  vacío 80, DIMACS 20k vars, loop 4096 seeds. Protocolo en
+  `docs/OPEN_PROBLEMS_LAB.md`.
+
+**Fase B — loop de 1 problema [EN CURSO, TOPP 39 primero]**
+- `topp39_best_of(seeds, n, scale, tol)`: barre seeds, re-verifica cada
+  corrida y devuelve el mejor por pares unitarios; la evidencia es solo el
+  JSONL con hash re-verificado.
+- Siguiente: TOPP 39 (distancias) → TOPP 57 (SAT externo) → TOPP 7/galería.
+- Regla de oro: un problema por vez; nada se publica sin doble verificación.
+
 ## Principios Invariantes (CORE)
 - **CORE-1 /j-space**: Nada de código sin que esté en Plans.md/Tasks.md/progress.md primero.
 - **CORE-2 /statem**: Todo flujo con estados inválidos imposibles → `enum Estado` + transiciones tipadas que no compilan si son ilegales.

@@ -151,11 +151,11 @@ Raw -> Parsed -> Validated -> Evaluated | Failed
 | Assistant | ConversationTurn reasoning cap | 8192 (`MAX_CONVERSATION_REASONING_CHARS`, espeja `REASONING_MAX_CHARS` del motor) | assistant-types/src/lib.rs + assistant/src/lib.rs |
 | Assistant | Web search | 5 resultados / snippet 400 / query 256 / contexto 4096 / timeout 8s, sin claves | assistant/src/web.rs |
 | Assistant | Fallback razonador | 400/422 con "reasoning" → 1 reintento sin el campo | assistant/src/lib.rs (`strip_reasoning_knobs`, `post_json_with_reasoning_fallback`) |
-| Assistant | tools seguras (`all_safe_tool_schemas`, assistant) | 21 (3 base + 8 pedag + 8 math + 2 harness1) | assistant/src/agent.rs:2250-2259,2721-2766 (math 8 verificado por conteo `ToolSchema::new`) |
+| Assistant | tools seguras (`all_safe_tool_schemas`, assistant) | 23 (3 base + 8 pedag + 8 math + 2 harness1 + 2 harness2) | assistant/src/agent.rs (math 8 verificado por conteo `ToolSchema::new`; harness2: search_topp39 + export_dimacs) |
 | Assistant | tools seguras (`all_safe_tool_schemas`, agent hoja) | 9 (3 base + 6 pedag, sin math/harness) | agent/src/tools.rs:3060-3081 |
 | Tex | TEX_INPUT_MAX_BYTES | 8 KiB | tex/src/lib.rs:37 |
-| Comandos | COMMANDS registrados | 643 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`; Ola 0.2 parte Groebner/Lex/DegRevLex, Ola 2.3 suma ZTest2/FTest) |
-| Comandos | palette-visible | 606 (37 ocultos) + 15 acciones UI = 621 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display; P5: +18 cierre nominal (Slope/SetValue/GroebnerLexDeg/SD/SampleSD/SampleVariance/SetSeed/Seed/Turtle*)) |
+| Comandos | COMMANDS registrados | 650 (`command!(`) | command/src/command_registry.rs (blindaje `registry_counts_match_documented_architecture`; Harness Fase A suma 7 Discreta: UnitPairs/DistinctDistances/UnitGraphEdges/ChromaticCheck/HalvingEdges/EmptyTriangle/Topp39Scan) |
+| Comandos | palette-visible | 613 (37 ocultos) + 15 acciones UI = 628 en paleta | command_registry.rs + grafito-ui/src/command_palette.rs (R3.1: Rename stub→visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display; P5: +18 cierre nominal (Slope/SetValue/GroebnerLexDeg/SD/SampleSD/SampleVariance/SetSeed/Seed/Turtle*)) |
 | Comandos | categorías visibles | 25 (`VALID_CATEGORIES`, registry.rs:3664-3690) | command_registry.rs (G-F audit) |
 | Toolbar | ToolGroupId / UNIVERSITY | 18 (PRIMARY 5, SECONDARY 8) | grafito-ui/src/toolbar.rs:263-284 + UNIVERSITY_TOOL_GROUPS :348-365 (+tests :1865-1868; F3a 17→18) |
 | Toolbar | ToolGroupId / ALL_GROUPS | 15 clásico intencional (UNIVERSITY 18 suma Dynamics/ThreeD/FourD; disclosure progresivo, no bug) | grafito-ui/src/toolbar.rs:298-315 |
@@ -261,7 +261,7 @@ Notas:
 |---|---|
 | RequestBudget 8192 / 2048 / 8 / 60s | `crates/grafito-assistant-types/src/lib.rs:198-209` |
 | AttachmentLimits 512 KiB / 1 MiB / 1-2 MiP / 2 adjuntos | `crates/grafito-assistant-types/src/lib.rs:245-255` |
-| 643 comandos (`command!(`), 606 visibles + 15 UI = 621 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display; P5: +18 cierre nominal (Slope/SetValue/GroebnerLexDeg/SD/SampleSD/SampleVariance/SetSeed/Seed/Turtle*)) |
+| 650 comandos (`command!(`), 613 visibles + 15 UI = 628 en paleta | `crates/grafito-command/src/command_registry.rs` (R3.1: Rename visible; 3D-A2: +Vista3D; P0.2: +41 álgebra; P0.3: +7 complejo; P0.4: +3 demostración; P0.5: +8 optimización+gráficos; P1: +82 listas/estadística/probabilidad; P1b: +1 List persistible; P2: +25 medidas/geometría; P3b: +11 scripting + Execute real; P4: +105 CAS/listas/geometría/stats/display; P5: +18 cierre nominal (Slope/SetValue/GroebnerLexDeg/SD/SampleSD/SampleVariance/SetSeed/Seed/Turtle*)) |
 | 15 acciones UI + fuzzy + footer es | `crates/grafito-ui/src/command_palette.rs` |
 | 18 grupos toolbar (PRIMARY 5, SECONDARY 8, UNIVERSITY 18; ALL_GROUPS 15 diverge — ver §8) | `crates/grafito-ui/src/toolbar.rs:263-284,298-315`, tests `:1865-1868` |
 | 88 herramientas (`Tool`) | `crates/grafito-ui/src/lib.rs` `pub enum Tool` (Ola 1.6: 88 variantes, `Text` incluida) |
@@ -282,7 +282,7 @@ Notas:
 | Ctrl+P/E lápiz/borrador, F8/F9 esfera/cubo | `crates/grafito-app/src/shortcuts.rs:69-74,204,209` |
 | Onboarding 420px, 3 bullets, 3 botones | `crates/grafito-app/src/app.rs:7910`, gating `:2358`, `utils.rs:49` |
 | Rail 68px, drawer 292..440, panel izq 180+45% | `crates/grafito-ui/src/tokens.rs:151-164,207-210`; `app/src/ui.rs:549-552,727-731`; `app/src/panels.rs:1201-1206,2125-2132` |
-| 21 tools assistant (3 base + 8 pedag + 8 math + 2 harness1) / 9 en agent hoja | `crates/grafito-assistant/src/agent.rs:2250-2259` (pedag 8), `:2721-2766` (harness1 2 + base 3), math 8 por conteo `ToolSchema::new`; `crates/grafito-agent/src/tools.rs:3060-3081` (3+6=9) |
+| 23 tools assistant (3 base + 8 pedag + 8 math + 2 harness1 + 2 harness2) / 9 en agent hoja | `crates/grafito-assistant/src/agent.rs:2250-2259` (pedag 8), `:2721-2766` (harness1 2 + base 3), math 8 por conteo `ToolSchema::new`; `crates/grafito-agent/src/tools.rs:3060-3081` (3+6=9) |
 | AnimDuration 0.1..=60s, Resolution 64..=4096 | `crates/grafito-anim/src/protocol.rs:263`, tests `:3321-3371` |
 | Long-form 1500 frames (GIF 64), chunks 64 MiB streaming, timeline 60 s | `crates/grafito-anim/src/protocol.rs:341,345,349,364-389,438,931` |
 | AudioTrack offset 0..=60000, gain 0.0..=2.0 | `crates/grafito-anim/src/protocol.rs:468,470,503-543` |
@@ -308,7 +308,11 @@ Notas:
 ## 14. Paridad GeoGebra 2026 — frente F10-C (BUILD 2026-09-05, rama f10-plan-total)
 
 > Plan de cierre ejecutado 2026-09-16 (P0–P4, ver ADR-0003) y auditoría extrema
-> 2026-09-18 (Olas 0–2): **643 comandos** (606 visibles + 15 UI = 621 en paleta),
+> 2026-09-18 (Olas 0–2): **643 comandos** (606 visibles + 15 UI = 621 en paleta).
+> Harness de problemas abiertos Fase A (2026-09-20): **650 comandos** (613 visibles
+> + 15 UI = 628 en paleta), 23 tools (harness2: search_topp39 + export_dimacs),
+> motor `geometry::search` + loop TOPP 39 con hash re-verificado (protocolo en
+> `docs/OPEN_PROBLEMS_LAB.md`);
 > i18n ES/EN/PT/IT/FR/DE (322 claves: menús y panel del asistente incluidos),
 > export `.ggb` + PDF multipágina + P2P iroh tras flag. GeoGebra lista ~502:
 > cobertura nominal ≈100% (502/502 nombres resuelven) con profundidad parcial

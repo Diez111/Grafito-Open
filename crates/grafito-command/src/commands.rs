@@ -14572,6 +14572,175 @@ fn handle_remaining_cas_commands(
                 p.x, p.y, label, dist
             ));
         }
+        // ── Harness abiertos (Fase A): solo medición, sin mutar el documento ──
+        "UnitPairs" => {
+            let points = match collect_discrete_points(&cmd.args, document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("UnitPairs: {e}")),
+            };
+            match grafito_geometry::search::unit_pairs(&points, 1e-9) {
+                Ok(n) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "UnitPairs: {} pares a distancia 1 en {} puntos",
+                        n,
+                        points.len()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("UnitPairs: {e}")),
+            }
+        }
+        "DistinctDistances" => {
+            let points = match collect_discrete_points(&cmd.args, document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("DistinctDistances: {e}")),
+            };
+            match grafito_geometry::search::distinct_distances(&points, 1e-9) {
+                Ok(n) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "DistinctDistances: {} distancias distintas en {} puntos",
+                        n,
+                        points.len()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("DistinctDistances: {e}")),
+            }
+        }
+        "UnitGraphEdges" => {
+            let points = match collect_discrete_points(&cmd.args, document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("UnitGraphEdges: {e}")),
+            };
+            match grafito_geometry::search::unit_graph_edges(&points, 1e-9) {
+                Ok(edges) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "UnitGraphEdges: {} aristas en {} vértices",
+                        edges.len(),
+                        points.len()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("UnitGraphEdges: {e}")),
+            }
+        }
+        "ChromaticCheck" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "ChromaticCheck: se requieren 2 argumentos (puntos, k)".into(),
+                );
+            }
+            let points = match collect_discrete_points(&cmd.args[..1], document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("ChromaticCheck: {e}")),
+            };
+            let k = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) => v as usize,
+                Err(e) => return CommandOutcome::Error(format!("ChromaticCheck: k inválido: {e}")),
+            };
+            if !(1..=8).contains(&k) {
+                return CommandOutcome::Error(
+                    "ChromaticCheck: k fuera de [1, 8] para backtracking".into(),
+                );
+            }
+            let edges = match grafito_geometry::search::unit_graph_edges(&points, 1e-9) {
+                Ok(e) => e,
+                Err(e) => return CommandOutcome::Error(format!("ChromaticCheck: {e}")),
+            };
+            match grafito_geometry::search::is_k_colorable_bruteforce(points.len(), &edges, k) {
+                Ok(true) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "ChromaticCheck: el grafo ({} vértices, {} aristas) es {k}-coloreable",
+                        points.len(),
+                        edges.len()
+                    ));
+                }
+                Ok(false) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "ChromaticCheck: el grafo ({} vértices, {} aristas) NO es {k}-coloreable",
+                        points.len(),
+                        edges.len()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("ChromaticCheck: {e}")),
+            }
+        }
+        "HalvingEdges" => {
+            let points = match collect_discrete_points(&cmd.args, document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("HalvingEdges: {e}")),
+            };
+            match grafito_geometry::search::halving_edges_count(&points) {
+                Ok(n) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "HalvingEdges: {} halving edges en {} puntos",
+                        n,
+                        points.len()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("HalvingEdges: {e}")),
+            }
+        }
+        "EmptyTriangle" => {
+            let points = match collect_discrete_points(&cmd.args, document) {
+                Ok(v) => v,
+                Err(e) => return CommandOutcome::Error(format!("EmptyTriangle: {e}")),
+            };
+            match grafito_geometry::search::empty_triangle_exists(&points) {
+                Ok(true) => {
+                    input_text.clear();
+                    return CommandOutcome::Message("EmptyTriangle: sí hay triángulo vacío".into());
+                }
+                Ok(false) => {
+                    input_text.clear();
+                    return CommandOutcome::Message("EmptyTriangle: no hay triángulo vacío".into());
+                }
+                Err(e) => return CommandOutcome::Error(format!("EmptyTriangle: {e}")),
+            }
+        }
+        "Topp39Scan" => {
+            if cmd.args.len() != 2 {
+                return CommandOutcome::Error(
+                    "Topp39Scan: se requieren 2 argumentos (semilla, n)".into(),
+                );
+            }
+            let seed = match require_finite(parse_numeric_arg(&cmd.args[0], &document.variables)) {
+                Ok(v) if (0.0..=4_294_967_295.0).contains(&v) => v as u64,
+                Ok(_) => {
+                    return CommandOutcome::Error(
+                        "Topp39Scan: semilla fuera de [0, 4294967295]".into(),
+                    );
+                }
+                Err(e) => {
+                    return CommandOutcome::Error(format!("Topp39Scan: semilla inválida: {e}"));
+                }
+            };
+            let n = match require_finite(parse_numeric_arg(&cmd.args[1], &document.variables)) {
+                Ok(v) if (1.0..=2000.0).contains(&v) => v as usize,
+                Ok(_) => {
+                    return CommandOutcome::Error("Topp39Scan: n fuera de [1, 2000]".into());
+                }
+                Err(e) => return CommandOutcome::Error(format!("Topp39Scan: n inválida: {e}")),
+            };
+            match grafito_geometry::search::run_topp39_scan(seed, n, 5.0, 1e-9) {
+                Ok(run) => {
+                    input_text.clear();
+                    return CommandOutcome::Message(format!(
+                        "Topp39Scan[seed={} n={}]: unit={} distinct={} hash={} :: {}",
+                        run.seed,
+                        run.n,
+                        run.unit,
+                        run.distinct,
+                        run.hash,
+                        run.to_jsonl()
+                    ));
+                }
+                Err(e) => return CommandOutcome::Error(format!("Topp39Scan: {e}")),
+            }
+        }
         _ => {}
     }
     result = match execute_cas_command_typed(document, cmd) {

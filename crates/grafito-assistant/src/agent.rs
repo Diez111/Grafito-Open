@@ -261,6 +261,9 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         // Harness-1 — puras, sin Document, sin I/O, sin red
         "run_command" => run_command_tool(call),
         "solid_measure_3d" => solid_measure_3d_tool(call),
+        // Harness-2 (búsqueda verificable) — puras, sin Document, sin I/O
+        "search_topp39" => search_topp39_tool(call),
+        "export_dimacs" => export_dimacs_tool(call),
         // Búsqueda web opt-in (modo "Buscar en internet"): red acotada con
         // timeout propio; sólo llega si la app la habilitó en el catálogo.
         "web_search" => web_search_tool(call),
@@ -2783,6 +2786,162 @@ pub fn harness1_tool_schemas() -> Vec<ToolSchema> {
     vec![run_command_tool_schema(), solid_measure_3d_tool_schema()]
 }
 
+/// Núcleo puro de `search_topp39(seed, n, scale?)`: corrida reproducible
+/// TOPP 39 con doble puerta (mide + re-verifica el hash antes de responder).
+fn search_topp39_inner(arguments: &Value) -> Result<Value, String> {
+    let seed = arguments
+        .get("seed")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "search_topp39: 'seed' debe ser un entero >= 0".to_string())?;
+    let n = arguments
+        .get("n")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "search_topp39: 'n' debe ser un entero >= 1".to_string())?;
+    if n < 1 || n > grafito_geometry::search::MAX_SEARCH_POINTS as u64 {
+        return Err(format!(
+            "search_topp39: 'n' fuera de [1, {}]",
+            grafito_geometry::search::MAX_SEARCH_POINTS
+        ));
+    }
+    let scale = match arguments.get("scale").and_then(Value::as_f64) {
+        Some(v) if v.is_finite() => v,
+        Some(_) => return Err("search_topp39: 'scale' debe ser finita".to_string()),
+        None => 5.0,
+    };
+    let run = grafito_geometry::search::run_topp39_scan(seed, n as usize, scale, 1e-9)
+        .map_err(|e| format!("search_topp39: {e}"))?;
+    let verified = grafito_geometry::search::verify_search_run(&run, 1e-9)
+        .map_err(|e| format!("search_topp39: {e}"))?;
+    if !verified {
+        return Err("search_topp39: la corrida no verificó su hash; resultado descartado".into());
+    }
+    Ok(json!({
+        "tool": "search_topp39",
+        "seed": run.seed,
+        "n": run.n,
+        "scale": run.scale,
+        "unit": run.unit,
+        "distinct": run.distinct,
+        "hash": run.hash,
+        "verified": true,
+        "jsonl": run.to_jsonl(),
+        "note": "registro verificado por el motor; solo este JSONL cuenta como evidencia, jamás el texto del modelo",
+    }))
+}
+
+/// `search_topp39(seed, n, scale?)` — corrida TOPP 39 verificada.
+fn search_topp39_tool(call: &ToolCall) -> ToolResult {
+    match search_topp39_inner(&call.arguments) {
+        Ok(payload) => ToolResult::text(&call.id, true, payload.to_string()),
+        Err(error) => ToolResult::text(&call.id, false, error),
+    }
+}
+
+/// Schema de `search_topp39(seed, n, scale?)`.
+pub fn search_topp39_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "search_topp39",
+        "Corre una búsqueda reproducible TOPP 39 (distancias unitarias/distintas): genera n puntos con seed, mide con el motor y devuelve el registro con hash re-verificado. Solo el JSONL devuelto cuenta como evidencia.",
+        json!({
+            "type": "object",
+            "properties": {
+                "seed": {"type": "integer", "description": "Semilla del generador (>= 0)", "minimum": 0},
+                "n": {"type": "integer", "description": "Cantidad de puntos [1, 2000]", "minimum": 1, "maximum": 2000},
+                "scale": {"type": "number", "description": "Escala del conjunto en (0, 1e6], default 5"}
+            },
+            "required": ["seed", "n"]
+        }),
+    )
+}
+
+/// Núcleo puro de `export_dimacs(points, k)`: grafo unitario → CNF k-coloración.
+fn export_dimacs_inner(arguments: &Value) -> Result<Value, String> {
+    let raw = arguments
+        .get("points")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "export_dimacs: 'points' debe ser [[x, y], ...]".to_string())?;
+    if raw.is_empty() || raw.len() > grafito_geometry::search::MAX_SEARCH_POINTS {
+        return Err(format!(
+            "export_dimacs: puntos fuera de [1, {}]",
+            grafito_geometry::search::MAX_SEARCH_POINTS
+        ));
+    }
+    let mut points = Vec::with_capacity(raw.len());
+    for (idx, item) in raw.iter().enumerate() {
+        let pair = item
+            .as_array()
+            .ok_or_else(|| format!("export_dimacs: punto {idx} debe ser [x, y]"))?;
+        if pair.len() != 2 {
+            return Err(format!("export_dimacs: punto {idx} debe ser [x, y]"));
+        }
+        let x = pair[0]
+            .as_f64()
+            .ok_or_else(|| format!("export_dimacs: punto {idx} x no numérico"))?;
+        let y = pair[1]
+            .as_f64()
+            .ok_or_else(|| format!("export_dimacs: punto {idx} y no numérico"))?;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(format!("export_dimacs: punto {idx} no finito"));
+        }
+        points.push(grafito_geometry::Point2::new(x, y));
+    }
+    let k = arguments
+        .get("k")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "export_dimacs: 'k' debe ser un entero [1, 16]".to_string())?;
+    if !(1..=16).contains(&k) {
+        return Err("export_dimacs: 'k' fuera de [1, 16]".to_string());
+    }
+    let edges = grafito_geometry::search::unit_graph_edges(&points, 1e-9)
+        .map_err(|e| format!("export_dimacs: {e}"))?;
+    let cnf = grafito_geometry::search::export_dimacs_kcoloring(points.len(), &edges, k as usize)
+        .map_err(|e| format!("export_dimacs: {e}"))?;
+    if cnf.len() > 512 * 1024 {
+        return Err(format!(
+            "export_dimacs: CNF de {} bytes excede 512 KiB; probá con menos puntos o menor k",
+            cnf.len()
+        ));
+    }
+    Ok(json!({
+        "tool": "export_dimacs",
+        "n": points.len(),
+        "edges": edges.len(),
+        "k": k,
+        "bytes": cnf.len(),
+        "cnf": cnf,
+        "note": "llevá este CNF a kissat/cadical; Grafito no declara coloreabilidad fuera de backtracking n<=24",
+    }))
+}
+
+/// `export_dimacs(points, k)` — CNF para SAT externo.
+fn export_dimacs_tool(call: &ToolCall) -> ToolResult {
+    match export_dimacs_inner(&call.arguments) {
+        Ok(payload) => ToolResult::text(&call.id, true, payload.to_string()),
+        Err(error) => ToolResult::text(&call.id, false, error),
+    }
+}
+
+/// Schema de `export_dimacs(points, k)`.
+pub fn export_dimacs_tool_schema() -> ToolSchema {
+    ToolSchema::new(
+        "export_dimacs",
+        "Exporta el grafo unit-distance de un conjunto de puntos a DIMACS CNF para k-coloración (verificación externa con kissat/cadical). Error honesto si excede cotas.",
+        json!({
+            "type": "object",
+            "properties": {
+                "points": {"type": "array", "description": "Puntos [[x, y], ...], 1..=2000", "items": {"type": "array", "items": {"type": "number"}}},
+                "k": {"type": "integer", "description": "Colores [1, 16]", "minimum": 1, "maximum": 16}
+            },
+            "required": ["points", "k"]
+        }),
+    )
+}
+
+/// Tools nuevas harness-2 (búsqueda verificable) para el loop del agente.
+pub fn harness2_tool_schemas() -> Vec<ToolSchema> {
+    vec![search_topp39_tool_schema(), export_dimacs_tool_schema()]
+}
+
 /// Conjunto completo seguro (base + pedagógicas) para el loop del agente.
 pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     let mut schemas = vec![
@@ -2824,6 +2983,7 @@ pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     schemas.extend(pedagogy_tool_schemas());
     schemas.extend(math_tool_schemas());
     schemas.extend(harness1_tool_schemas());
+    schemas.extend(harness2_tool_schemas());
     schemas
 }
 
@@ -5515,12 +5675,47 @@ mod tests {
             assert_eq!(openai["function"]["name"], schema.name);
         }
         assert_eq!(harness1_tool_schemas().len(), 2);
+        for schema in harness2_tool_schemas() {
+            assert!(schema.validate().is_ok(), "schema {} invalid", schema.name);
+            let openai = schema.openai_tool().expect("openai_tool");
+            assert_eq!(openai["type"], "function");
+            assert_eq!(openai["function"]["name"], schema.name);
+        }
+        assert_eq!(harness2_tool_schemas().len(), 2);
         let esquemas = all_safe_tool_schemas();
         let nombres: Vec<&str> = esquemas.iter().map(|schema| schema.name.as_str()).collect();
         assert!(nombres.contains(&"run_command"));
         assert!(nombres.contains(&"solid_measure_3d"));
+        assert!(nombres.contains(&"search_topp39"));
+        assert!(nombres.contains(&"export_dimacs"));
         assert!(nombres.contains(&"generate_short_script"));
-        assert_eq!(esquemas.len(), 21);
+        assert_eq!(esquemas.len(), 23);
+    }
+
+    #[test]
+    fn harness2_topp39_verifica_y_dimacs_exporta() {
+        let call = ToolCall {
+            id: "h2".into(),
+            name: "search_topp39".into(),
+            arguments: json!({"seed": 7, "n": 9}),
+        };
+        let result = dispatch_safe_tool(&call);
+        assert!(result.ok, "search_topp39 falló: {}", result.content);
+        assert!(result.content.contains("\"verified\":true"));
+        let bad = ToolCall {
+            id: "h2b".into(),
+            name: "search_topp39".into(),
+            arguments: json!({"seed": 7, "n": 0}),
+        };
+        assert!(!dispatch_safe_tool(&bad).ok);
+        let dimacs = ToolCall {
+            id: "h2c".into(),
+            name: "export_dimacs".into(),
+            arguments: json!({"points": [[0.0, 0.0], [1.0, 0.0], [0.5, 0.8660254037844386]], "k": 2}),
+        };
+        let exported = dispatch_safe_tool(&dimacs);
+        assert!(exported.ok, "export_dimacs falló: {}", exported.content);
+        assert!(exported.content.contains("p cnf"));
     }
 
     #[test]
@@ -6239,8 +6434,8 @@ mod tests {
             assert_eq!(openai["function"]["name"], schema.name);
         }
         assert_eq!(math_tool_schemas().len(), 8);
-        // 3 base + 8 pedagógicas + 8 matemáticas + 2 harness-1.
-        assert_eq!(all_safe_tool_schemas().len(), 21);
+        // 3 base + 8 pedagógicas + 8 matemáticas + 2 harness-1 + 2 harness-2.
+        assert_eq!(all_safe_tool_schemas().len(), 23);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {

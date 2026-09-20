@@ -58,6 +58,7 @@ pub mod polytopes;
 pub mod precision;
 pub mod prove;
 pub mod quadrics;
+pub mod search;
 pub mod solve;
 pub mod special_curves;
 pub mod special_functions;

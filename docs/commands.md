@@ -319,6 +319,13 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `MinimumSpanningTree[puntos]`: Árbol de expansión mínima por Prim euclídeo O(n²); crea segmentos entre puntos. Mutacion: crea objetos. Riesgo: medio. Alias: `mst`, `arbolminimo`, `kruskal`.
 - `TravelingSalesman[puntos]`: Tour del viajante aproximado por vecino más cercano (greedy) empezando en el primer punto. Mutacion: crea objetos. Riesgo: medio. Alias: `tsp`, `viajante`, `travellingsalesman`.
 - `ShortestDistance[punto, objeto]`: Distancia euclídea mínima entre un punto y un objeto (punto/segmento/círculo/polígono). Valida finitud y límites. Mutacion: solo consulta. Riesgo: bajo. Alias: `distanciaminima`, `closestdistance`, `distanciamínima`.
+- `UnitPairs[puntos]`: Cuenta pares a distancia 1 en un conjunto de puntos (TOPP 39 f2); informa el conteo sin crear objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `unit_pairs`, `paresunitarios`.
+- `DistinctDistances[puntos]`: Cuenta distancias distintas en un conjunto de puntos (TOPP 39 g2); informa el conteo sin crear objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `distinct_distances`, `distanciasdistintas`.
+- `UnitGraphEdges[puntos]`: Lista cuántas aristas tiene el grafo unit-distance del conjunto (TOPP 57); informa el conteo sin crear objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `unit_graph_edges`, `aristasunitarias`.
+- `ChromaticCheck[puntos, k]`: Verifica por backtracking si el grafo unit-distance es k-coloreable (n<=24); si es más grande indica exportar DIMACS. Mutacion: solo consulta. Riesgo: bajo. Alias: `chromatic_check`, `chequeocromatico`.
+- `HalvingEdges[puntos]`: Cuenta halving edges no dirigidas de un conjunto de puntos (TOPP 7, n par); informa el conteo sin crear objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `halving_edges`, `aristashalving`.
+- `EmptyTriangle[puntos]`: Informa si el conjunto contiene un triángulo vacío (sin puntos dentro); informa sí/no sin crear objetos. Mutacion: solo consulta. Riesgo: bajo. Alias: `empty_triangle`, `triangulovacio`.
+- `Topp39Scan[semilla, n]`: Corrida reproducible TOPP 39: genera n puntos con semilla, mide pares unitarios y distancias distintas, devuelve el registro con hash. Mutacion: solo consulta. Riesgo: bajo. Alias: `topp39_scan`, `barridotopp39`.
 ## Lista
 
 - `List[elementos]`: Crea una lista persistible con etiqueta: List[{1, 2, {3}}]. Referenciable por Element/Zip/Sort y el resto de la familia. Mutacion: crea objetos. Riesgo: bajo. Alias: `lista`.
