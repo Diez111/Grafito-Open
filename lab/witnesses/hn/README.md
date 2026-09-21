@@ -161,6 +161,8 @@ Resto del CNP-SAT: 553 (el del paper Heule) y 517, conteos exactos
 - [EVIDENCIA] mono-mine 50 000 pares (25 000 c/u, d≥0.5) → 0 FORCED.
   [DESCARTADO] también sobre 553/517.
 Gran total campaña: 417 929 pares, cero forzados.
+Recon: no existen variantes 553 en CNP-SAT (solo 553.vtx/edge, byte-idéntico
+al minado) — corrección al reporte web previo.
 
 ## Oleada núcleos densos (2026-09-20, CERRADA)
 
@@ -199,6 +201,43 @@ de semanas, no de esta noche. TPU: inútil para SAT y para este script
 (torch no corre en TPU; JAX-port como follow-up). Ledger kinds
 `nn-instrument` + `nn-search`. Para correr en Colab (requiere TU pareo):
 Runtime → T4 GPU → subir `lab/nn_color.py` → `!python nn_color.py --demo`.
+
+## Oleada 529 (2026-09-20, CERRADA)
+
+Web→CNP-SAT (Heule 2019): 529v/2670e exactos (0 mismatch), importado
+(`529_heule.vtx`, SHA 12/12 OK).
+- [PRUEBA] k4 UNSAT (85 s) + k5 SAT (0.04 s) → 6ª familia 5-cromática.
+- [EVIDENCIA] mono-mine 25 879 pares → 0 FORCED. [DESCARTADO] vía spindle.
+Gran total campaña: 443 808 pares, cero forzados.
+
+## Oleada T650/zach7036 (2026-09-20, VERIFICACIÓN INDEPENDIENTE EXITOSA)
+
+Repo 0-stars con gadget T703 (terminales a d=2 forzados mismo color en todo
+4-coloreo) + composición 1299v. Verificación propia:
+- [EVIDENCIA] CNF congelado `t703_endpoints_different.cnf` (sha OK, 2812v):
+  **kissat UNSAT en 29 s** = 4ª familia solver independiente (ellos: CaDiCaL
+  ×2, Glucose). El claim de forcing pasa de [CONJETURA] a [EVIDENCIA].
+- Geometría: .edge sha OK; 3861/3861 aristas numéricas idénticas (dif=0);
+  d(terminales)=2.0 exacto; rotación cos=7/8 lleva terminales a 1.0 exacto
+  (analítico: 2·2·sin(θ/2)=1). .vtx difiere en sha upstream (solo formato:
+  sin CR, contenido validado numéricamente). Importado (`t703_zach.*`).
+- [EVIDENCIA] T703 k5 SAT (0.06 s); mono-mine 44 738 pares → 0 FORCED:
+  ni siquiera un gadget CON forcing probado a nivel 4 tiene par forzado a
+  nivel 5. [DESCARTADO] vía spindle también acá.
+- [EVIDENCIA] REPRODUCCIÓN TOTAL del 1405 (`t1405_graph.json` oficial):
+  1405/1405 puntos matcheados a la construcción propia (2×T703 + rot 7/8);
+  aristas propias tol 1e-9 IDÉNTICAS a las suyas (dif simétrica 0, 7723);
+  el near-miss a 6e-7 queda excluido (era ruido float); su 5-coloreo
+  explícito VALIDADO (0 violaciones). k4 directo con symbreak en curso.
+  Ledger kind `t650-repro`.
+- [PRUEBA] k4 DIRECTO sobre el 1405 completo con symbreak (triángulo fijo):
+  **UNSAT en 1581 s** (`cnf_sha=8065f45d0df7c5b8b4668e3950b7d1dee3ff9157201e4aa5d29e3d1f7ae9b2df`,
+  5620v). Ellos abortaron a los 630 s sin symbreak; el symbreak (50× en 553)
+  volvió factible lo infactible. Prueba directa de no-4-coloreabilidad sin
+  pasar por el argumento composicional.
+- Minería nivel-5 sobre el 1405: 180 533 candidatos → 0 FORCED.
+  [DESCARTADO] vía spindle también en la construcción gadget-compuesta.
+Gran total campaña: 669 079 pares, cero forzados.
 
 ## Regla
 
