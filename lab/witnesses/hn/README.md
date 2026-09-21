@@ -286,6 +286,9 @@ S transcripto 1:1 del paper (39 puntos) → Sa=397 → G=1581, aristas 7877
 Ledger kinds `cnf-build` + `mono-mine` (deGrey-1581).
 
 ## Oleada pipeline Heule/Parts (2026-09-21, CERRADA)
+(escala proofs: CaDiCaL 56 min sin terminar en 1405, proof 5.2 GB creciendo
+→ trim inviable en box; vale kissat UNSAT 26 min + 5-coloreo. Ledger kind
+`proof-scale`.)
 
 - L1 (hipergrafo): 553 VÉRTICE-CRÍTICO — los 553 vértices críticos
   (sacar cualquiera mata la 5-cromaticidad), 2143 tests, 0 removidos.
