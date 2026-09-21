@@ -268,6 +268,23 @@ Ledger kinds respectivos + `harness-bugfix`.
 Gran total campaña: 711 367 pares (669 079 + 2 982 virtuales-553 + 39 306
 del 1299), cero forzados.
 
+## Oleada multi-copy composer (2026-09-21, CERRADA)
+
+56 configuraciones (estrellas/rings/cadenas/hubs de 3-8 copias de 509/553/
+510, hasta 4852v/31ke, cierres en anillo geométricamente exactos) → todas
+k5 SAT en 114 s totales. [DESCARTADO] salto cromático emergente por unión
+de copias: ni los anillos cerrados frustran el 5-coloreo. Nota: m>2 copias
+no comparten arista completa en el plano (fan sobre vértice).
+Ledger kind `multi-compose`.
+
+## Oleada de Grey 1581 (2026-09-21, CONSTRUCCIÓN OK / CERT PENDIENTE)
+
+S transcripto 1:1 del paper (39 puntos) → Sa=397 → G=1581, aristas 7877
+(desvío 0%). k5 SAT (0.1 s) + mining 15 000 → 0 FORCED. Pero k4 TIMEOUT
+900 s sin symbreak + 1800 s con symbreak: el grafo fundacional resiste CDCL
+(por eso la literatura usa DRAT-cores). NO importado (barra: UNSAT local).
+Ledger kinds `cnf-build` + `mono-mine` (deGrey-1581).
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.
