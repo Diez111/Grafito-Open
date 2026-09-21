@@ -239,6 +239,19 @@ Repo 0-stars con gadget T703 (terminales a d=2 forzados mismo color en todo
   [DESCARTADO] vía spindle también en la construcción gadget-compuesta.
 Gran total campaña: 669 079 pares, cero forzados.
 
+## Oleada fan-out ×4 herramientas + T1299 (2026-09-21, CERRADA)
+
+- F (kit Parts Type-J): `lab/gadF_kit.py` construye Moser (k3 UNSAT/k4 SAT)
+  y ciclo-J 13v/23e 4-cromático con forcing no-trivial. Maquinaria OK.
+- G (pack Colab NN): `lab/colG_pack.py` + `lab/colG_RUN.md`, demos 3/3
+  locales. LISTO para T4 (falta pareo humano).
+- H (T650/1299): CONFIRMA total — forcing UNSAT ×2 re-verificado kissat
+  (46 s + 115 s), 1299v/6757e recount exacto, 5-coloreo 0 violaciones,
+  mining 20 000 → 0 FORCED. DRAT/LRAT sin checker en el box.
+- I (symbreak+shrink2): `lab/symI_cnf.py` + `lab/symI_shrink2.py`; 60×
+  re-verificado (58.17 s→0.97 s); shrink 623 checks, invariante OK.
+Ledger kinds `tools-tested` + `t650-1299-verify`.
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.
