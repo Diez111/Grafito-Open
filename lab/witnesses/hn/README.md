@@ -150,6 +150,56 @@ Glucose3) — `job_id 9c8940ea…/68b0ac88…/762b748a…`, PENDIENTES de pareo 
 en browser (1 vez por VM). Aclaración técnica: SAT no usa GPU/TPU (búsqueda
 simbólica CPU); Colab aporta CPUs prestadas + numpy, nada más.
 
+## Oleada agente D: 553 + 517 (2026-09-20, CERRADA)
+
+Resto del CNP-SAT: 553 (el del paper Heule) y 517, conteos exactos
+(2722/2579 aristas, 0 mismatch numérico), importados (`553_heule.vtx`,
+`517_heule.vtx`, SHA256SUMS 10/10 OK).
+- [PRUEBA] 553 k=4 UNSAT (55.4 s) + 517 k=4 UNSAT (82.5 s), recheck ciego
+  del 553 OK → 4ª y 5ª familia 5-cromática confirmadas.
+- [EVIDENCIA] ambos k=5 SAT (0.04 s).
+- [EVIDENCIA] mono-mine 50 000 pares (25 000 c/u, d≥0.5) → 0 FORCED.
+  [DESCARTADO] también sobre 553/517.
+Gran total campaña: 417 929 pares, cero forzados.
+
+## Oleada núcleos densos (2026-09-20, CERRADA)
+
+180 núcleos densos (bolas geométricas r1.5 + grafo-radio 2 sobre top-30
+grados de 874/553/510) + 6 uniones de núcleos: los 186 k4 SAT instantáneo
+(≤0.1 s), 0 UNSAT. [DESCARTADO] récord <509 por esta vía. Insight: la
+5-cromaticidad de estos grafos es GLOBAL (el 874 completo tarda 184 s en
+UNSAT; cualquier núcleo denso cae en 0.0 s) — no vive en vecindades densas.
+Script `/tmp/opencode/denE_hunt.py`, ledger kind `dense-cores`.
+
+## Rama virtual edges + RSI (2026-09-20, CERRADA)
+
+Nueva medición (no hecha antes): pares forzado-DIFERENTES en 553 a las
+distancias de forcing de HeliCorgi. 2404 no-aristas (663 a d~=2, 1741 a
+d~=1/√3), test de igualdad forzada (`mine_virtual.py`, 10 cláusulas,
+controles edge→VIRTUAL y same-color→SAT OK) → **0 VIRTUAL**.
+Hueco del cap 25k cerrado: 578 pares mismo-color a esas distancias,
+testados forced-SAME → 0 FORCED. Ledger kinds `virtual-mine` + `mono-mine`
+(553_d2-d577). Conclusión: el forcing existencial que reporta HeliCorgi en
+510 no deja rastro FIJO en 553 a esas distancias (ni same ni different).
+RSI usado de verdad: `policy_suggest` (49 runs → triangular domina) +
+`replay_score` (triangular-500 1412 vs grid-500 955, determinista) → el
+ganador optimiza DENSIDAD, no forcing (lattice triangular es 3-coloreable);
+no sirve a HN y se documenta en vez de insistir.
+
+## Rama neuronal estilo 2024 (2026-09-20, instrumento listo, límite medido)
+
+Tool nueva `lab/nn_color.py` (torch, CPU/T4, imprime 1 JSON): coloreo
+probabilístico + loss de pares monocromáticos + SGD (núcleo del paper
+2404.05509). Validada en triángulo (k2 piso 1/3 +1 violación = espejo UNSAT;
+k3 →0 +0 = espejo SAT). En 509 real: k4 trabado en 119 violaciones (espejo
+UNSAT correcto) pero k5 trabado en 43→31 (kissat lo colorea en 25 ms).
+Conclusión medida: el SGD ingenuo NO alcanza donde SAT sobra; el programa
+real (replicar loss custom + annealing del paper, escalar en T4) es proyecto
+de semanas, no de esta noche. TPU: inútil para SAT y para este script
+(torch no corre en TPU; JAX-port como follow-up). Ledger kinds
+`nn-instrument` + `nn-search`. Para correr en Colab (requiere TU pareo):
+Runtime → T4 GPU → subir `lab/nn_color.py` → `!python nn_color.py --demo`.
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.
