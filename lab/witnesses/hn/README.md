@@ -277,13 +277,18 @@ de copias: ni los anillos cerrados frustran el 5-coloreo. Nota: m>2 copias
 no comparten arista completa en el plano (fan sobre vértice).
 Ledger kind `multi-compose`.
 
-## Oleada de Grey 1581 (2026-09-21, CONSTRUCCIÓN OK / CERT PENDIENTE)
+## Oleada de Grey 1581 (2026-09-21, FAMILIA CONFIRMADA)
 
 S transcripto 1:1 del paper (39 puntos) → Sa=397 → G=1581, aristas 7877
-(desvío 0%). k5 SAT (0.1 s) + mining 15 000 → 0 FORCED. Pero k4 TIMEOUT
-900 s sin symbreak + 1800 s con symbreak: el grafo fundacional resiste CDCL
-(por eso la literatura usa DRAT-cores). NO importado (barra: UNSAT local).
-Ledger kinds `cnf-build` + `mono-mine` (deGrey-1581).
+(desvío 0%). k5 SAT (0.1 s) + mining 15 000 → 0 FORCED. k4: kissat TIMEOUT
+2×, **CaDiCaL UNSAT** → 7ª familia 5-cromática confirmada localmente.
+Ledger kind `cnf-build` (deGrey-1581).
+
+## Oleada Haugland 2131 (2026-09-21, EN CURSO)
+
+Construcción exacta por etapas (21/1042/740+3985/1066+6264/2131+12530,
+k5 SAT 0.39 s). Forcing G1 con CaDiCaL en fondo. Full-mining G3 (420 555)
++ G1 (50 149) en fondo. Ledger kind `cnf-build` (Haugland-G3-2131).
 
 ## Oleada pipeline Heule/Parts (2026-09-21, CERRADA)
 (escala proofs: CaDiCaL 56 min sin terminar en 1405, proof 5.2 GB creciendo
