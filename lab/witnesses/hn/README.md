@@ -252,6 +252,22 @@ Gran total campaña: 669 079 pares, cero forzados.
   re-verificado (58.17 s→0.97 s); shrink 623 checks, invariante OK.
 Ledger kinds `tools-tested` + `t650-1299-verify`.
 
+## Oleada fan-out ×5 total (2026-09-21, CERRADA)
+
+- J1 (Type-J constructivo): `lab/jcyJ_kit.py` — mono-pair 8/3 + escalados
+  η/ρ con forcing k3 probado; ciclo-J 25v χ=4 (k3 UNSAT, k4 SAT). Obstáculo
+  documentado: compartir terminal con ángulo η crea arista emergente.
+- J2 (1299 full):unció bug de harness (índices 1-based vs 0-based; minings
+  propios 0-based NO afectados). Re-mine TRUE-20k corregido: 0 FORCED.
+  Virtual 686: 0 VIRTUAL. Espacio 1299 (38 620) cubierto entero → 0.
+- J3 (shrink): 1299 k4 TIMEOUT 900 s (shrink inviable ahí); 553 localmente
+  minimal (2 seeds ×623 tests, 0 removidos, invariante OK).
+- J4 (NN scale): 874 k5 y 553 k5 → 0 violaciones (42 s/34 s CPU).
+- J5 (Mixon 1577): k4 SAT en ambas bases de índices → descartado.
+Ledger kinds respectivos + `harness-bugfix`.
+Gran total campaña: 711 367 pares (669 079 + 2 982 virtuales-553 + 39 306
+del 1299), cero forzados.
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.
