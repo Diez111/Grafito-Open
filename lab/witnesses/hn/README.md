@@ -285,6 +285,19 @@ S transcripto 1:1 del paper (39 puntos) → Sa=397 → G=1581, aristas 7877
 (por eso la literatura usa DRAT-cores). NO importado (barra: UNSAT local).
 Ledger kinds `cnf-build` + `mono-mine` (deGrey-1581).
 
+## Oleada pipeline Heule/Parts (2026-09-21, CERRADA)
+
+- L1 (hipergrafo): 553 VÉRTICE-CRÍTICO — los 553 vértices críticos
+  (sacar cualquiera mata la 5-cromaticidad), 2143 tests, 0 removidos.
+- L2 (siembra): V31 31v/60e validado (= paper); 11 candidatos L∪ρS/η
+  todos k4 SAT → sin familia nueva.
+- L3 (Exoo): corrección importante — el 8/3 incondicional es de HARDER
+  (745v→G367), no de Exoo. G40 (`lab/exoL_gadget.py`): forcing
+  CONDICIONAL verificado (P=Q solo si no-mono √(11/3)).
+- Toolchain proofs: drat-trim compilado OK; CaDiCaL en compilación
+  (primer intento falló por workdir, relanzado).
+Ledger kinds `hyper-min` + `sow` + `gadget-exoo`.
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.
