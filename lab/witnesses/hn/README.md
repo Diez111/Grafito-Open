@@ -284,14 +284,16 @@ S transcripto 1:1 del paper (39 puntos) → Sa=397 → G=1581, aristas 7877
 2×, **CaDiCaL UNSAT** → 7ª familia 5-cromática confirmada localmente.
 Ledger kind `cnf-build` (deGrey-1581).
 
-## Oleada Haugland 2131 (2026-09-21, G1 CERRADA / G3 EN FONDO)
+## Oleada Haugland 2131 (2026-09-21, CERRADA)
 
+Construcción exacta por etapas (H 21v, T5 1042v, G1 740v/3985e, G2
+1066v/6264e, G3 2131v/12530e, k5 SAT 0.39 s). Ledger `cnf-build`.
 - G1 full mining: 50 149 pares → 0 FORCED. [DESCARTADO] forcing a nivel 5.
 - Forcing nivel-4 (A=B): TIMEOUT local (kissat 81 min + CaDiCaL 30 min);
   solo el CaDiCaL del autor lo decidió. Pendiente solver/flags.
-- G3 full mining (420 555) en fondo.
-- Construcción exacta por etapas (21/1042/740+3985/1066+6264/2131+12530,
-  k5 SAT 0.39 s). Ledger kind `cnf-build` (Haugland-G3-2131).
+- G3 full mining (420 555) → 0 FORCED (12 h wall). [DESCARTADO] forcing
+  a nivel 5 también en la familia heptagonal.
+Gran total campaña: ~1,11 M pares distinct, cero forzados.
 
 ## Oleada pipeline Heule/Parts (2026-09-21, CERRADA)
 (escala proofs: CaDiCaL 56 min sin terminar en 1405, proof 5.2 GB creciendo
