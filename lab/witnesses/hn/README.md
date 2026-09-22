@@ -311,6 +311,14 @@ Gran total campaña: ~1,11 M pares distinct, cero forzados.
   (primer intento falló por workdir, relanzado).
 Ledger kinds `hyper-min` + `sow` + `gadget-exoo`.
 
+## Oleada candidatos NN conjuntos (2026-09-22, EN CURSO)
+
+Frente paralelo NN (otra sesión: SIREN+TPU, notebooks 01-10) generó 15
+candidatos (C1-C7, evo×8). Triage SAT propio: los 15 k5 SAT (C3 1527v en
+0.1 s; C7 4262v en 69 s). OJO: índices de bundles 1-based (shift corregido
+antes de minar). Minado SAT en fondo: C3 (213 106) + cola (C6/C5/evos/C7).
+Ledger kind `triage-nn`.
+
 ## Regla
 
 Solo `run_id` con `verified:true` o UNSAT/SAT re-ejecutado acá cuenta.

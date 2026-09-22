@@ -1,0 +1,18 @@
+Cómo subir a Colab (2 minutos, sin buscar carpetas raras)
+============================================================
+
+Por qué veías la carpeta vacía: el diálogo "Abrir" de Colab solo muestra
+notebooks (.ipynb). Los scripts .py no aparecen. Estos 2 archivos SÍ aparecen:
+
+  01_SAT_demo_colab.ipynb      (caso chico con Glucose3, CPU, 1 min)
+  02_sympy_numpy_colab.ipynb   (sympy + barrido seeded-500, CPU, 2 min)
+
+Pasos:
+  1. Andá a colab.research.google.com → Archivo → Subir notebook →
+     elegí 01_SAT_demo_colab.ipynb (está en esta misma carpeta).
+  2. Entorno de ejecución → Ejecutar todo. Esperá que instale python-sat.
+  3. Copiá la línea {"results": ...} y pegala en el chat de Grafito.
+  4. Lo mismo con el 02.
+
+Para GPU/T4 (solo red neuronal, jamás SAT): subí lab/nn_color.py o
+lab/colG_pack.py con el botón de archivos de Colab y corré !python nn_color.py --demo.
