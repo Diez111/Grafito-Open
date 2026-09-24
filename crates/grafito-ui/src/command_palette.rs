@@ -30,7 +30,7 @@ pub struct PaletteCommand {
     pub selection_key: &'static str,
     /// Alias bilingües (inglés + español) sólo para la búsqueda.
     pub keywords: &'static str,
-    /// Slug del catálogo i18n (`palette_action`) para las 15 acciones UI;
+    /// Slug del catálogo i18n (`palette_action`) para las 16 acciones UI;
     /// `None` en comandos del registry (conservan su etiqueta).
     locale_slug: Option<&'static str>,
     insertion: Option<&'static str>,
@@ -70,7 +70,7 @@ impl PaletteCommand {
         self.command_id.and_then(command_registry::by_id)
     }
 
-    /// Nombre visible en el idioma pedido. Las 15 acciones UI resuelven vía
+    /// Nombre visible en el idioma pedido. Las 16 acciones UI resuelven vía
     /// catálogo i18n (ES idéntico a `name`); el registry conserva su etiqueta.
     fn localized_name(&self, locale: Locale) -> &'static str {
         match self.locale_slug {
@@ -258,6 +258,17 @@ const UI_ACTIONS: &[PaletteCommand] = &[
         selection_key: "Indicate Selection",
         locale_slug: Some("indicate_selection"),
         keywords: "indicate selection indicar seleccion resaltar latir highlight pulso",
+        insertion: None,
+        command_id: None,
+    },
+    PaletteCommand {
+        name: "Desarrollo por pasos",
+        category: "Asistente",
+        syntax_hint: "StepByStep[op]",
+        help: "Prepara StepByStep en la entrada para ver la traza con revelado progresivo.",
+        selection_key: "Step by Step",
+        locale_slug: Some("step_by_step"),
+        keywords: "step by step desarrollo pasos visor trace stepwise",
         insertion: None,
         command_id: None,
     },
@@ -966,6 +977,9 @@ mod tests {
             ("indicate", "Indicate Selection"),
             ("resaltar", "Indicate Selection"),
             ("highlight", "Indicate Selection"),
+            ("pasos", "Step by Step"),
+            ("step", "Step by Step"),
+            ("desarrollo", "Step by Step"),
         ] {
             let state = CommandPaletteState {
                 search: query.to_string(),
@@ -1016,7 +1030,7 @@ mod tests {
 
     #[test]
     fn nav_wrapped_da_la_vuelta_en_ambos_extremos() {
-        // N entradas en paleta (604 comandos + 15 acciones UI): el wrap evita
+        // N entradas en paleta (604 comandos + 16 acciones UI): el wrap evita
         // callejones sin salida por teclado. 614 acá es largo de ejemplo.
         assert_eq!(CommandPaletteState::nav_wrapped(0, 0, true), None);
         assert_eq!(CommandPaletteState::nav_wrapped(0, 614, false), Some(613));
@@ -1092,7 +1106,7 @@ mod tests {
     fn comandos_localizados_en_espanol_coinciden_con_la_ui_actual() {
         use super::UI_ACTIONS;
         use crate::i18n::{palette_action, Locale};
-        assert_eq!(UI_ACTIONS.len(), 15);
+        assert_eq!(UI_ACTIONS.len(), 16);
         let current = all_commands();
         let localized = super::all_commands_localized(Locale::Es);
         assert_eq!(current.len(), localized.len());
@@ -1119,7 +1133,7 @@ mod tests {
             .iter()
             .filter(|cmd| !cmd.is_registered())
             .collect();
-        assert_eq!(ui_actions.len(), 15);
+        assert_eq!(ui_actions.len(), 16);
         for expected in [
             "Point Tool",
             "Line Tool",
@@ -1136,6 +1150,7 @@ mod tests {
             "Toggle Grid",
             "Toggle Dark Mode",
             "Indicate Selection",
+            "Step by Step",
         ] {
             assert!(
                 ui_actions.iter().any(|cmd| cmd.name == expected),
@@ -1178,7 +1193,7 @@ mod tests {
     fn acciones_ui_muestran_espanol_y_despachan_clave_inglesa() {
         let commands = all_commands();
         let ui_actions: Vec<_> = commands.iter().filter(|cmd| !cmd.is_registered()).collect();
-        assert_eq!(ui_actions.len(), 15);
+        assert_eq!(ui_actions.len(), 16);
         // Etiquetas visibles en español rioplatense.
         for expected in [
             "Herramienta Punto",
@@ -1196,6 +1211,7 @@ mod tests {
             "Alternar cuadrícula",
             "Alternar modo oscuro",
             "Indicar selección",
+            "Desarrollo por pasos",
         ] {
             assert!(
                 ui_actions.iter().any(|cmd| cmd.name == expected),
@@ -1219,6 +1235,7 @@ mod tests {
             "Toggle Grid",
             "Toggle Dark Mode",
             "Indicate Selection",
+            "Step by Step",
         ] {
             assert!(
                 ui_actions

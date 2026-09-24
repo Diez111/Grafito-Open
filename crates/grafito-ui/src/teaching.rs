@@ -4,16 +4,25 @@
 //! Cada paso es una burbuja que se expande desde el avatar (morph 180ms).
 
 use crate::avatar::{avatar_bubble_morph_rect, ease_out_cubic};
+use crate::projector::MotionConfig;
 use crate::theme::current_theme;
-use crate::tokens::{
-    ANIM_MICRO, RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_SM, TYPE_XS,
-};
-use egui::{vec2, Color32, Rect, Stroke};
+use crate::tokens::{RADIUS_MD, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_BASE, TYPE_SM, TYPE_XS};
+use egui::{vec2, Color32, Rect};
 use grafito_pedagogy::TeachingSession;
 
 /// Dibuja la sesión de enseñanza como burbujas morph + pizarra + controles.
 /// Retorna `Some(true)` si se pidió avanzar, `Some(false)` si se cerró.
 pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -> Option<bool> {
+    draw_teaching_session_with_motion(ui, session, MotionConfig::default())
+}
+
+/// Variante con preferencia de movimiento (WCAG 2.3.3): con
+/// `reduced_motion` el morph salta al estado final sin interpolar.
+pub fn draw_teaching_session_with_motion(
+    ui: &mut egui::Ui,
+    session: &mut TeachingSession,
+    motion: MotionConfig,
+) -> Option<bool> {
     let theme = current_theme(ui.ctx());
     let current = session.current().cloned()?;
     let progress = session.progress();
@@ -33,24 +42,22 @@ pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -
     ui.add_space(SPACE_XS);
     ui.label(
         egui::RichText::new(format!("Paso {step_idx}/{total} — {}", current.title))
-            .color(theme.accent)
+            .color(theme.accent_strong)
             .size(TYPE_SM)
             .strong(),
     );
     ui.add_space(SPACE_XS);
 
-    // Burbuja principal — morph desde avatar con ease-out y ANIM_MICRO
+    // Burbuja principal — morph desde avatar con ease-out. Con movimiento
+    // reducido se muestra el estado final directo (WCAG 2.3.3).
     // El radio interpola RADIUS_LG 16 → RADIUS_MD 12 según progreso del paso
     let bubble_raw = (session.current as f32 / session.steps.len().max(1) as f32).clamp(0.0, 1.0);
-    let bubble_eased = ease_out_cubic(bubble_raw);
+    let bubble_eased = motion.morph_t(ease_out_cubic(bubble_raw));
     let base_bubble = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(40.0, 40.0));
     let (_, bubble_radius) = avatar_bubble_morph_rect(base_bubble, bubble_eased);
-    // También anima sutilmente el contenido con morph temporal (180ms desde creación)
-    let time = ui.input(|i| i.time) as f32 * 1000.0;
-    let _morph_time = (time % ANIM_MICRO) / ANIM_MICRO; // keep ANIM_MICRO used
     egui::Frame::none()
-        .fill(Color32::WHITE)
-        .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .fill(theme.assistant_assistant_bubble)
+        .stroke(theme.hairline_stroke())
         .rounding(bubble_radius)
         .inner_margin(egui::Margin::same(SPACE_MD))
         .shadow(egui::Shadow {
@@ -70,7 +77,7 @@ pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -
                 ui.add_space(SPACE_SM);
                 egui::Frame::none()
                     .fill(theme.input_bg)
-                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .rounding(RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
@@ -109,13 +116,13 @@ pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -
                     );
                     ui.label(
                         egui::RichText::new(tmpl)
-                            .color(theme.accent)
+                            .color(theme.accent_strong)
                             .size(TYPE_XS)
                             .monospace(),
                     );
-                    if ui.small_button("Ver animación").clicked() {
-                        // Se manejará fuera — por ahora solo feedback
-                    }
+                    // Sin botón mudo: antes había un "Ver animación" con
+                    // handler vacío (affordance falsa). La reproducción vive
+                    // fuera de la Piel; acá solo se anuncia la plantilla.
                 });
             }
         });
@@ -145,7 +152,7 @@ pub fn draw_teaching_session(ui: &mut egui::Ui, session: &mut TeachingSession) -
             .add(
                 egui::Button::new(egui::RichText::new("Cerrar").size(TYPE_XS))
                     .rounding(RADIUS_MD)
-                    .stroke(Stroke::new(1.0, theme.separator.gamma_multiply(0.10))),
+                    .stroke(theme.hairline_stroke()),
             )
             .clicked()
         {

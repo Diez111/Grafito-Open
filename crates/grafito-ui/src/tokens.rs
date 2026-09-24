@@ -127,6 +127,17 @@ pub const SHADOW_POPUP_BLUR: f32 = 8.0;
 pub const SHADOW_ALPHA: u8 = 8;
 
 // ═══════════════════════════════════════════════════════════
+// Strokes — Scandinavian (hairline 1 px, énfasis 1.5 px)
+// ═══════════════════════════════════════════════════════════
+
+/// Hairline de bordes y divisores — 1 px, siempre con
+/// `Theme::hairline_stroke()` (separator al 10 %). Sin magia suelta.
+pub const STROKE_HAIRLINE: f32 = 1.0;
+/// Trazo de énfasis (selección, foco, highlight) — 1.5 px.
+/// Reemplaza los `Stroke::new(1.5, …)` sin nombre.
+pub const STROKE_EMPHASIS: f32 = 1.5;
+
+// ═══════════════════════════════════════════════════════════
 // Alphas — Scandinavian quiet overlays
 // ═══════════════════════════════════════════════════════════
 
@@ -235,8 +246,8 @@ pub const ONBOARDING_INNER_PAD_X: f32 = 20.0;
 /// Campos del editor de rango del deslizador — 64×20: columna alineada,
 /// compacta, múltiplos de base 4.
 pub const RANGE_FIELD_W: f32 = 64.0;
-/// Alto del campo de rango — 20 px.
-pub const RANGE_FIELD_H: f32 = 20.0;
+/// Alto del campo de rango — 24 px (piso WCAG 2.5.8, base 4).
+pub const RANGE_FIELD_H: f32 = 24.0;
 /// Alto de la acción al pie del popup (Borrar) — 28 px: táctil, base 4.
 pub const POPUP_ACTION_H: f32 = 28.0;
 /// Ancho mínimo del contenido del popup de rango — 140 px: dos campos de

@@ -4,6 +4,7 @@ use crate::{
     animation::{ThinkingOrb, ThinkingOrbState},
     icons::{action_icon_button, Icon},
     theme::current_theme,
+    theme::Theme,
     tokens::{
         HIT_TARGET_MIN, RADIUS_LG, RADIUS_MD, RADIUS_SM, SPACE_LG, SPACE_MD, SPACE_SM, SPACE_XS,
         SPACE_XXL, TYPE_2XS, TYPE_BASE, TYPE_LG, TYPE_MD, TYPE_SM, TYPE_XS,
@@ -762,12 +763,13 @@ pub fn scrub_fraction_from_x(x: f32, bar_min_x: f32, bar_w: f32) -> f32 {
 /// mudo y la ventana se iba de los límites).
 pub const MAX_PREVIEW_UPSCALE: f32 = 1.5;
 
-/// Tooltips cortos de la toolbar única v3 (≤60 chars, sin cortes).
-const MEDIA_TIP_EXPORT: &str = "Exportar: elegís formato y calidad";
-const MEDIA_TIP_PAUSE: &str = "Congela en el fotograma actual (Espacio)";
-const MEDIA_TIP_PLAY: &str = "Retoma donde quedó (Espacio)";
-const MEDIA_TIP_STEP_BACK: &str = "Fotograma anterior (<-)";
-const MEDIA_TIP_STEP_FWD: &str = "Fotograma siguiente (->)";
+/// Tooltips del player por clave (`assistant.media_tip_*`, ≤60 chars).
+/// Las consts fijas en español se fueron: el tooltip sale del catálogo
+/// según el `Locale` del call-site y se anuncia como etiqueta accesible
+/// (`widget_info`), no solo hover.
+fn media_tip(key: &'static str, locale: crate::i18n::Locale) -> &'static str {
+    crate::i18n::t(key, locale)
+}
 
 /// Estado de la exportación a GIF de la card (B5).
 ///
@@ -1709,6 +1711,10 @@ pub struct AssistantPanelState {
     /// Apertura manual del bloque de razonamiento por turno (`id → abierto`).
     /// `RefCell` porque la Piel dibuja con `&Estado` y el toggle muta al click.
     pub reasoning_open: std::cell::RefCell<std::collections::BTreeMap<u64, bool>>,
+    /// Pasos revelados del visor de desarrollo por turno (`turn_index →
+    /// revelados`). `RefCell` por el mismo motivo que `reasoning_open`: el
+    /// draw lee con `&Estado` y la app avanza fuera del draw.
+    pub steps_revealed: std::cell::RefCell<std::collections::BTreeMap<usize, usize>>,
     /// Consumo de tokens acumulado de la sesión (suma de turnos con `usage`).
     pub session_usage: AssistantTokenUsage,
     /// Contador monótono de ids de turno (para el disclosure estable).
@@ -2017,6 +2023,7 @@ impl Default for AssistantPanelState {
             remote_stage_note: None,
             pending_stream_trace: None,
             reasoning_open: std::cell::RefCell::new(std::collections::BTreeMap::new()),
+            steps_revealed: std::cell::RefCell::new(std::collections::BTreeMap::new()),
             session_usage: AssistantTokenUsage::default(),
             next_turn_id: 0,
             reasoning_enabled: false,
@@ -2143,12 +2150,55 @@ impl AssistantPanelState {
         self.clear_pending_clarification();
         self.pending_stream_trace = None;
         self.reasoning_open.borrow_mut().clear();
+        self.steps_revealed.borrow_mut().clear();
         self.error = None;
         // M2-5: Limpiar es el ÚNICO reset de las prefs de
         // export (`set_media` las conserva entre animaciones).
         // Reproducción fija 1x: sin estado de velocidad que resetear.
         self.media_export = MediaExportState::default();
         *self.export_dialog.borrow_mut() = MediaExportDialog::new();
+    }
+
+    /// Pasos revelados del visor de un turno (0 si nunca se tocó).
+    ///
+    /// Puro: lee el mapa con `&self` (el draw lo usa cada frame).
+    pub fn steps_revealed_for(&self, turn: usize) -> usize {
+        self.steps_revealed
+            .borrow()
+            .get(&turn)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Pasos visibles del visor de `turn` con `total` pasos: el primero se
+    /// muestra sin clic (valor efectivo `max(mapa, 1)`), siempre acotado a
+    /// `total`. Puro.
+    pub fn visible_steps_for(&self, turn: usize, total: usize) -> usize {
+        if total == 0 {
+            return 0;
+        }
+        self.steps_revealed_for(turn).max(1).min(total)
+    }
+
+    /// Avanza un paso el visor de `turn`, acotado a `total` (nunca baja ni
+    /// supera el total; `total` 0 no crea entrada).
+    pub fn advance_step_card(&self, turn: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        let current = self.visible_steps_for(turn, total);
+        self.steps_revealed
+            .borrow_mut()
+            .insert(turn, crate::step_by_step::next_revealed(current, total));
+    }
+
+    /// Revela todo el visor de `turn` (`total` pasos; `total` 0 no crea
+    /// entrada).
+    pub fn reveal_all_step_card(&self, turn: usize, total: usize) {
+        if total == 0 {
+            return;
+        }
+        self.steps_revealed.borrow_mut().insert(turn, total);
     }
 
     /// Conserva una consulta no resuelta localmente hasta que el usuario decida
@@ -4727,6 +4777,16 @@ pub enum AssistantUiAction {
     AnswerClarification { call_id: String, answer: String },
     /// Descartar la aclaración sin responder (el turno visible queda intacto).
     DismissClarification,
+    /// Revelar el siguiente paso del visor de desarrollo por pasos de un
+    /// turno del transcript (tarjeta ```grafito-steps).
+    ///
+    /// La emite el botón Revelar de la tarjeta; la app avanza el contador
+    /// del turno fuera del draw y repinta. Sin I/O ni spawn en `Ui::`.
+    RevealStep { turn: usize },
+    /// Revelar todos los pasos del visor de un turno (botón Ver todo).
+    ///
+    /// Mismo camino que `RevealStep`, con el contador al total del turno.
+    RevealAllSteps { turn: usize },
 }
 
 /// Dibuja el asistente como parte permanente del shell, antes del canvas.
@@ -4752,7 +4812,7 @@ pub fn draw_assistant_panel(
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -4769,7 +4829,7 @@ pub fn draw_assistant_panel(
             .frame(
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM)),
             )
             .show(ctx, |ui| {
@@ -4967,7 +5027,7 @@ pub fn draw_assistant_settings_window(
             if is_narrow {
                 egui::Frame::none()
                     .fill(theme.input_bg.gamma_multiply(0.55))
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .rounding(crate::tokens::RADIUS_LG)
                     .inner_margin(egui::Margin::same(crate::tokens::SPACE_MD))
                     .show(ui, |ui| {
@@ -5029,10 +5089,7 @@ pub fn draw_assistant_settings_window(
                         |ui| {
                             egui::Frame::none()
                                 .fill(theme.input_bg.gamma_multiply(0.55))
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    theme.separator.gamma_multiply(0.10),
-                                ))
+                                .stroke(theme.hairline_stroke())
                                 .rounding(crate::tokens::RADIUS_LG)
                                 .inner_margin(egui::Margin::same(crate::tokens::SPACE_LG))
                                 .show(ui, |ui| {
@@ -5058,7 +5115,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         ui.label(
             egui::RichText::new("Vista previa")
                 .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary.gamma_multiply(0.85))
+                .color(theme.text_tertiary)
                 .weak(),
         );
         ui.add_space(crate::tokens::SPACE_SM);
@@ -5143,7 +5200,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
                                 crate::tokens::TYPE_XS,
                                 egui::FontFamily::Proportional,
                             ),
-                            color: theme.text_primary.gamma_multiply(0.85),
+                            color: Theme::dimmed_text(theme.text_primary, 0.85),
                             ..Default::default()
                         },
                     );
@@ -5183,7 +5240,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         ui.label(
             egui::RichText::new("Mové el puntero sobre el avatar")
                 .size(TYPE_2XS)
-                .color(theme.text_tertiary.gamma_multiply(0.75))
+                .color(theme.text_tertiary)
                 .weak(),
         );
     });
@@ -5207,7 +5264,7 @@ fn draw_perfil_settings_contents(
             "Tu identidad y el avatar vectorial. Todo se previsualiza a la derecha.",
         )
         .size(crate::tokens::TYPE_XS)
-        .color(theme.text_secondary.gamma_multiply(0.60))
+        .color(Theme::dimmed_text(theme.text_secondary, 0.60))
         .weak(),
     );
     ui.add_space(crate::tokens::SPACE_MD);
@@ -5671,7 +5728,7 @@ fn draw_perfil_settings_contents(
         ui.label(
             egui::RichText::new("Guardado automático")
                 .size(crate::tokens::TYPE_XS)
-                .color(theme.text_tertiary.gamma_multiply(0.85))
+                .color(theme.text_tertiary)
                 .weak()
                 .italics(),
         );
@@ -5682,7 +5739,10 @@ fn draw_perfil_settings_contents(
                         egui::RichText::new("Restablecer").size(crate::tokens::TYPE_XS),
                     )
                     .rounding(crate::tokens::RADIUS_PILL)
-                    .stroke(egui::Stroke::new(1.5, theme.separator.gamma_multiply(0.10))),
+                    .stroke(egui::Stroke::new(
+                        crate::tokens::STROKE_EMPHASIS,
+                        theme.separator.gamma_multiply(0.10),
+                    )),
                 )
                 .on_hover_text("Vuelve a valores por defecto")
                 .clicked()
@@ -5779,7 +5839,7 @@ fn draw_personality_settings_contents(
             ui.label(
                 egui::RichText::new(p.description())
                     .size(crate::tokens::TYPE_XS)
-                    .color(theme.text_secondary.gamma_multiply(0.85))
+                    .color(Theme::dimmed_text(theme.text_secondary, 0.85))
                     .italics()
                     .weak(),
             );
@@ -5789,7 +5849,7 @@ fn draw_personality_settings_contents(
     ui.add_space(crate::tokens::SPACE_XS);
     egui::Frame::none()
         .fill(theme.input_bg.gamma_multiply(0.85))
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .stroke(theme.hairline_stroke())
         .rounding(crate::tokens::RADIUS_LG)
         .inner_margin(egui::Margin::symmetric(
             crate::tokens::SPACE_MD,
@@ -6431,7 +6491,10 @@ fn draw_assistant_settings_contents(
                         egui::Frame::none()
                             .fill(col.gamma_multiply(0.12))
                             .rounding(crate::tokens::RADIUS_PILL)
-                            .inner_margin(egui::Margin::symmetric(7.0, 2.0))
+                            .inner_margin(egui::Margin::symmetric(
+                                crate::tokens::SPACE_SM,
+                                crate::tokens::SPACE_XXS,
+                            ))
                             .show(ui, |ui| {
                                 ui.label(
                                     egui::RichText::new(status)
@@ -6651,7 +6714,7 @@ fn draw_panel_contents(
         .frame(
             egui::Frame::none()
                 .fill(theme.panel_bg)
-                .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                .stroke(theme.hairline_stroke())
                 .inner_margin(egui::Margin::symmetric(
                     crate::tokens::SPACE_SM,
                     crate::tokens::SPACE_SM,
@@ -6871,7 +6934,10 @@ fn draw_panel_contents(
                         draw_animation_progress(ui, state, visuals),
                     );
                 } else if state.media.is_some() {
-                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_media_card(ui, state, visuals.locale),
+                    );
                 }
             }
         });
@@ -7714,6 +7780,7 @@ fn draw_turn_player(
     state: &AssistantPanelState,
     turn_idx: usize,
     turn: &ConversationTurn,
+    locale: crate::i18n::Locale,
 ) -> Option<AssistantUiAction> {
     let media = turn.media.as_ref()?;
     let shared = media.frames.as_ref()?;
@@ -7804,12 +7871,13 @@ fn draw_turn_player(
                     duration_ms: media_loop_duration_ms(frame_count, MEDIA_CARD_BASE_FPS),
                     frame_count,
                     exporting: false,
+                    locale,
                 };
                 draw_turn_scrub_bar(ui, &mut cursor, frame_count, &counter_long, now_s);
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s);
-                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s);
+                    draw_turn_play_button(ui, state, turn_idx, &mut cursor, now_s, locale);
+                    draw_turn_step_buttons(ui, &mut cursor, frame_count, now_s, locale);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         draw_media_counter_slot(ui, &turn_view);
                     });
@@ -7837,19 +7905,21 @@ fn draw_turn_play_button(
     turn_idx: usize,
     cursor: &mut TurnPlayState,
     now_s: f64,
+    locale: crate::i18n::Locale,
 ) {
-    if ui
+    let tip = if cursor.playing {
+        media_tip("assistant.media_tip_pause", locale)
+    } else {
+        media_tip("assistant.media_tip_play", locale)
+    };
+    let resp = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new(if cursor.playing { "⏸" } else { "▶" }),
         )
-        .on_hover_text(if cursor.playing {
-            MEDIA_TIP_PAUSE
-        } else {
-            MEDIA_TIP_PLAY
-        })
-        .clicked()
-    {
+        .on_hover_text(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    if resp.clicked() {
         if cursor.playing {
             cursor.playing = false;
             cursor.last_tick_s = Some(now_s);
@@ -7870,31 +7940,34 @@ fn draw_turn_step_buttons(
     cursor: &mut TurnPlayState,
     frame_count: usize,
     now_s: f64,
+    locale: crate::i18n::Locale,
 ) {
     if frame_count == 0 {
         return;
     }
     let last = frame_count.saturating_sub(1);
-    if ui
+    let tip_back = media_tip("assistant.media_tip_back", locale);
+    let resp_back = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new("◀"),
         )
-        .on_hover_text(MEDIA_TIP_STEP_BACK)
-        .clicked()
-    {
+        .on_hover_text(tip_back);
+    resp_back.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip_back));
+    if resp_back.clicked() {
         cursor.idx = cursor.idx.saturating_sub(1).min(last);
         cursor.playing = false;
         cursor.last_tick_s = Some(now_s);
     }
-    if ui
+    let tip_fwd = media_tip("assistant.media_tip_fwd", locale);
+    let resp_fwd = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new("▶"),
         )
-        .on_hover_text(MEDIA_TIP_STEP_FWD)
-        .clicked()
-    {
+        .on_hover_text(tip_fwd);
+    resp_fwd.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip_fwd));
+    if resp_fwd.clicked() {
         cursor.idx = cursor.idx.saturating_add(1).min(last);
         cursor.playing = false;
         cursor.last_tick_s = Some(now_s);
@@ -7936,6 +8009,7 @@ struct MediaToolbarView<'a> {
     duration_ms: u64,
     frame_count: usize,
     exporting: bool,
+    locale: crate::i18n::Locale,
 }
 
 /// Barra de scrub propia estilo YouTube (rail + progreso + knob, Piel pura).
@@ -8032,7 +8106,7 @@ fn draw_media_toolbar(
     draw_media_scrub_bar(ui, state, view);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-        draw_media_play_button(ui, state);
+        draw_media_play_button(ui, state, view.locale);
         draw_media_step_buttons(ui, state, view);
         // Contador + `···` a la derecha: el bloque R2L va ÚLTIMO para que
         // ningún cursor rancio derrame la fila a la derecha.
@@ -8050,20 +8124,25 @@ fn draw_media_toolbar(
 /// filas y vistas. Al darle play se pausan los players por turno (solo uno
 /// reproduce a la vez, ahorro de CPU); al pausar, los turnos quedan
 /// congelados tal cual.
-fn draw_media_play_button(ui: &mut egui::Ui, state: &AssistantPanelState) {
+fn draw_media_play_button(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+) {
     let paused = state.media_paused.get();
-    if ui
+    let tip = if paused {
+        media_tip("assistant.media_tip_play", locale)
+    } else {
+        media_tip("assistant.media_tip_pause", locale)
+    };
+    let resp = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new(if paused { "▶" } else { "⏸" }),
         )
-        .on_hover_text(if paused {
-            MEDIA_TIP_PLAY
-        } else {
-            MEDIA_TIP_PAUSE
-        })
-        .clicked()
-    {
+        .on_hover_text(tip);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    if resp.clicked() {
         let now_playing = paused;
         state.media_paused.set(!paused);
         if now_playing {
@@ -8083,24 +8162,26 @@ fn draw_media_step_buttons(
     state: &AssistantPanelState,
     view: &MediaToolbarView,
 ) {
-    if ui
+    let tip_back = media_tip("assistant.media_tip_back", view.locale);
+    let resp_back = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new("◀"),
         )
-        .on_hover_text(MEDIA_TIP_STEP_BACK)
-        .clicked()
-    {
+        .on_hover_text(tip_back);
+    resp_back.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip_back));
+    if resp_back.clicked() {
         step_media_frame(state, view, -1);
     }
-    if ui
+    let tip_fwd = media_tip("assistant.media_tip_fwd", view.locale);
+    let resp_fwd = ui
         .add_sized(
             egui::vec2(PLAYER_BTN_SQ_W, PLAYER_BTN_H),
             egui::Button::new("▶"),
         )
-        .on_hover_text(MEDIA_TIP_STEP_FWD)
-        .clicked()
-    {
+        .on_hover_text(tip_fwd);
+    resp_fwd.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip_fwd));
+    if resp_fwd.clicked() {
         step_media_frame(state, view, 1);
     }
 }
@@ -8243,7 +8324,7 @@ fn draw_media_more_menu(
                         egui::vec2(media_more_menu_min_width(), PLAYER_BTN_H),
                         egui::Button::new("Exportar").truncate(),
                     )
-                    .on_hover_text(MEDIA_TIP_EXPORT)
+                    .on_hover_text(media_tip("assistant.media_tip_export", view.locale))
                     .clicked()
                 {
                     *action = Some(AssistantUiAction::ExportMedia);
@@ -8304,7 +8385,11 @@ fn draw_media_scrub_bar(ui: &mut egui::Ui, state: &AssistantPanelState, view: &M
 ///   `ConfirmExport`/`CancelExport`/`CloseExportDialog`.
 ///   Progreso/error de export vía diálogo + `MediaExportState`, jamás mudo.
 ///   Prosa sin IDs literales.
-fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<AssistantUiAction> {
+fn draw_media_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+) -> Option<AssistantUiAction> {
     // Tick de gracia único por frame (haya o no frame listo): la retención
     // diferida libera el set viejo tras N frames dibujados, nunca en `set_media`.
     let now_s = ui.input(|input| input.time);
@@ -8557,6 +8642,7 @@ fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState) -> Option<Ass
                     duration_ms,
                     frame_count,
                     exporting,
+                    locale,
                 };
                 if let Some(export_action) = draw_media_toolbar(ui, state, &toolbar_view) {
                     action = Some(export_action);
@@ -9497,11 +9583,7 @@ fn draw_assistant_empty_state(
                 theme.input_bg
             };
             painter.circle_filled(rect.center(), size * 0.5, bg.gamma_multiply(0.95));
-            painter.circle_stroke(
-                rect.center(),
-                size * 0.5,
-                egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)),
-            );
+            painter.circle_stroke(rect.center(), size * 0.5, theme.hairline_stroke());
             let inner = rect.shrink(8.0);
             crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
         }
@@ -9584,7 +9666,7 @@ fn draw_assistant_header(
                             t("assistant.header.subtitle", locale)
                                 .replace("{assistant_name}", &assistant_name),
                         )
-                        .color(theme.text_secondary.gamma_multiply(0.60))
+                        .color(Theme::dimmed_text(theme.text_secondary, 0.60))
                         .size(crate::tokens::TYPE_XS),
                     );
                 });
@@ -9623,7 +9705,7 @@ fn draw_assistant_header(
                         )
                         .rounding(crate::tokens::RADIUS_PILL)
                         .fill(theme.button_bg.gamma_multiply(0.0))
-                        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)));
+                        .stroke(theme.hairline_stroke());
                         if ui.add(btn).clicked() {
                             action = Some(AssistantUiAction::ClearConversation);
                         }
@@ -9741,7 +9823,7 @@ fn draw_assistant_composer(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(t("assistant.composer.context", locale))
-                            .color(theme.accent)
+                            .color(theme.text_primary)
                             .size(TYPE_XS)
                             .strong(),
                     );
@@ -9765,7 +9847,7 @@ fn draw_assistant_composer(
     let mut editor_had_focus = false;
     let composer_frame = egui::Frame::none()
         .fill(theme.input_bg)
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .stroke(theme.hairline_stroke())
         .rounding(crate::tokens::RADIUS_MD)
         .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
@@ -10000,7 +10082,10 @@ fn draw_assistant_composer(
             .wrap(),
         );
         // A11Y live-region (D1): el límite excedido es error y anuncia.
-        crate::toolbar::tag_live_region(&budget_resp, format!("Asistente: error. {budget_text}"));
+        crate::toolbar::tag_live_region(
+            &budget_resp,
+            crate::i18n::t("assistant.live_error", locale).replace("{detail}", &budget_text),
+        );
     } else if state.problem.trim().is_empty() {
         ui.add_space(crate::tokens::SPACE_XS);
         ui.add(
@@ -10024,7 +10109,7 @@ fn draw_assistant_composer(
     ui.add(
         egui::Label::new(
             egui::RichText::new(t("assistant.composer_keys", locale))
-                .color(theme.text_tertiary.gamma_multiply(0.75))
+                .color(theme.text_tertiary)
                 .size(crate::tokens::TYPE_2XS),
         )
         .truncate(),
@@ -10326,7 +10411,7 @@ fn draw_conversation_turn(
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new("Vos")
-                            .color(theme.text_secondary.gamma_multiply(0.60))
+                            .color(Theme::dimmed_text(theme.text_secondary, 0.60))
                             .size(TYPE_XS)
                             .strong(),
                     );
@@ -10366,7 +10451,7 @@ fn draw_conversation_turn(
                         "{assistant_name} · {}",
                         origin_public_label(origin, visuals.locale)
                     ))
-                    .color(theme.text_secondary.gamma_multiply(0.60))
+                    .color(Theme::dimmed_text(theme.text_secondary, 0.60))
                     .size(TYPE_XS)
                     .strong(),
                 );
@@ -10416,6 +10501,10 @@ fn draw_conversation_turn(
                 turn_index,
                 cache,
                 visuals.locale,
+                state,
+                // Sin fuente de SO aún: movimiento completo; la tarjeta
+                // respeta `reduced_motion` cuando la app lo provea.
+                crate::projector::MotionConfig::default(),
             );
             // El "Copiar" del header no pisa la acción de la respuesta.
             retain_first_assistant_action(&mut action, copy_action);
@@ -10447,14 +10536,17 @@ fn draw_conversation_turn(
                 }
                 LiveSlotKind::Slot => {
                     ui.add_space(SPACE_SM);
-                    retain_first_assistant_action(&mut action, draw_media_card(ui, state));
+                    retain_first_assistant_action(
+                        &mut action,
+                        draw_media_card(ui, state, visuals.locale),
+                    );
                 }
                 LiveSlotKind::History => {
                     ui.add_space(SPACE_SM);
                     if turn_has_full_frames(turn) {
                         retain_first_assistant_action(
                             &mut action,
-                            draw_turn_player(ui, state, turn_index, turn),
+                            draw_turn_player(ui, state, turn_index, turn, visuals.locale),
                         );
                     } else {
                         retain_first_assistant_action(
@@ -10473,7 +10565,8 @@ fn draw_conversation_turn(
         if let Some(summary) = last_assistant_response_summary(state) {
             crate::toolbar::tag_live_region(
                 &turn_frame.response,
-                format!("Asistente: respuesta lista. {summary}"),
+                crate::i18n::t("assistant.live_ready", visuals.locale)
+                    .replace("{summary}", &summary),
             );
         }
     }
@@ -10492,7 +10585,7 @@ fn draw_pending_indicator(
     // Editorial pending — hairline, left-aligned, sin burbuja
     let pending_frame = egui::Frame::none()
         .fill(theme.input_bg.gamma_multiply(0.60))
-        .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+        .stroke(theme.hairline_stroke())
         .rounding(crate::tokens::RADIUS_MD)
         .inner_margin(egui::Margin::same(crate::tokens::SPACE_SM))
         .show(ui, |ui| {
@@ -10540,7 +10633,7 @@ fn draw_pending_indicator(
                 ui.add_space(SPACE_XS);
                 egui::Frame::none()
                     .fill(theme.input_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .rounding(RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
@@ -10598,6 +10691,7 @@ fn draw_pending_indicator(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_assistant_response(
     ui: &mut egui::Ui,
     content: &str,
@@ -10606,6 +10700,8 @@ fn draw_assistant_response(
     turn_index: usize,
     cache: &mut AssistantBlocksCache,
     locale: crate::i18n::Locale,
+    panel: &AssistantPanelState,
+    motion: crate::projector::MotionConfig,
 ) -> Option<AssistantUiAction> {
     let theme = current_theme(ui.ctx());
     // Cerca sin cerrar: avisar arriba sin cambiar el parseo a párrafo
@@ -10680,7 +10776,9 @@ fn draw_assistant_response(
             }
             AssistantMessageBlock::Bullet(text) => {
                 ui.horizontal_top(|ui| {
-                    ui.label(egui::RichText::new("-").color(theme.accent));
+                    // WCAG 1.4.3: `accent` como texto da 3.09:1 en dark;
+                    // `text_secondary` pasa ≥4.5 sobre panel y burbuja.
+                    ui.label(egui::RichText::new("-").color(theme.text_secondary));
                     draw_inline_text(ui, &humanize_prose_text(text));
                 });
             }
@@ -10688,7 +10786,7 @@ fn draw_assistant_response(
                 ui.horizontal_top(|ui| {
                     ui.label(
                         egui::RichText::new(format!("{number}."))
-                            .color(theme.accent)
+                            .color(theme.text_secondary)
                             .size(TYPE_SM)
                             .strong(),
                     );
@@ -10701,13 +10799,13 @@ fn draw_assistant_response(
             AssistantMessageBlock::DisplayMath(math) => {
                 egui::Frame::none()
                     .fill(theme.panel_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
                         ui.label(
                             egui::RichText::new(crate::i18n::t("assistant.turn.math", locale))
-                                .color(theme.accent)
+                                .color(theme.accent_strong)
                                 .size(TYPE_XS)
                                 .strong(),
                         );
@@ -10725,10 +10823,33 @@ fn draw_assistant_response(
             AssistantMessageBlock::Code { language, text } => {
                 let current_code_block_index = code_block_index;
                 code_block_index += 1;
+                let code_lang = language.trim().to_ascii_lowercase();
+                // Visor de desarrollo por pasos: el fence ```grafito-steps se
+                // dibuja como tarjeta con revelado progresivo en vez de
+                // casilla de código (el índice de bloque se conserva para no
+                // desalinear las propuestas verificadas).
+                if code_lang == crate::step_by_step::STEPS_FENCE_LANGUAGE {
+                    if let Some(mut card) =
+                        crate::step_by_step::StepByStepCardState::from_code_block(text)
+                    {
+                        card.revealed = panel.visible_steps_for(turn_index, card.steps.len());
+                        retain_first_assistant_action(
+                            &mut action,
+                            crate::step_by_step::draw_step_by_step_card(
+                                ui, &card, turn_index, index, motion, locale,
+                            ),
+                        );
+                    }
+                    if reveal_restore {
+                        ui.set_opacity(previous_opacity);
+                    }
+                    ui.add_space(SPACE_SM);
+                    continue;
+                }
                 // Editorial code casilla — full-width, hairline 10%, integrado con acción
                 egui::Frame::none()
                     .fill(theme.input_bg)
-                    .stroke(egui::Stroke::new(1.0, theme.separator.gamma_multiply(0.10)))
+                    .stroke(theme.hairline_stroke())
                     .rounding(crate::tokens::RADIUS_MD)
                     .inner_margin(egui::Margin::same(SPACE_SM))
                     .show(ui, |ui| {
@@ -10909,10 +11030,7 @@ fn draw_assistant_response(
                                                     .color(theme.text_secondary),
                                             )
                                             .fill(egui::Color32::TRANSPARENT)
-                                            .stroke(egui::Stroke::new(
-                                                1.0,
-                                                theme.separator.gamma_multiply(0.10),
-                                            ))
+                                            .stroke(theme.hairline_stroke())
                                             .rounding(crate::tokens::RADIUS_MD);
                                             if ui
                                                 .add_sized(
@@ -12163,7 +12281,7 @@ fn dibujar_subset_math(ui: &mut egui::Ui, expression: &MathExpr, aviso: String) 
     for (from, to) in layout.rules {
         painter.line_segment(
             [rect.min + from, rect.min + to],
-            egui::Stroke::new(1.0, theme.text_primary.gamma_multiply(0.8)),
+            egui::Stroke::new(1.0, Theme::dimmed_text(theme.text_primary, 0.8)),
         );
     }
     response.on_hover_text(aviso)
@@ -12730,16 +12848,29 @@ pub fn error_secondary_hint(error: &str) -> &'static str {
 /// turno en curso (con etapa visible) > última respuesta > silencio.
 /// Sin I/O ni spawn.
 pub fn assistant_live_text(state: &AssistantPanelState) -> Option<String> {
+    assistant_live_text_for_locale(state, crate::i18n::Locale::Es)
+}
+
+/// Variante localizada de [`assistant_live_text`]: el prefijo y los
+/// anuncios salen del catálogo (`assistant.live_*`), así un lector
+/// EN/PT/DE no escucha español fijo. Puro, sin I/O ni spawn.
+pub fn assistant_live_text_for_locale(
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+) -> Option<String> {
     if let Some(error) = state.error.as_ref() {
-        return Some(format!("Asistente: error. {error}"));
+        return Some(crate::i18n::t("assistant.live_error", locale).replace("{detail}", error));
     }
     if state.is_pending {
         // Misma etapa que el indicador visual (sin silencio prolongado).
-        return Some(format!("Asistente: {}.", state.remote_stage_text()));
+        let stage = state.remote_stage_text_locale(locale);
+        let prefix = crate::i18n::t("assistant.live_prefix", locale);
+        return Some(format!("{prefix}: {stage}."));
     }
     // Respuesta lista: anuncia la última del asistente (resumen puro).
-    last_assistant_response_summary(state)
-        .map(|summary| format!("Asistente: respuesta lista. {summary}"))
+    last_assistant_response_summary(state).map(|summary| {
+        crate::i18n::t("assistant.live_ready", locale).replace("{summary}", &summary)
+    })
 }
 
 /// Resumen puro de la última respuesta del asistente para la live-region:
@@ -16708,6 +16839,8 @@ mod tests {
                         0,
                         &mut cache,
                         crate::i18n::Locale::Es,
+                        &state,
+                        crate::projector::MotionConfig::default(),
                     );
                     let _ = draw_assistant_response(
                         ui,
@@ -16717,6 +16850,8 @@ mod tests {
                         1,
                         &mut cache,
                         crate::i18n::Locale::Es,
+                        &state,
+                        crate::projector::MotionConfig::default(),
                     );
                 });
             },
@@ -17346,6 +17481,7 @@ mod tests {
                         duration_ms: 4000,
                         frame_count: 48,
                         exporting: false,
+                        locale: crate::i18n::Locale::Es,
                     };
                     let _ = draw_media_toolbar(ui, &state, &view);
                     draw_media_more_menu(ui, &view, &mut None);
@@ -17576,6 +17712,7 @@ mod tests {
                             duration_ms: 4000,
                             frame_count: 48,
                             exporting: false,
+                            locale: crate::i18n::Locale::Es,
                         };
                         let _ = draw_media_toolbar(ui, &state, &view);
                     });
@@ -17618,7 +17755,13 @@ mod tests {
             "sin ramificación por ancho en el draw (una estructura)"
         );
         let card_start = source
-            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .find(
+                "fn draw_media_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+)",
+            )
             .expect("existe draw_media_card");
         let card_end = source
             .find("fn retain_first_assistant_action")
@@ -17708,7 +17851,13 @@ mod tests {
         // visor grande (botón ⛶ + overlay eliminados).
         let source = include_str!("assistant.rs");
         let start = source
-            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .find(
+                "fn draw_media_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+)",
+            )
             .expect("existe draw_media_card");
         let end = source
             .find("fn retain_first_assistant_action")
@@ -17758,19 +17907,30 @@ mod tests {
 
     #[test]
     fn media_toolbar_tooltips_cortos() {
-        // D2: tooltips ≤60 chars para que no se corten en panel ~340px.
+        // D2: tooltips ≤60 chars para que no se corten en panel ~340px,
+        // en los 6 locales (salen del catálogo, no de consts ES fijas).
         // (El tip del visor grande se fue con el botón ⛶; el de velocidad
         // se fue con el selector: reproducción fija 1x.)
-        for tip in [
-            MEDIA_TIP_EXPORT,
-            MEDIA_TIP_PAUSE,
-            MEDIA_TIP_PLAY,
-            MEDIA_TIP_STEP_BACK,
-            MEDIA_TIP_STEP_FWD,
+        use crate::i18n::Locale;
+        for locale in [
+            Locale::Es,
+            Locale::En,
+            Locale::Pt,
+            Locale::It,
+            Locale::Fr,
+            Locale::De,
         ] {
-            let tip: &str = tip;
-            assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
-            assert!(!tip.is_empty(), "tooltip mudo");
+            for key in [
+                "assistant.media_tip_export",
+                "assistant.media_tip_pause",
+                "assistant.media_tip_play",
+                "assistant.media_tip_back",
+                "assistant.media_tip_fwd",
+            ] {
+                let tip = media_tip(key, locale);
+                assert!(tip.chars().count() <= 60, "tooltip largo: {tip}");
+                assert!(!tip.is_empty(), "tooltip mudo");
+            }
         }
         // Estado nuevo arranca limpio (sin playhead rancio).
         let state = AssistantPanelState::default();
@@ -17934,8 +18094,8 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = draw_turn_player(ui, &state, 0, &a);
-                    let _ = draw_turn_player(ui, &state, 1, &b);
+                    let _ = draw_turn_player(ui, &state, 0, &a, crate::i18n::Locale::Es);
+                    let _ = draw_turn_player(ui, &state, 1, &b, crate::i18n::Locale::Es);
                 });
             },
         );
@@ -18361,7 +18521,13 @@ mod tests {
         // no hay textura; `Fotograma N de M` vive solo en el hover del slider.
         let source = include_str!("assistant.rs");
         let start = source
-            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .find(
+                "fn draw_media_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+)",
+            )
             .expect("existe draw_media_card");
         let end = source
             .find("fn retain_first_assistant_action")
@@ -18390,7 +18556,13 @@ mod tests {
         // trae mensaje y sugerencia en vez de player vacío o spinner eterno.
         let source = include_str!("assistant.rs");
         let start = source
-            .find("fn draw_media_card(ui: &mut egui::Ui, state: &AssistantPanelState)")
+            .find(
+                "fn draw_media_card(
+    ui: &mut egui::Ui,
+    state: &AssistantPanelState,
+    locale: crate::i18n::Locale,
+)",
+            )
             .expect("existe draw_media_card");
         let end = source
             .find("fn retain_first_assistant_action")
@@ -18460,7 +18632,7 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let _ = draw_media_card(ui, estado);
+                    let _ = draw_media_card(ui, estado, crate::i18n::Locale::Es);
                 });
             },
         )
@@ -18883,6 +19055,7 @@ mod tests {
                             correction_available: false,
                         };
                         let mut cache = AssistantBlocksCache::default();
+                        let panel = AssistantPanelState::default();
                         let _ = draw_assistant_response(
                             ui,
                             ADVERSARIAL,
@@ -18891,6 +19064,8 @@ mod tests {
                             0,
                             &mut cache,
                             crate::i18n::Locale::Es,
+                            &panel,
+                            crate::projector::MotionConfig::default(),
                         );
                         let used = ui.min_rect().width();
                         assert!(
@@ -18925,6 +19100,7 @@ mod tests {
                         correction_available: false,
                     };
                     let mut cache = AssistantBlocksCache::default();
+                    let panel = AssistantPanelState::default();
                     let _ = draw_assistant_response(
                         ui,
                         "supercalifragilisticoespialidoso".repeat(8).as_str(),
@@ -18933,6 +19109,8 @@ mod tests {
                         0,
                         &mut cache,
                         crate::i18n::Locale::Es,
+                        &panel,
+                        crate::projector::MotionConfig::default(),
                     );
                 });
             },

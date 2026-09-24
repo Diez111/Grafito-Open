@@ -423,7 +423,7 @@ pub fn filter_groups_by_pedagogical_level(
     filter_groups_by_level(groups, level.level_value())
 }
 
-/// Slug estable de cada [`Tool`] para [`tool_label`] (88 variantes).
+/// Slug estable de cada [`Tool`] para [`tool_label`] (89 variantes).
 ///
 /// El `match` es exhaustivo a propósito (sin comodín): añadir una variante a
 /// [`Tool`] rompe la compilación hasta darle su slug en el catálogo i18n.
@@ -521,8 +521,8 @@ pub fn tool_slug(tool: Tool) -> &'static str {
     }
 }
 
-/// Las 88 variantes de [`Tool`] en orden estable: prueba que cada una tiene
-/// slug y etiqueta ES/EN no vacía (ver test `all_87_tools_resolve_both_locales`).
+/// Las 89 variantes de [`Tool`] en orden estable: prueba que cada una tiene
+/// slug y etiqueta ES/EN no vacía (ver test `all_89_tools_resolve_both_locales`).
 ///
 /// Las 11 de F3a aún sin entrada en el catálogo i18n (fuera de alcance:
 /// el reducer sincroniza i18n + docs) resuelven por fallback a la etiqueta
@@ -1387,8 +1387,23 @@ pub fn toolbar_localized(
 /// `RADIUS_SM` y 2 px entre segmentos; el activo usa el acento. Antes eran
 /// `selectable_label` sueltos que en menú quedaban como píldoras irregulares.
 pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
+    locale_selector_with_mode(ui, locale, &crate::projector::ProjectorMode::default())
+}
+
+/// Variante que respeta el modo proyector: con proyector activo los
+/// segmentos crecen al hit-target aula (44 px, WCAG 2.5.5) vía
+/// `ProjectorMode::hit_target`. Sin proyector equivale al piso 24 px.
+pub fn locale_selector_with_mode(
+    ui: &mut Ui,
+    locale: &mut Locale,
+    mode: &crate::projector::ProjectorMode,
+) -> egui::Response {
     let mut changed = false;
-    let selection_fill = ui.visuals().selection.bg_fill;
+    // WCAG 1.4.3: el segmento activo usa el par validado
+    // `keyboard_tab_active_bg` + `keyboard_tab_active_text` (blanco sobre
+    // sage #6B7A6F ≈ 4.5:1). El anterior `WHITE` sobre `selection.bg_fill`
+    // (#EBEDEA en claro) daba ≈ 1.2:1 — texto invisible.
+    let theme = current_theme(ui.ctx());
     let text_secondary = ui.visuals().text_color();
     let mut resp = ui
         .horizontal(|ui| {
@@ -1404,35 +1419,39 @@ pub fn locale_selector(ui: &mut Ui, locale: &mut Locale) -> egui::Response {
             ] {
                 let selected = *locale == value;
                 let color = if selected {
-                    Color32::WHITE
+                    theme.keyboard_tab_active_text
                 } else {
                     text_secondary
                 };
                 let button = egui::Button::new(
                     egui::RichText::new(short)
-                        .size(crate::tokens::TYPE_XS)
+                        .size(mode.font_size(crate::tokens::TYPE_XS))
                         .strong()
                         .color(color),
                 )
                 .rounding(crate::tokens::RADIUS_SM)
                 .min_size(egui::vec2(
                     crate::tokens::TOOLBAR_LOCALE_MIN_W,
-                    crate::tokens::TOOLBAR_LOCALE_MIN_H,
+                    mode.hit_target(crate::tokens::TOOLBAR_LOCALE_MIN_H),
                 ))
                 .fill(if selected {
-                    selection_fill
+                    theme.keyboard_tab_active_bg
                 } else {
                     ui.visuals().widgets.inactive.weak_bg_fill
                 });
-                let hover = if value == Locale::Pt && crate::i18n::pt_is_partial() {
-                    format!(
-                        "Idioma · Language · Idioma: {}",
-                        crate::i18n::pt_partial_badge_text()
-                    )
-                } else {
-                    format!("Idioma · Language · Idioma: {name}")
-                };
-                if ui.add(button).on_hover_text(hover).clicked() && !selected {
+                let is_pt_partial = value == Locale::Pt && crate::i18n::pt_is_partial();
+                let resp_btn = ui.add(button);
+                let resp_btn = resp_btn.on_hover_ui(|ui| {
+                    if is_pt_partial {
+                        ui.label(format!(
+                            "Idioma · Language · Idioma: {}",
+                            crate::i18n::pt_partial_badge_text()
+                        ));
+                    } else {
+                        ui.label(format!("Idioma · Language · Idioma: {name}"));
+                    }
+                });
+                if resp_btn.clicked() && !selected {
                     *locale = value;
                     changed = true;
                 }
@@ -2197,7 +2216,7 @@ mod tests {
     }
 
     #[test]
-    fn all_87_tools_resolve_both_locales() {
+    fn all_89_tools_resolve_both_locales() {
         use crate::i18n::{tool_label, Locale};
         assert_eq!(ALL_TOOLS.len(), 89, "Tool debe seguir en 89 variantes");
         // Sin duplicados (cada variante una sola vez).

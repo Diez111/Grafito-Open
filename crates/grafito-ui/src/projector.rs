@@ -49,6 +49,39 @@ impl ProjectorMode {
     }
 }
 
+/// Preferencia de movimiento reducido (WCAG 2.3.3: la animación no es
+/// esencial acá — respiración del avatar, reveal por bloques, morph de
+/// burbuja). egui 0.29 no expone la preferencia del SO, así que la app la
+/// guarda en su `AppConfig` y la pasa a la Piel con este struct. Piel pura:
+///
+/// - `anim_ms(base)` devuelve 0.0 con movimiento reducido (sin transiciones),
+/// - `morph_t(t)` salta al estado final (sin interpolación visible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MotionConfig {
+    /// ¿Movimiento reducido activo?
+    pub reduced_motion: bool,
+}
+
+impl MotionConfig {
+    /// Duración efectiva de una animación en ms.
+    pub fn anim_ms(&self, base_ms: f32) -> f32 {
+        if self.reduced_motion {
+            0.0
+        } else {
+            base_ms
+        }
+    }
+
+    /// Progreso efectivo de un morph 0.0–1.0 (1.0 = estado final directo).
+    pub fn morph_t(&self, t: f32) -> f32 {
+        if self.reduced_motion {
+            1.0
+        } else {
+            t
+        }
+    }
+}
+
 /// Interruptor del modo proyector. Siempre alterna y explica el estado;
 /// nunca es un botón mudo.
 pub fn draw_projector_toggle(ui: &mut egui::Ui, mode: &mut ProjectorMode) {
@@ -116,5 +149,17 @@ mod tests {
         assert!(mode.enabled);
         mode.toggle();
         assert!(!mode.enabled);
+    }
+
+    #[test]
+    fn motion_config_disables_animation_when_reduced() {
+        let full = MotionConfig::default();
+        assert_eq!(full.anim_ms(180.0), 180.0);
+        assert_eq!(full.morph_t(0.3), 0.3);
+        let reduced = MotionConfig {
+            reduced_motion: true,
+        };
+        assert_eq!(reduced.anim_ms(180.0), 0.0);
+        assert_eq!(reduced.morph_t(0.3), 1.0);
     }
 }

@@ -28,6 +28,7 @@ pub mod icons;
 pub mod keypad;
 pub mod projector;
 pub mod prosa;
+pub mod step_by_step;
 pub mod teaching;
 pub mod theme;
 pub mod toast;

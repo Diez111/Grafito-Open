@@ -99,10 +99,10 @@ impl Msg {
 
 /// Número total de claves del catálogo. [`MESSAGES`] debe tener exactamente
 /// esta longitud (ver test `msg_count_matches_table`).
-pub const MSG_COUNT: usize = 329;
+pub const MSG_COUNT: usize = 342;
 
 /// Catálogo completo ES/EN. Ordenado por dominio:
-/// `toolbar.group` (18) + `toolbar.tool` (89) + `palette` (22) +
+/// `toolbar.group` (18) + `toolbar.tool` (89) + `palette` (23) +
 /// `onboarding` (11) + `cheat` (10) + `toast` (10) + `app`/misc (15) +
 /// Total pineado por tests (dominios grandes: `menu` 66 con `menu.tools.colab`, `colab` 4, resto según tablas).
 pub static MESSAGES: &[Msg] = &[
@@ -125,7 +125,7 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "toolbar.group.advanced", es: "Avanzado", en: "Advanced" },
     Msg { key: "toolbar.group.transform", es: "Transformar", en: "Transform" },
     Msg { key: "toolbar.group.dynamics", es: "Dinámica", en: "Dynamics" },
-    // ── toolbar.tool (88) — ES idéntico a `ToolEntry` en toolbar.rs ──
+    // ── toolbar.tool (89) — ES idéntico a `ToolEntry` en toolbar.rs ──
     Msg { key: "toolbar.tool.select", es: "Seleccionar", en: "Select" },
     Msg { key: "toolbar.tool.point", es: "Punto", en: "Point" },
     Msg { key: "toolbar.tool.midpoint", es: "M Punto medio", en: "Midpoint" },
@@ -284,6 +284,14 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "assistant.composer_pending", es: "Estoy pensando… esperá que termine para mandar otra pregunta.", en: "Thinking… wait until it finishes before sending another question." },
     Msg { key: "assistant.composer_empty", es: "Escribí algo para activar Enviar.", en: "Write something to enable Send." },
     Msg { key: "assistant.composer_keys", es: "Enter envía · Shift+Enter salto de línea", en: "Enter sends · Shift+Enter new line" },
+    Msg { key: "assistant.media_tip_play", es: "Retoma donde quedó (Espacio)", en: "Resume where it left off (Space)" },
+    Msg { key: "assistant.media_tip_pause", es: "Congela en el fotograma actual (Espacio)", en: "Freeze on the current frame (Space)" },
+    Msg { key: "assistant.media_tip_back", es: "Fotograma anterior (<-)", en: "Previous frame (<-)" },
+    Msg { key: "assistant.media_tip_fwd", es: "Fotograma siguiente (->)", en: "Next frame (->)" },
+    Msg { key: "assistant.media_tip_export", es: "Exportar: elegís formato y calidad", en: "Export: choose format and quality" },
+    Msg { key: "assistant.live_prefix", es: "Asistente", en: "Assistant" },
+    Msg { key: "assistant.live_error", es: "Asistente: error. {detail}", en: "Assistant: error. {detail}" },
+    Msg { key: "assistant.live_ready", es: "Asistente: respuesta lista. {summary}", en: "Assistant: response ready. {summary}" },
     Msg { key: "assistant.limit_hint", es: "Caracteres usados del límite de entrada · Enter envía, Shift+Enter salta", en: "Characters used of the input limit · Enter sends, Shift+Enter adds a line" },
     Msg { key: "assistant.copied", es: "Mensaje copiado.", en: "Message copied." },
     Msg { key: "assistant.generating", es: "Armando tu animación… ~20 s", en: "Building your animation… ~20 s" },
@@ -455,6 +463,11 @@ pub static MESSAGES: &[Msg] = &[
     Msg { key: "assistant.origin.remote", es: "Consulta remota autorizada", en: "Authorized remote query" },
     Msg { key: "assistant.apply.unchecked", es: "Propuesta sin comprobar", en: "Unverified proposal" },
     Msg { key: "assistant.apply.unchecked_hint", es: "La comprobación se limitó a las primeras {n} propuesta(s) de esta respuesta.", en: "Verification covered only the first {n} proposal(s) of this response." },
+    Msg { key: "assistant.steps.title", es: "Desarrollo por pasos", en: "Step-by-step derivation" },
+    Msg { key: "assistant.steps.reveal", es: "Revelar paso", en: "Reveal step" },
+    Msg { key: "assistant.steps.reveal_all", es: "Ver todo", en: "Show all" },
+    Msg { key: "assistant.steps.rule", es: "Regla", en: "Rule" },
+    Msg { key: "palette.action.step_by_step", es: "Desarrollo por pasos", en: "Step by Step" },
 ];
 
 // ── Acceso ──
@@ -661,6 +674,7 @@ pub fn palette_action(slug: &str, locale: Locale) -> &'static str {
         "toggle_grid" => t("palette.action.toggle_grid", locale),
         "toggle_dark" => t("palette.action.toggle_dark", locale),
         "indicate_selection" => t("palette.action.indicate_selection", locale),
+        "step_by_step" => t("palette.action.step_by_step", locale),
         _ => "",
     }
 }
@@ -865,13 +879,13 @@ pub fn anim_msg(suffix: &'static str, locale: Locale) -> &'static str {
 // call-site porque añadir la variante rompía matches exhaustivos fuera del
 // frente. W2 levanta esa restricción: `Locale::Pt` existe y `t(key, Pt)`
 // resuelve PT→ES→EN solo (ver `t`). R3.4 completa el overlay al 100%:
-// 329 claves (18 grupos + 22 paleta + 12 onboarding + 10 cheat + 10 toast +
-// 12 app/misc + 2 anim + 14 media.title + 88 `toolbar.tool` + 3
-// `panel.conformal`).
+// 342 claves (18 grupos + 23 paleta + 12 onboarding + 10 cheat + 10 toast +
+// 12 app/misc + 2 anim + 14 media.title + 89 `toolbar.tool` + 3
+// `panel.conformal` + 8 `assistant.media_tip_*`/`assistant.live_*`).
 // El lint `unwrap_used` sigue prohibido en prod: el fallback se escribe con
 // `match` o `if let`.
 //
-// Cobertura: 329/329 (100%). Medida real en el test `pt_covers_main_ui_keys`
+// Cobertura: 342/342 (100%). Medida real en el test `pt_covers_main_ui_keys`
 // (imprime el % por `--nocapture`).
 
 /// Una entrada del overlay portugués: clave del catálogo + texto PT.
@@ -884,8 +898,8 @@ pub struct PtMsg {
     pub pt: &'static str,
 }
 
-/// Claves principales de UI con traducción PT (329). Ordenado por dominio como
-/// [`MESSAGES`]: grupos (18) + paleta (22) + onboarding (12) + cheat (10) +
+/// Claves principales de UI con traducción PT (342). Ordenado por dominio como
+/// [`MESSAGES`]: grupos (18) + paleta (23) + onboarding (12) + cheat (10) +
 /// toast (10) + app/misc (12) + anim (2) + media.title (14) + tools (89) +
 /// panel.conformal (3).
 pub static PT_MESSAGES: &[PtMsg] = &[
@@ -975,6 +989,14 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "assistant.composer_pending", pt: "A pensar… aguarde antes de enviar outra pergunta." },
     PtMsg { key: "assistant.composer_empty", pt: "Escreva algo para ativar Enviar." },
     PtMsg { key: "assistant.composer_keys", pt: "Enter envia · Shift+Enter nova linha" },
+    PtMsg { key: "assistant.media_tip_play", pt: "Retoma de onde parou (Espaço)" },
+    PtMsg { key: "assistant.media_tip_pause", pt: "Congela no fotograma atual (Espaço)" },
+    PtMsg { key: "assistant.media_tip_back", pt: "Fotograma anterior (<-)" },
+    PtMsg { key: "assistant.media_tip_fwd", pt: "Próximo fotograma (->)" },
+    PtMsg { key: "assistant.media_tip_export", pt: "Exportar: escolha formato e qualidade" },
+    PtMsg { key: "assistant.live_prefix", pt: "Assistente" },
+    PtMsg { key: "assistant.live_error", pt: "Assistente: erro. {detail}" },
+    PtMsg { key: "assistant.live_ready", pt: "Assistente: resposta pronta. {summary}" },
     PtMsg { key: "assistant.limit_hint", pt: "Caracteres usados do limite de entrada · Enter envia, Shift+Enter pula linha" },
     PtMsg { key: "assistant.copied", pt: "Mensagem copiada." },
     PtMsg { key: "assistant.generating", pt: "Gerando animação…" },
@@ -1000,7 +1022,7 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "media.title.subspace", pt: "Span linear" },
     PtMsg { key: "media.title.fractal", pt: "Fractal de Koch" },
     PtMsg { key: "media.title.default", pt: "Animação" },
-    // ── toolbar.tool (88) — R3.4 cierra el recorte F3d/W2 ──
+    // ── toolbar.tool (89) — R3.4 cierra el recorte F3d/W2 ──
     PtMsg { key: "toolbar.tool.select", pt: "Selecionar" },
     PtMsg { key: "toolbar.tool.point", pt: "Ponto" },
     PtMsg { key: "toolbar.tool.midpoint", pt: "M Ponto médio" },
@@ -1230,10 +1252,15 @@ pub static PT_MESSAGES: &[PtMsg] = &[
     PtMsg { key: "assistant.origin.remote", pt: "Consulta remota autorizada" },
     PtMsg { key: "assistant.apply.unchecked", pt: "Proposta sem verificar" },
     PtMsg { key: "assistant.apply.unchecked_hint", pt: "A verificação limitou-se às primeiras {n} proposta(s) desta resposta." },
+    PtMsg { key: "assistant.steps.title", pt: "Desenvolvimento por passos" },
+    PtMsg { key: "assistant.steps.reveal", pt: "Revelar passo" },
+    PtMsg { key: "assistant.steps.reveal_all", pt: "Ver tudo" },
+    PtMsg { key: "assistant.steps.rule", pt: "Regra" },
+    PtMsg { key: "palette.action.step_by_step", pt: "Desenvolvimento por passos" },
 ];
 
 /// Texto PT de `key`, o `None` si la clave no está en el catálogo.
-/// Desde R3.4 el overlay es total (329/329): `None` solo para claves
+/// Desde R3.4 el overlay es total (342/342): `None` solo para claves
 /// inexistentes. Lookup lineal como [`t`]: el overlay es chico (<200 claves).
 pub fn pt(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
@@ -1247,7 +1274,7 @@ pub fn pt(key: &'static str) -> Option<&'static str> {
 }
 
 /// Cobertura del overlay PT: `(cubiertas, total del catálogo)`.
-/// El numerador lo fija el test `pt_covers_main_ui_keys` en 329.
+/// El numerador lo fija el test `pt_covers_main_ui_keys` en 342.
 pub fn pt_coverage() -> (usize, usize) {
     (PT_MESSAGES.len(), MESSAGES.len())
 }
@@ -1259,20 +1286,20 @@ pub fn pt_coverage() -> (usize, usize) {
 /// con conteo para el hover histórico y el test que pinnea el 100%.
 pub const PT_PARTIAL_BADGE: &str = "Português parcial";
 
-/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 329/329 = falso).
+/// `true` mientras el overlay PT no cubra el catálogo (R3.4: 342/342 = falso).
 pub fn pt_is_partial() -> bool {
     let (cubiertas, total) = pt_coverage();
     cubiertas < total
 }
 
-/// Texto del badge con conteo real, p. ej. `"Português parcial · 329/329"`.
+/// Texto del badge con conteo real, p. ej. `"Português parcial · 342/342"`.
 /// Puro, sin I/O: el selector lo muestra solo si `pt_is_partial()`.
 pub fn pt_partial_badge_text() -> String {
     let (cubiertas, total) = pt_coverage();
     format!("{PT_PARTIAL_BADGE} · {cubiertas}/{total}")
 }
 
-// ── Italiano / Français / Deutsch: overlays completos (329/329 c/u) ──
+// ── Italiano / Français / Deutsch: overlays completos (342/342 c/u) ──
 //
 // Generados desde `/tmp/opencode/i18n_table.txt` (190 líneas `clave|it|fr|de`,
 // mismo orden que `MESSAGES`, texto tal cual sin re-traducir). Patrón idéntico
@@ -1292,7 +1319,7 @@ pub struct OverlayMsg {
     pub text: &'static str,
 }
 
-/// Claves principales de UI con traducción al Italiano (329). Ordenado por dominio
+/// Claves principales de UI con traducción al Italiano (342). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -1370,7 +1397,7 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
         key: "toolbar.group.dynamics",
         text: "Dinamica",
     },
-    // ── tools (88) ──
+    // ── tools (89) ──
     OverlayMsg {
         key: "toolbar.tool.select",
         text: "Seleziona",
@@ -1980,6 +2007,38 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg {
         key: "assistant.composer_keys",
         text: "Invio invia · Shift+Invio a capo",
+    },
+    OverlayMsg {
+        key: "assistant.media_tip_play",
+        text: "Riprendi da dove eri (Spazio)",
+    },
+    OverlayMsg {
+        key: "assistant.media_tip_pause",
+        text: "Ferma al fotogramma attuale (Spazio)",
+    },
+    OverlayMsg {
+        key: "assistant.media_tip_back",
+        text: "Fotogramma precedente (<-)",
+    },
+    OverlayMsg {
+        key: "assistant.media_tip_fwd",
+        text: "Fotogramma successivo (->)",
+    },
+    OverlayMsg {
+        key: "assistant.media_tip_export",
+        text: "Esporta: scegli formato e qualità",
+    },
+    OverlayMsg {
+        key: "assistant.live_prefix",
+        text: "Assistente",
+    },
+    OverlayMsg {
+        key: "assistant.live_error",
+        text: "Assistente: errore. {detail}",
+    },
+    OverlayMsg {
+        key: "assistant.live_ready",
+        text: "Assistente: risposta pronta. {summary}",
     },
     OverlayMsg {
         key: "assistant.limit_hint",
@@ -2626,10 +2685,30 @@ pub static IT_MESSAGES: &[OverlayMsg] = &[
         key: "assistant.apply.unchecked_hint",
         text: "La verifica si è limitata alle prime {n} proposta/e di questa risposta.",
     },
+    OverlayMsg {
+        key: "assistant.steps.title",
+        text: "Sviluppo per passi",
+    },
+    OverlayMsg {
+        key: "assistant.steps.reveal",
+        text: "Rivela passo",
+    },
+    OverlayMsg {
+        key: "assistant.steps.reveal_all",
+        text: "Mostra tutto",
+    },
+    OverlayMsg {
+        key: "assistant.steps.rule",
+        text: "Regola",
+    },
+    OverlayMsg {
+        key: "palette.action.step_by_step",
+        text: "Sviluppo per passi",
+    },
 ];
 
 /// Texto Italiano de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (329/329): `None` solo para claves inexistentes.
+/// El overlay es total (342/342): `None` solo para claves inexistentes.
 pub fn it(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < IT_MESSAGES.len() {
@@ -2646,7 +2725,7 @@ pub fn it_coverage() -> (usize, usize) {
     (IT_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Français (329). Ordenado por dominio
+/// Claves principales de UI con traducción al Français (342). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -2670,7 +2749,7 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.group.advanced", text: "Avancé" },
     OverlayMsg { key: "toolbar.group.transform", text: "Transformer" },
     OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamique" },
-    // ── tools (88) ──
+    // ── tools (89) ──
     OverlayMsg { key: "toolbar.tool.select", text: "Sélectionner" },
     OverlayMsg { key: "toolbar.tool.point", text: "Point" },
     OverlayMsg { key: "toolbar.tool.midpoint", text: "Milieu" },
@@ -2830,6 +2909,14 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "assistant.composer_pending", text: "Je réfléchis… attendez avant d'envoyer une autre question." },
     OverlayMsg { key: "assistant.composer_empty", text: "Écrivez quelque chose pour activer Envoyer." },
     OverlayMsg { key: "assistant.composer_keys", text: "Entrée envoie · Shift+Entrée saut de ligne" },
+    OverlayMsg { key: "assistant.media_tip_play", text: "Reprendre où on en était (Espace)" },
+    OverlayMsg { key: "assistant.media_tip_pause", text: "Figer sur l'image actuelle (Espace)" },
+    OverlayMsg { key: "assistant.media_tip_back", text: "Image précédente (<-)" },
+    OverlayMsg { key: "assistant.media_tip_fwd", text: "Image suivante (->)" },
+    OverlayMsg { key: "assistant.media_tip_export", text: "Exporter : choisir format et qualité" },
+    OverlayMsg { key: "assistant.live_prefix", text: "Assistant" },
+    OverlayMsg { key: "assistant.live_error", text: "Assistant : erreur. {detail}" },
+    OverlayMsg { key: "assistant.live_ready", text: "Assistant : réponse prête. {summary}" },
     OverlayMsg { key: "assistant.limit_hint", text: "Caractères utilisés de la limite · Entrée envoie, Shift+Entrée saute une ligne" },
     OverlayMsg { key: "assistant.copied", text: "Message copié." },
     OverlayMsg { key: "assistant.generating", text: "Création de votre animation… ~20 s" },
@@ -2995,10 +3082,15 @@ pub static FR_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "assistant.origin.remote", text: "Requête distante autorisée" },
     OverlayMsg { key: "assistant.apply.unchecked", text: "Proposition non vérifiée" },
     OverlayMsg { key: "assistant.apply.unchecked_hint", text: "La vérification s'est limitée aux {n} première(s) proposition(s) de cette réponse." },
+    OverlayMsg { key: "assistant.steps.title", text: "Dérivation pas à pas" },
+    OverlayMsg { key: "assistant.steps.reveal", text: "Révéler l'étape" },
+    OverlayMsg { key: "assistant.steps.reveal_all", text: "Tout afficher" },
+    OverlayMsg { key: "assistant.steps.rule", text: "Règle" },
+    OverlayMsg { key: "palette.action.step_by_step", text: "Dérivation pas à pas" },
 ];
 
 /// Texto Français de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (329/329): `None` solo para claves inexistentes.
+/// El overlay es total (342/342): `None` solo para claves inexistentes.
 pub fn fr(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < FR_MESSAGES.len() {
@@ -3015,7 +3107,7 @@ pub fn fr_coverage() -> (usize, usize) {
     (FR_MESSAGES.len(), MESSAGES.len())
 }
 
-/// Claves principales de UI con traducción al Deutsch (329). Ordenado por dominio
+/// Claves principales de UI con traducción al Deutsch (342). Ordenado por dominio
 /// como [`MESSAGES`]: grupos (18) + tools (89) + paleta (19) + onboarding (12) +
 /// cheat (10) + toast (10) + app/misc (12) + anim (2) + media.title (14) +
 /// panel.conformal (3).
@@ -3039,7 +3131,7 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "toolbar.group.advanced", text: "Erweitert" },
     OverlayMsg { key: "toolbar.group.transform", text: "Transformieren" },
     OverlayMsg { key: "toolbar.group.dynamics", text: "Dynamik" },
-    // ── tools (88) ──
+    // ── tools (89) ──
     OverlayMsg { key: "toolbar.tool.select", text: "Auswählen" },
     OverlayMsg { key: "toolbar.tool.point", text: "Punkt" },
     OverlayMsg { key: "toolbar.tool.midpoint", text: "Mittelpunkt" },
@@ -3199,6 +3291,14 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "assistant.composer_pending", text: "Denke nach… warte, bevor du eine weitere Frage sendest." },
     OverlayMsg { key: "assistant.composer_empty", text: "Schreib etwas, um Senden zu aktivieren." },
     OverlayMsg { key: "assistant.composer_keys", text: "Enter sendet · Shift+Enter Zeilenumbruch" },
+    OverlayMsg { key: "assistant.media_tip_play", text: "Fortsetzen (Leertaste)" },
+    OverlayMsg { key: "assistant.media_tip_pause", text: "Aktuelles Frame anhalten (Leertaste)" },
+    OverlayMsg { key: "assistant.media_tip_back", text: "Vorheriges Frame (<-)" },
+    OverlayMsg { key: "assistant.media_tip_fwd", text: "Nächstes Frame (->)" },
+    OverlayMsg { key: "assistant.media_tip_export", text: "Exportieren: Format und Qualität wählen" },
+    OverlayMsg { key: "assistant.live_prefix", text: "Assistent" },
+    OverlayMsg { key: "assistant.live_error", text: "Assistent: Fehler. {detail}" },
+    OverlayMsg { key: "assistant.live_ready", text: "Assistent: Antwort bereit. {summary}" },
     OverlayMsg { key: "assistant.limit_hint", text: "Verwendete Zeichen des Limits · Enter sendet, Shift+Enter Zeilenumbruch" },
     OverlayMsg { key: "assistant.copied", text: "Nachricht kopiert." },
     OverlayMsg { key: "assistant.generating", text: "Erstelle deine Animation… ~20 s" },
@@ -3364,10 +3464,15 @@ pub static DE_MESSAGES: &[OverlayMsg] = &[
     OverlayMsg { key: "assistant.origin.remote", text: "Autorisierte Remote-Anfrage" },
     OverlayMsg { key: "assistant.apply.unchecked", text: "Ungeprüfter Vorschlag" },
     OverlayMsg { key: "assistant.apply.unchecked_hint", text: "Die Prüfung beschränkte sich auf die ersten {n} Vorschläge dieser Antwort." },
+    OverlayMsg { key: "assistant.steps.title", text: "Schrittweise Herleitung" },
+    OverlayMsg { key: "assistant.steps.reveal", text: "Schritt aufdecken" },
+    OverlayMsg { key: "assistant.steps.reveal_all", text: "Alle anzeigen" },
+    OverlayMsg { key: "assistant.steps.rule", text: "Regel" },
+    OverlayMsg { key: "palette.action.step_by_step", text: "Schrittweise Herleitung" },
 ];
 
 /// Texto Deutsch de `key`, o `None` si la clave no está en el catálogo.
-/// El overlay es total (329/329): `None` solo para claves inexistentes.
+/// El overlay es total (342/342): `None` solo para claves inexistentes.
 pub fn de(key: &'static str) -> Option<&'static str> {
     let mut i = 0;
     while i < DE_MESSAGES.len() {
@@ -3456,7 +3561,7 @@ mod tests {
             MSG_COUNT,
             "MSG_COUNT debe seguir a MESSAGES"
         );
-        assert_eq!(MSG_COUNT, 329);
+        assert_eq!(MSG_COUNT, 342);
     }
 
     #[test]
@@ -3670,10 +3775,10 @@ mod tests {
 
     #[test]
     fn pt_covers_main_ui_keys() {
-        // R3.4: overlay total PT — 329 claves, sin duplicados ni vacíos,
+        // R3.4: overlay total PT — 342 claves, sin duplicados ni vacíos,
         // cada una existente en el catálogo ES/EN.
-        assert_eq!(PT_MESSAGES.len(), 329);
-        assert_eq!(pt_coverage(), (329, 329));
+        assert_eq!(PT_MESSAGES.len(), 342);
+        assert_eq!(pt_coverage(), (342, 342));
         let mut keys: Vec<&str> = PT_MESSAGES.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
@@ -3703,7 +3808,7 @@ mod tests {
             }
             assert!(found, "grupo sin PT: {slug}");
         }
-        // Paleta completa: 15 acciones + título + vacío + pie.
+        // Paleta completa: 16 acciones + título + vacío + pie.
         for key in [
             "palette.action.point",
             "palette.action.line",
@@ -3720,6 +3825,7 @@ mod tests {
             "palette.action.toggle_grid",
             "palette.action.toggle_dark",
             "palette.action.indicate_selection",
+            "palette.action.step_by_step",
             "palette.title",
             "palette.empty",
             "palette.footer_nav",
@@ -3906,11 +4012,11 @@ mod tests {
 
     #[test]
     fn pt_coverage_prints_real_percentage() {
-        // Cobertura PT medida: 329/329 = 100%. Se imprime el % real con
+        // Cobertura PT medida: 342/342 = 100%. Se imprime el % real con
         // `--nocapture`; el assert fija el numerador para que cualquier
         // agregado (o faltante) de PT rompa el test a propósito.
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (329, 329));
+        assert_eq!((covered, total), (342, 342));
         let pct = covered as f64 * 100.0 / total as f64;
         eprintln!("cobertura PT: {covered}/{total} = {pct:.1}% (overlay total R3.4)");
         assert!((pct - 100.0).abs() < 0.1, "pct real: {pct}");
@@ -3921,16 +4027,16 @@ mod tests {
         // R3.4: cobertura 100% — el badge parcial ya no se muestra (ver
         // `toolbar.rs`: solo dibuja si `pt_is_partial()`). Se pinnea el 100%
         // y el texto con conteo para el hover histórico.
-        assert!(!pt_is_partial(), "R3.4 329/329 = 100%: sin badge parcial");
+        assert!(!pt_is_partial(), "R3.4 342/342 = 100%: sin badge parcial");
         assert_eq!(PT_PARTIAL_BADGE, "Português parcial");
-        assert_eq!(pt_partial_badge_text(), "Português parcial · 329/329");
+        assert_eq!(pt_partial_badge_text(), "Português parcial · 342/342");
         let (covered, total) = pt_coverage();
-        assert_eq!((covered, total), (329, 329));
+        assert_eq!((covered, total), (342, 342));
     }
 
-    // ── Overlays IT/FR/DE (329/329 c/u, texto tal cual de la tabla) ──
+    // ── Overlays IT/FR/DE (342/342 c/u, texto tal cual de la tabla) ──
 
-    /// Aserciones comunes de overlay total: 329 entradas, cobertura 329/329,
+    /// Aserciones comunes de overlay total: 342 entradas, cobertura 342/342,
     /// sin duplicados ni vacíos, claves dentro del catálogo y en su mismo orden.
     fn assert_overlay_total(
         table: &[OverlayMsg],
@@ -3938,8 +4044,8 @@ mod tests {
         coverage: fn() -> (usize, usize),
         tag: &str,
     ) {
-        assert_eq!(table.len(), 329, "{tag}: overlay total");
-        assert_eq!(coverage(), (329, 329), "{tag}: cobertura total");
+        assert_eq!(table.len(), 342, "{tag}: overlay total");
+        assert_eq!(coverage(), (342, 342), "{tag}: cobertura total");
         let mut keys: Vec<&str> = table.iter().map(|m| m.key).collect();
         keys.sort_unstable();
         let mut i = 1;
