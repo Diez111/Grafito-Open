@@ -172,3 +172,49 @@
 - [x] B.2 Comparación de construcciones: grilla vs triangular vs polígono vs azar (n=12: triangular unit=23/distinct=7, grilla 17/8)
 - [ ] B.3 TOPP 57: export DIMACS + verificación externa kissat/cadical (sin declarar nada desde Grafito)
 - [ ] B.4 Cierre de fase: docs + ledger + gates
+
+## Ola 0 — Frente fantasma + comandos nuevos 2026-09-23 [DONE]
+> Gap analysis contra MathHook (mathhook.org, MIT/Apache-2.0) y MathCore
+> (crates.io/crates/mathcore, MIT): cero menciones previas en el repo
+> (grep `mathhook|mathcore|Nonanti|Mashour` = 0 hits). Decisiones: multi-repo
+> real, reimplementación in-house (sin copiar código), todo por olas.
+> El código lo tocaron 4 agentes en paralelo (gates en verde reportados por la
+> sesión); este registro lo firma el agente de docs con evidencia re-verificada.
+
+- [x] O0.1 7 comandos fantasma con handler → spec visible: ImproperIntegral/SeriesSum/SequenceLimit/DoubleIntegral/LagrangeMultipliers/MeanValueCheck/SubspaceSum (`command_registry.rs:10175-10178`)
+- [x] O0.2 5 comandos nuevos delegando al motor: PolyGCD/Resultant/Residue/PrincipalPart/StepByStep; `Gauss` pierde el alias `residue` (pasa a ser el canónico de `Residue[f, x, x0]`; `resolve` es case-insensitive; `residuos` queda — `command_registry.rs:1703-1707`)
+- [x] O0.3 Conteos blindaje: COMMANDS 650→662, paleta 613→625 (+15 UI = 640), categorías 25 sin cambio (delta escrito en `command_registry.rs:10182-10184`; asserts `:10185-10191`, re-verificados hoy)
+- [x] O0.4 Tools: math 8→13 (`math_tool_schemas`, `agent.rs:2676`), `all_safe_tool_schemas` 23→28 (`:3411`; asserts `:6157,:6901-6903`); MCP `tools/list` 37→42 y proxied 21→26 (`crates/grafito-mcp/src/protocol.rs:447-448`, `tests/stdio_contract.rs:61-62`, `bridge.rs:252-258`)
+- [x] O0.5 grafito-geometry: `taylor_series` dedup (`matrices.rs:877-885` wrapper fino de `symbolic.rs:5537`), financieras dedupe (núcleo canónico `cas_extra.rs:767-853` `pub(crate)`, fachadas `stats_extra.rs:326,344,364` delegan), `Interval::new(prec, lo, hi)` con redondeo outward real (antes `prec` se ignoraba: la API mentía; `prec=0` preserva el comportamiento previo — `interval.rs:35-55`), contratos `pub` multipolinomio (`poly_gcd_subresultant` `symbolic.rs:2576`, `BiPoly` `solve.rs:779`, `sylvester_resultant` `solve.rs:1026`)
+- [x] O0.6 `MAX_COMPILED_EXPR_CACHE` 128 **medido** (bench criterion: W=64 realista 128/512/1024 = 10.22/9.97/10.23 µs, Δ<3% — negativo, `expr.rs:978-996`, `docs/profiling.md` §2.11); `panic="abort"` en release **descartado** por inspección (rompe `catch_unwind` en producción `bridge.rs:186`/`assistant_jobs.rs:1300` y tests/`should_panic` en 10 archivos — `docs/profiling.md` §2.12)
+- [x] O0.7 `colab.rs:996` fix del test flaky pre-existente (carrera `TEST_ENV_LOCK` con la env `GRAFITO_LAB_LEDGER` en paralelo), 8/8 verde
+- [x] O0.8 Docs sync 2026-09-23 (solo docs, cero `.rs`): `architecture.md` §8/§13, `profiling.md` §2.11-2.13, `.jspace/WORKSPACE.md`, `progress.md`, `MEMORY.md` (1 línea), este plan
+
+## Auditoría core/anim 2026-09-24 — FIX 1-6 (grafito-core/grafito-anim + docs) [DONE]
+> Solo `crates/grafito-core/**`, `crates/grafito-anim/**` y `docs/**` (property
+> exclusiva de esta sesión). Cada fix con repro previo, causa raíz, test de
+> regresión rojo-hoy y gates. Conteo antes/después en `progress.md`.
+- [x] FIX 1 [ALTA] `validation.rs:971-1001`: degeneración de polígono por área ABSOLUTA de regiones (antes shoelace con signo rechazaba toda curva auto-intersecada — Lissajous/lemniscata/lazos — porque el área algebraica neta da 0). Tests `tests_polygon_lazos_autointersectados` (`:2538`): Lissajous(3,2) + lemniscata + rosa 3 pétalos + lazo de trébol pasan; colineales y zigzag colineal siguen rechazándose.
+- [x] FIX 2 [MEDIA] `captions.rs:350-377`: cota 256 KiB PREVENTIVA (`empuja_acotado`/`empuja_karaoke` dentro del armado). Antes el chequeo era a posteriori: SRT materializaba 472 893 B y ASS 309 696 B antes del `Err` (peor caso de wire 2000×500×200 ≈ 200 MB). Tests: acumulado proyectado ≤ tope + 1 KiB + `empuja_acotado_nunca_supera_el_tope`.
+- [x] FIX 3 [MEDIA] `guion.rs:931-1157` `short_script`: las 13 canónicas pasan literales (antes 5 + fallback `universal` para 8) + copy por familia de concepto (6 familias: cálculo, complejo, dinámica, series, forma, universal) + golden hash FNV-1a del `GuionTexto` serializado (`short_script_golden_hash`, 13 pins).
+- [x] FIX 4 [MEDIA] `player.rs:307-372`: presupuesto propio del set jugado `PLAYER_MAX_TOTAL_BYTES` 64 MiB estimados (`estimate_placed_bytes`, `empuja_frame`); peor caso 96×32×4096 pts → `Err` honesto en `try_play` / corte en `play` (antes `Ok` con ~192 MB clonando la escena base cada frame). Fondo compartido NO hecho a propósito (un `Arc` plano por frame no ahorra las copias; el ahorro real cambia el contrato con la Piel — análisis en el doc del módulo).
+- [x] FIX 5 [BAJA] limpiezas anim: protocolo v1 con rango real de negociación `1..=2` (`protocol.rs:35-42,1213-1222`, antes `== 1` duro), `engine.rs` con diagnósticos para mensajes inesperados del handshake (`anota_diagnostico`, antes `Ok(_) => {}`) y versión fuera de rango → `Error` tipado; `math_expr` medido en BYTES (`MATH_EXPR_MAX_BYTES`, unidad unificada con `grafito-pedagogy::verify_math_expr`).
+- [x] FIX 6 [ALTA] docs sync: `architecture.md` §8/§13 con los dos deltas de comandos (fantasma+nuevos +12 y fantasma-2 +71 → 733/696+15=711/25), `sylvester_resultant` como **cambio de semántica** textbook, i18n 322→329, `OPEN_PROBLEMS_LAB.md` 35→42 tools; `Tasks.md`/`progress.md`/`.jspace/WORKSPACE.md` al estado real.
+- [x] Gates locales: fmt 0, clippy core+anim `-D warnings` 0, `cargo test -p grafito-core` 383+58+…/0, `-p grafito-anim` 175/0, blindaje `registry_counts_match_documented_architecture` 1/1. `--locked` y workspace completo NO corren por roturas de otros agentes (reportadas, no tocadas).
+- [ ] Reportado a otros dueños: pin rojo de `Resultant` (`registry_fantasma_y_nuevos.rs`), comentario falso de `grafito-tex/src/lib.rs:376-377` (`f32 as usize` satura, no es UB), `grafito-ui` lib test 11 errores, `Cargo.lock` desincronizado, help de `Lissajous` desactualizado (`command_registry.rs:632` dice "[no-soportado] hoy el polígono se rechaza en la validación" — con el FIX 1 ya se crea).
+
+## Olas 1–6 — gap MathHook/MathCore (plan aprobado 2026-09-23) [PENDING]
+> Regla de arquitectura fija: UNA sola representación de expresión — todo
+> algoritmo nuevo sobre `Expr`/bytecode de Grafito reusando `evaluate_cached`
+> → `compile_flat_ops` → `run_opcodes_flat` (`expr.rs:1019,2256,1976`). Nunca
+> portar la `Expression` hash-consed de MathHook ni el `Expr` boxeado de
+> MathCore: el bytecode propio mide 87.6 ns vs 7.4 µs del intérprete
+> (`docs/profiling.md` §2.1) y así no quedan 3 tipos de expresión en
+> mantenimiento).
+- [ ] O1 EDPs: calor, onda, Laplace 2D, separación de variables, Fourier, método de características
+- [ ] O2 No-conmutativo: cuaterniones, matrices simbólicas, F4-F5
+- [ ] O3 Parsers LaTeX/Wolfram bidireccionales
+- [ ] O4 Cálculo: n-ésima derivada simbólica + parciales + cambio de variable u-du + impropias calculadas + Gruntz real + Laurent completa + sumas cerradas + Lambert W
+- [ ] O5 Números y optimización: bigint/bigrational + FFT + BFGS + Gauss-Kronrod + intervalos dirigidos
+- [ ] O6 Especiales: polygamma orden >1, ₂F₁, elípticas K/E, Airy, Bessel K, armónicos esféricos
+> Ya cubierto por Grafito, NO portar: step-by-step educativo (`cas_steps.rs`, 3080 L medido hoy con `wc -l`), EDOs simbólicas (`ode.rs`), residuos (`cas.rs:1527` `laurent_residue` + tests `:3078-3157`), assumptions (`assumptions.rs`), Groebner Buchberger real (`cas.rs:2783,2796`).

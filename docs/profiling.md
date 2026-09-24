@@ -199,6 +199,70 @@ Producto (asistente de Grafito):
 | Historial 6×4096 + doc denso | `wire validate` fallaba | request válido acotado | test `historial_y_documento_densos_no_rompen_el_presupuesto` |
 | Telemetría real | invisible | JSONL opt-in `GRAFITO_USAGE_LOG` | chars in/out + tokens reales (in/out/reasoning/cached) + ms + stale_context por turno |
 
+## 2.11 Cache de expresiones compiladas: 128 vs 512/1024 — **negativo** (2026-09-23)
+
+`MAX_COMPILED_EXPR_CACHE` se queda en **128**. Medición con bench temporal
+`benches/cache_probe.rs` (borrado tras medir; round-robin `evaluate_cached`
+sobre W expresiones distintas, criterion, release), números pineados en
+`crates/grafito-geometry/src/expr.rs:980-995`:
+
+| Working set | 128 | 512 | 1024 | Δ |
+|---|---|---|---|---|
+| W=64 (realista) | 10.22 µs | 9.97 µs | 10.23 µs | <3% (ruido) |
+| W=200/600 (sintéticos, exceden 128 a propósito) | — | gana 50×+ | gana 50×+ | solo en sintéticos |
+
+Los working sets sintéticos no existen en los paths reales: `expand`/
+`factor`/Groebner operan sobre AST, no sobre este cache de strings, y los
+consumidores de `evaluate_cached` (`function_sampling`, probes de polo)
+evalúan 1 expresión N veces o decenas como máximo. Cada entrada retiene un
+`Arc<CompiledExpr>` (AST + opcodes): 512/1024 multiplican la memoria
+retenida sin beneficio. Mismo criterio que mimalloc (§2.2): no subir sin
+datos. Si un perfil futuro muestra `miss` dominando con working set real
+> 128, reabrir con números.
+
+## 2.12 `panic="abort"` en release — **descartado por inspección** (2026-09-23)
+
+Idea: abort en vez de unwind achica binary y acelera el camino feliz.
+Descartada sin medir porque rompe contratos existentes (grep 2026-09-23):
+con `panic="abort"` ningún `catch_unwind` atrapa (el proceso aborta) y todo
+`#[should_panic]` mata el binario de test.
+
+- **Producción** (el pánico se convierte hoy en error honesto):
+  `crates/grafito-mcp/src/bridge.rs:186` (barrera anti-caída de
+  `execute_command`: pánico → error honesto + corta los pasos restantes) y
+  `crates/grafito-app/src/assistant_jobs.rs:1300` (worker de preflight de
+  propuestas).
+- **Tests `catch_unwind`**:
+  `grafito-geometry/tests/property_hardening.rs:16,70`,
+  `grafito-complex/tests/property_hardening.rs:16,50`,
+  `grafito-core/tests/persistence_properties.rs:70`,
+  `grafito-core/tests/document_integration.rs:645,673,1076`,
+  `grafito-complex/src/math/complex_expr.rs:1376`,
+  `grafito-geometry/src/expr.rs:3065`,
+  `grafito-command/tests/utn_linear_algebra_commands.rs:254`,
+  `grafito-app/src/assistant.rs:11825`.
+- **Tests `#[should_panic]`** (solo con `debug_assertions`):
+  `grafito-app/src/assistant_jobs.rs:2714,2733,2755,2788`.
+
+Queda `panic = "unwind"` (implícito). Registrar acá para no repetir el
+experimento sin antes reemplazar esas barreras.
+
+## 2.13 `Interval::new` con redondeo outward real (2026-09-23)
+
+Antes `prec` se ignoraba: `Interval::new(prec, lo, hi)` guardaba `lo`/`hi`
+crudos y la API mentía. Ahora cuantiza **hacia afuera** (`floor`/`ceil` a
+`prec` dígitos + `next_down`/`next_up` que cubre el error de la mul/div en
+f64): `crates/grafito-geometry/src/interval.rs:35-55`.
+
+- `prec = 0` preserva el comportamiento previo (sin cuantizar); los no
+  finitos (`NaN`/`Inf`) se guardan tal cual igual que antes.
+- `prec > 15` satura a `MAX_INTERVAL_PREC_DIGITS` 15 (`interval.rs:9`):
+  más dígitos no son representables en `f64` (documentado, no silencioso).
+- Honestidad: el respaldo es double-double de precisión FIJA (~106 bits de
+  mantisa), NO aritmética de intervalos rigurosa de precisión arbitraria
+  (MPFR); `prec` no aumenta la precisión interna, solo ensancha
+  (`interval.rs:28-33`).
+
 ## 3. Simd (`wide`) — decisión diferida
 
 `wide 0.7.33` está en el lock solo como transitiva (simba/alkahest-cas);

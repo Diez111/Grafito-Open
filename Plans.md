@@ -1,171 +1,85 @@
-# Plans.md — Auditoría E2E Completa Grafito v2
-> **Slash Commands activos**: `/j-space` `/vibecoder-guide` `/statem` `/rust-design` `/rust-ui`
-> **Reglas**: capas (Cerebro → Piel), estados tipados, type-safety, separación total UI/lógica
+# Plan: Ola 0 — Cableado, bugs de visibilidad y micro-optimizaciones
 
-## Visión Ejecutiva (vibecoder-guide: en criollo)
-Grafito es una **pizarra geométrica** que piensa (Cerebro en Rust puro) y dibuja (Piel en egui/wgpu).
-- **Si el Cerebro miente**, la pizarra dibuja cualquier cosa.
-- **Si la Piel toca el Cerebro**, se rompe la previsibilidad.
-- **Si el Animador se cuelga**, toda la app se congela.
+Fecha: 2026-09-23. Fuente: inventario de capacidades (mapa completo 2026-09-23)
++ gap analysis contra MathHook (mathhook.org) y MathCore (crates.io/crates/mathcore).
+Cero menciones previas de ambas fuentes en el repo: nada estaba integrado.
 
-Objetivo de esta auditoría: revisar **TODO de inicio a fin**, pulir hasta dejarlo "a prueba de tontos",
-y que el generador de animaciones sea **confiable, cancelable y seguro**.
+## Motivo
 
-## Mapa del Workspace (DAG real)
+La feature estrella de MathHook (step-by-step educativo) ya existe en Grafito y
+NO está cableada. Además 7 comandos ejecutables no aparecen en la interfaz
+(pausleta/docs/MCP) y hay motores presentes sin comando de usuario.
+
+## Regla de arquitectura (fija para toda ola futura)
+
+**UNA sola representación de expresión.** Todo algoritmo nuevo se implementa
+sobre `Expr`/bytecode de Grafito y reusa `evaluate_cached` -> `compile_flat_ops`
+-> `run_opcodes_flat` (`crates/grafito-geometry/src/expr.rs:1001,2238,1958`).
+Nunca portar la representación `Expression` (32B hash-consed) de MathHook ni el
+`Expr` boxeado de MathCore. Motivo: 87.6 ns vs 7.4 µs ya medidos
+(`docs/profiling.md:21-36`) + evita 3 tipos de expresión en mantenimiento.
+
+## Contrato de API entre agentes (bloqueante, no negociable)
+
+`crates/grafito-geometry` expone (o hace `pub`):
+
+```rust
+pub fn poly_gcd_subresultant(a: Vec<f64>, b: Vec<f64>) -> Vec<f64>;   // symbolic.rs:2572 (hoy privado)
+pub struct BiPoly;                                                     // solve.rs:773  (hoy privado)
+pub fn sylvester_resultant(f1: &BiPoly, f2: &BiPoly, m: usize, n: usize)
+    -> Option<Vec<f64>>;                                               // solve.rs:996  (hoy privado)
 ```
-grafito-geometry  ──┐
-grafito-complex   ──┼─> grafito-core ──> grafito-command ──> grafito-app
-grafito-render    ──┘          │                    ▲
-grafito-anim      ─────────────┼─> grafito-assistant┘
-grafito-whiteboard ────────────┘
-grafito-ui        ─────────────> grafito-app (Piel)
-grafito-profile/pedagogy/plugins/assistant-types
-```
-- **Cerebro puro**: core, geometry, command, complex, whiteboard, profile, pedagogy, plugins, assistant
-- **Puente**: anim (IPC JSON v1 stdio a Python/manim)
-- **Piel**: ui (tokens, theme, assistant, animation), app (app.rs 4826L, assistant.rs 4731L, render_2d 4750L, panels 3177L, etc.)
-- **Infra**: packaging/deb, .github/workflows/ci.yml (17 jobs)
 
-## Ola CX — Contorno complejo dibujado a mano (2026-09-19)
-- Objetivo: seleccionar/tipear `f(z)`, dibujar un lazo a mano (o círculo centro+radio) y obtener `∮ f(z) dz` en vivo; al soltar quedan `Pencil`/`Circle` + `ComplexIntegral` persistentes con undo atómico.
-- Núcleo: `complex_calculus.rs` migra de trapecio a Gauss–Legendre 16 por segmento con Kahan, suma `ContourAccumulator` incremental, remuestreo ≤ 2 048 segmentos, integral circular analítica `circle_contour_integral` y `format_complex_rounded` compartido.
-- Render: `ComplexIntegral` acepta Pencil/Polyline/Spline/Arc/Bézier/Paramétrica (+círculo analítico) y deja de ser no-op silencioso; comando valida el tipo de curva con error honesto (`GeoObject::accepts_complex_contour`).
-- Piel: 89.ª `Tool::ComplexContour`, panel “Integral de contorno” con guías (imán liviano, cierre automático, estabilizador, suavizado, residuos) y overlay en vivo (trazo + chip ∅/ΣRes).
+Ya son `pub` (no tocar firmas):
+- `cas.rs:1463` `laurent_residue`
+- `cas.rs:1586` `laurent_principal_part`
+- `cas_steps.rs:1568` `steps_for_op(op: &CasOp) -> Result<Vec<CasStep>, String>`
 
-## Harness de problemas abiertos (2026-09-20) — Fase A hecha, Fase B en curso
+## Ola 0 — tareas
 
-**Goal**: usar Grafito como harness de descubrimiento + verificación para
-problemas abiertos lógicos (TOPP 39/57/7, Erdős, galería), sin vender humo:
-el LLM propone números, el motor mide, el hash decide.
+### A. `grafito-geometry` (cerebro-audit)
+1. `pub` en `poly_gcd_subresultant`, `BiPoly`, `sylvester_resultant` (contrato).
+2. Dedupe `taylor_series`: `symbolic.rs:5533` (-> Result<String,String>) es la
+   canónica; `matrices.rs:876` (-> Option<String>) delega o se elimina.
+3. Dedupe financieras: `cas_extra.rs:771-807` vs `stats_extra.rs:319-357`.
+4. Honestidad `Interval::new(_prec: u32, ...)`: el `prec` se ignora
+   (`interval.rs:13`) -> usarlo o quitarlo, sin mentir.
+5. Micro-opt con criterio: `MAX_COMPILED_EXPR_CACHE = 128` (`expr.rs:978`) es
+   chico para un CAS -> medir 512/1024 con `expr_bench` antes de subir.
 
-**Fase A — herramientas (sin resolver nada) [✅ DONE]**
-- Núcleo `crates/grafito-geometry/src/search.rs`: `unit_pairs`,
-  `distinct_distances`, `unit_graph_edges`, `export_dimacs_kcoloring`
-  (CNF), `is_k_colorable_bruteforce` (n≤24), `halving_edges_count`,
-  `has_three_colinear`, `empty_triangle_exists`, `seeded_point_set`,
-  `grid_point_set`, `run_topp39_scan` (hash FNV + JSONL) y
-  `verify_search_run` (doble puerta).
-- Comandos Discreta: `UnitPairs`, `DistinctDistances`, `UnitGraphEdges`,
-  `ChromaticCheck`, `HalvingEdges`, `EmptyTriangle`, `Topp39Scan`
-  (650 specs / 613 paleta).
-- Tools del agente harness2: `search_topp39` (verificado) y
-  `export_dimacs` (CNF para kissat/cadical); `all_safe_tool_schemas` 23.
-- Cotas honestas: 2000 puntos, 200k aristas, n≤24 backtracking, halving 400,
-  vacío 80, DIMACS 20k vars, loop 4096 seeds. Protocolo en
-  `docs/OPEN_PROBLEMS_LAB.md`.
+### B. `grafito-command` (general)
+1. Registrar los 7 comandos FANTASMA (tienen handler, 0 apariciones en el
+   registro -> invisibles en paleta/docs/MCP): `ImproperIntegral`, `SeriesSum`,
+   `SequenceLimit`, `DoubleIntegral`, `LagrangeMultipliers`, `MeanValueCheck`,
+   `SubspaceSum`.
+2. Comandos nuevos + handlers: `PolyGCD`, `Resultant`, `Residue`,
+   `PrincipalPart`, `StepByStep`.
+3. Actualizar blindaje `registry_counts_match_documented_architecture`
+   (`command_registry.rs:9904`).
+4. Regenerar `docs/commands.md` vía `render_markdown()`.
 
-**Fase B — loop de 1 problema [EN CURSO, TOPP 39 primero]**
-- `topp39_best_of(seeds, n, scale, tol)`: barre seeds, re-verifica cada
-  corrida y devuelve el mejor por pares unitarios; la evidencia es solo el
-  JSONL con hash re-verificado.
-- Siguiente: TOPP 39 (distancias) → TOPP 57 (SAT externo) → TOPP 7/galería.
-- Regla de oro: un problema por vez; nada se publica sin doble verificación.
+### C. `grafito-mcp` + `grafito-assistant` (general)
+1. `math_tool_schemas` (hoy 8) + `residue`, `principal_part`, `poly_gcd`,
+   `resultant`, `steps`. Actualizar pins 8->13 y 23->28.
+2. MCP las toma solas vía proxy (`bridge.rs:31-52`). Actualizar pin
+   `tools.len() == 37` (`protocol.rs:448`).
 
-## Principios Invariantes (CORE)
-- **CORE-1 /j-space**: Nada de código sin que esté en Plans.md/Tasks.md/progress.md primero.
-- **CORE-2 /statem**: Todo flujo con estados inválidos imposibles → `enum Estado` + transiciones tipadas que no compilan si son ilegales.
-- **CORE-3 /rust-design**: newtype (AnimJobId, Resolution, AnimDuration), Result/Option en bordes, nunca unwrap en prod, clippy -D warnings = 0.
-- **CORE-4 /rust-ui**: La UI es función pura `fn render(&Estado) -> Frame`. Cero I/O, cero spawn, cero lógica en el `Ui::`.
-- **CORE-5 /vibecoder-guide**: Cada error de compilador → explicación en lenguaje de negocio + menú de 2-3 opciones.
+### D. Núcleo numérico (perf-profiler)
+1. Medir ANTES de optimizar (regla `docs/profiling.md`).
+2. Ámbito: `grafito-core/**`, `grafito-complex/**`.
+3. Levers candidatos: `lto = "thin"` -> `"fat"` (`Cargo.toml:120`), perfil PGO.
 
-## Fases por Capas (orden estricto)
+## Fuera de alcance explícito (olas 1-6)
 
-### Fase 0 — Inventario & Baseline [✅ DONE parcial, refrescar]
-- Baseline gates: `cargo fmt --check` ✅, `cargo clippy -D warnings` ✅ (29s), `cargo test --workspace` ⏳ verificar completo.
-- Deuda registrada en progress.md (RUSTSEC quick-xml/zbus, matriz singular, HashMap no determinista).
-- Salida: este Plans.md v2 + Tasks.md v2 + docs/architecture.md
+EDPs/EDO simbólicas de MathHook, Fourier, parsers LaTeX/Wolfram,
+n-ésima derivada, parciales, u-du, impropias calculadas, Gruntz real,
+Laurent completa, sumas cerradas, no-conmutativo/cuaterniones, matrices
+simbólicas, F4/F5, Lambert W, bigint/bigrational, FFT, BFGS, Gauss-Kronrod,
+intervalos dirigidos, especiales avanzadas. Ver gap analysis 2026-09-23.
 
-### Fase 1 — Cerebro: Núcleo Lógico Puro [PRIO 1 — TOCAR PRIMERO]
-**Objetivo negocio**: que una figura mal escrita nunca rompa el documento ni el solver.
+## Gates
 
-- **1.1 grafito-core** (document 4998L, object 3603L, validation 1215L, constraints, numeric_solver 1484L, persistence 1368L)
-  - Statem DocumentLifecycle: Empty → Loading → Validating → Ready → Mutating → Persisting → Ready
-  - Type-safety: ObjectId newtype ya, reforzar Resolution/Transform depth, ValidatedDocument wrapper
-  - Revisar: MAX limits, HachMap debug (BTreeMap), Transformed depth 64 y matriz singular, Clonación Document en apply_plan
-  - Errores: CoreError tipado (ya existe) → auditar que ningún `String` quede sin tipar
-
-- **1.2 grafito-geometry** (expr, cas, matrices, fractals, statistics, interval, ode, special_*, exact)
-  - Statem ExprEval: Raw → Parsed → Validated → Evaluated | Failed
-  - Matrices: singular_value_tolerance ya, pero Transformed no valida → añadir `ValidatedMatrix`
-  - Revisar: expr eval cache, safe_* clamps, MAX_MATRIX_DIM/DENSITY, panics por unwrap
-
-- **1.3 grafito-command** (catálogo, assistant_plan, proposals, context)
-  - Statem CommandApply: Proposed → Preflight → Validated → Applied | Rejected (con razón tipada)
-  - Type-safety: ProposalRejectionKind ya, extender a todos los comandos
-
-- **1.4 grafito-complex / render / whiteboard / profile / plugins / assistant**
-  - Complex: algebraic_mappings, opcode — validar rangos
-  - Render: compute shaders wgpu, gpu_compute test headless
-  - Whiteboard: overlay nativo sobre grafito-whiteboard (no toca Document/GeoObject) — verificar
-  - Plugins: manifest/validate/registry — sandbox
-
-### Fase 2 — Generador de Animaciones v2 [PRIO 0 — CORAZÓN PEDIDO]
-**Objetivo negocio**: el docente pide "mostrá la derivada" y en <2s ve un GIF, sin colgar la app, sin que un script rompa el sistema.
-
-- **Statem completo** (ya iniciado en engine.rs, pulir):
-  ```rust
-  Idle -> Spawning -> AwaitingHello{deadline} -> AwaitingPong{deadline} -> Ready
-       -> Running{job_id, deadline} -> Cancelling{job_id} -> ShuttingDown{deadline}
-       -> Completed{media_path} | Failed{code,msg} | TimedOut | Cancelled
-  // transiciones solo vía fn que consume Self y devuelve Result<NextState, Error>
-  ```
-- **Type-safety ampliada**:
-  - Resolution::try_new(w,h) -> valida 64..8192 (ya en protocol pero falta newtype dedicado)
-  - AnimDuration::try_new(secs) -> 0.1..30s
-  - AnimJobId ya newtype, pero falta Display/Hash correcto (revisar PartialEq<String>)
-  - ExportFormat ya, pero validar en request.validate()
-  - WireMessage versionado (ANIM_PROTOCOL_VERSION=1) → añadir major/minor negoc.
-
-- **Engine (engine.rs 754L) — auditoría fina**:
-  - spawn: args NUL, workdir validación, leak fix (kill+wait) ✅, falta validar command[0] existe
-  - wait_ready: deadline absoluta ✅, poll 250ms ✅, falta pong handshake explícito
-  - submit: validar can_submit() == Ready, serializar con line_cap
-  - recv_event: filtrar por job_id ✅, line_cap OOM fix ✅ (oversized drain)
-  - shutdown: cooperativo (send SHUTDOWN → wait idle_timeout → kill) ✅, falta garantizar Drop no bloquea UI thread
-  - run_job: cancel poll 200ms ✅, job_timeout deadline absoluta ✅, validate_media_path ✅ (path_escape)
-  - diagnostics: Mutex poison-aware ✅
-  - Faltantes: comando no encontrado → error tipado, stderr drain con cap, retry con backoff
-
-- **Python (manim_engine/__main__.py 239L)**:
-  - safe_eval: AST whitelist ✅ (MAX_NODES 200, MAX_EXPR_LEN 500, SAFE_FUNCS) — falta bloquear `__import__` y atributos `.__class__`
-  - safe_path: JOB_RE, ALLOW_EXPORT ✅, falta symlink escape (canonicalize + startswith)
-  - placeholder_media: GIF89a 1x1 + PNG 1x1 ✅, fallback correcto, falta garantizar workdir/canvas coherente
-  - manim_is_available: try import ✅, falta cache y timeout en render_with_manim
-  - render_with_manim: Axes + FunctionGraph + MathTex ✅, falta manejo de manim config.media_dir race, canvas validado
-  - Protocolo: hello/ping/pong/shutdown/render_request/progress/result/error ✅
-  - Mejoras pedidas: más templates (integral-area, taylor-series, conformal-map ya declaradas pero no implementadas), progress real % por frames, duración_ms real, export mp4, verbose logging a stderr
-
-- **Nativo fallback (anim_native.rs 189L)**:
-  - render_native_animation_frames ✅, render_pitagoras_frames ✅ — falta: unificar a AnimEngine trait, parametrizar x0 y slope, test visual, no alocar en UI thread
-
-### Fase 3 — Piel: Separación Total Cerebro/Piel [SOLO DESPUÉS DE F1+F2]
-- **grafito-ui** (animation.rs, assistant.rs 120L+, tokens, theme, toolbar):
-  - Tokens tipográficos/spacing/radios/icons ✅ — auditar hardcodes restantes
-  - assistant.rs: ASSISTANT_PANEL widths, composer height 116+44+32+20+112 (ya fixeado sin ScrollArea envolvente) ✅ — verificar wrap, clip, TopBottomPanel heights
-  - animation.rs: ThinkingOrb state machine → Statem
-
-- **grafito-app** (app.rs 4826L, assistant.rs 4731L, anim_ui 110L, anim_native 189L, panels 3177L, canvas 1649L, render_2d 4750L, ui 1462L):
-  - anim_ui.rs: progress bar, ScrollArea horizontal, load_texture con id único por frame ✅ — falta: max_height, bar_width, wrap, export dialog, no I/O
-  - assistant.rs: AssistantRuntime (remote_job, proposal_job, model_job, agent_job, anim_job) — lifecycle: Idle -> Thinking -> Verifying -> Animating -> Done. Separar: todo I/O a thread, UI solo renderiza &State
-  - app.rs: eframe::App::update dispatch — auditar repaint intervals, MAX_UNDO 50, ViewMode
-
-### Fase 4 — Estabilidad Total (Puertas del AGENTS.md)
-- F3.1 fmt --check
-- F3.2 clippy --workspace --all-targets -- -D warnings (MSRV 1.92 + stable)
-- F3.3 check --workspace --locked
-- F3.4 test --workspace --locked
-- F3.5 check examples/benches
-- F3.6 doc --no-deps (RUSTDOCFLAGS -D warnings)
-- F3.7 gpu-compute headless
-- F3.8 packaging deb + fixtures
-
-### Fase 5 — Documentación & Handoff
-- docs/architecture.md (DAG, statems, budgets)
-- README.md / PROGRESS, CHANGELOG promoción
-- Riesgos residuales y next steps (RUSTSEC 2026-12-31, etc.)
-
-### Fase 6 — Sync BUILD docs↔código 2026-09-04 [DONE]
-- Todo número con `file:line` verificada por lectura directa (tabla en docs/architecture.md §13).
-- app.rs: Ctrl+T tema + Ctrl+P/E + F8/F9 (cero fantasmas) + onboarding gating `onboarding_completed` (420px, 3 bullets, [Probar ejemplo][Empezar vacío][No mostrar]).
-- Responsive: rail 60px Medium/Wide, drawer clamp 292..440, panel izq 180+45%; paleta fuzzy+footer "N de M" es.
-- Gates: `cargo fmt`, `cargo clippy -p grafito-app -p grafito-ui --all-targets --locked -- -D warnings`, tests lib ambos.
+`cargo fmt --all -- --check` ·
+`cargo clippy --workspace --all-targets -- -D warnings` ·
+`cargo test --workspace --locked` ·
+`cargo check --workspace --locked`

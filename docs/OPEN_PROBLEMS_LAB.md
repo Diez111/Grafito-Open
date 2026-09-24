@@ -1,7 +1,8 @@
 # Lab de problemas abiertos — protocolo de uso (harness + loop de 1 problema)
 
 > Motor: `crates/grafito-geometry/src/search.rs`. Servidor MCP:
-> `crates/grafito-mcp` (stdio, binario `grafito-mcp`, 35 tools + 9 recursos).
+> `crates/grafito-mcp` (stdio, binario `grafito-mcp`, 42 tools + 9 recursos;
+> conteo pineado en `crates/grafito-mcp/src/protocol.rs:448`).
 > Comandos: `UnitPairs`, `DistinctDistances`, `UnitGraphEdges`,
 > `ChromaticCheck`, `HalvingEdges`, `EmptyTriangle`, `Topp39Scan` (categoría
 > Discreta). Tools MCP: 7 lab (`search_topp39`, `export_dimacs`,
