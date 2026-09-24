@@ -11,14 +11,17 @@ Hito solo con `lab/witnesses/hn/CHI6_WITNESS.json` (no existe: no hay hito).
 
 ## 0. Lo que está corriendo AHORA
 
-- **Mining G3 forzado-mono** (otra pestaña, `xargs -P10`, PID 1807724, ~9 h):
-  420.555 pares de Haugland-G3 (2131v) vs CNF k5, buscando par forzado al
-  mismo color (pieza del spindle 5→6). Va por P≈1350, `sweep_g3full.out` en 0
-  = cero FORCED. **Todos** los sweeps históricos dan 0 (874/529/1405/1299/
-  T703/G1/dihedral6/merges/virtual553).
-- **STOP vigente** (`.jspace/STOP`, 2026-09-20 20:57 UTC): el operador cortó
-  la caza full (opción A). Esta campaña NN/TPU corre como olas paralelas
-  autorizadas después; no lo invalida.
+- **CORRECCIÓN G1 (2026-09-22): G1 es 4-COLOREABLE** [PRUEBA] (kissat k4 SAT
+  12.8 s, coloreo verificado 0/3985). Nunca fue base 5-cromática: su mining
+  k5 y el condmine-k5 eran de nivel equivocado (cerrados como vacuos).
+  Par AB del autor recuperado por diff CNF: vértices (0,5) a √3.
+  ABsame-k4 sigue sin decidirse local (kissat+nativo >280 s; CaDiCaL local
+  muerto por SIGTERM): claim del autor, NO verificado acá.
+- **Mining G1+AB (base verdadera) en fondo**: `parmine.sh` -P14, 273.430
+  pares k5 — primer mining bien nivelado de la campaña.
+- **Nativo `-march=native`: DESCARTADO** (0.083 vs 0.084 s en G1k5; >280 s
+  ambos en ABsame: sin diferencia medible; se queda stock).
+  Siguiente: `kissat` k5 directo a lo denso que salga.
 
 ## 1. Historia completa (qué se probó y qué dio)
 

@@ -300,8 +300,9 @@ Gran total campaña: ~1,11 M pares distinct, cero forzados.
 → trim inviable en box; vale kissat UNSAT 26 min + 5-coloreo. Ledger kind
 `proof-scale`.)
 
-- L1 (hipergrafo): 553 VÉRTICE-CRÍTICO — los 553 vértices críticos
-  (sacar cualquiera mata la 5-cromaticidad), 2143 tests, 0 removidos.
+- L1 (hipergrafo): 553 VÉRTICE-CRÍTICO **del archivo `v553_upstream_553.edge`**
+  (file-specific, NO universal: Heule 2018 reporta at-most-4-removable en sus
+  553; el nuestro dio 0 removidos en 2143 tests + spot-checks k4 2026-09-22).
 - L2 (siembra): V31 31v/60e validado (= paper); 11 candidatos L∪ρS/η
   todos k4 SAT → sin familia nueva.
 - L3 (Exoo): corrección importante — el 8/3 incondicional es de HARDER
