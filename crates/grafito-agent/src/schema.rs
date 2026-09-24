@@ -10,6 +10,12 @@ pub const MAX_TOOL_NAME_CHARS: usize = 64;
 pub const MAX_TOOL_DESCRIPTION_CHARS: usize = 1_024;
 /// Límite de profundidad del schema de argumentos.
 const MAX_PARAMETER_DEPTH: usize = 8;
+/// Máximo de `tool_calls` aceptados por turno (respuesta del proveedor).
+///
+/// Presupuesto del loop del agente: un modelo buggy (o una respuesta
+/// manipulada) con N llamadas en un solo turno no puede desatar N dispatches
+/// antes del próximo chequeo de `accumulated_chars`/`total_span`.
+pub const MAX_TOOL_CALLS_PER_TURN: usize = 8;
 
 /// Descripción declarativa de una herramienta que el agente puede invocar.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,6 +99,13 @@ fn validate_schema_depth(schema: &Value, depth: usize) -> Result<(), String> {
                 "items" | "additionalProperties" => {
                     validate_schema_depth(value, depth + 1)?;
                 }
+                "oneOf" if value.is_array() => {
+                    // Los subschemas de `oneOf` también cuentan profundidad:
+                    // sin esto, anidar ahí evadía el presupuesto.
+                    for nested in value.as_array().map(Vec::as_slice).unwrap_or_default() {
+                        validate_schema_depth(nested, depth + 1)?;
+                    }
+                }
                 "enum" | "required" | "oneOf" if value.is_array() => {}
                 "enum" | "required" | "oneOf" => {
                     return Err("assistant tool schema list fields must be arrays".into())
@@ -146,6 +159,10 @@ impl ToolResult {
 }
 
 /// Parsea las llamadas de herramienta de un mensaje assistant OpenAI-compatible.
+///
+/// Fail-closed en el borde del wire del proveedor: más de
+/// `MAX_TOOL_CALLS_PER_TURN` llamadas en un solo turno se rechazan enteras
+/// (respuesta buggy o manipulada no puede desatar N dispatches).
 pub fn parse_tool_calls(message: &Value) -> Result<Vec<ToolCall>, String> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return Err("assistant tool_calls must live on an assistant message".into());
@@ -154,6 +171,13 @@ pub fn parse_tool_calls(message: &Value) -> Result<Vec<ToolCall>, String> {
         .get("tool_calls")
         .and_then(Value::as_array)
         .ok_or_else(|| "assistant message has no tool_calls array".to_string())?;
+    if calls.len() > MAX_TOOL_CALLS_PER_TURN {
+        return Err(format!(
+            "assistant message has too many tool calls ({} > {} per turn)",
+            calls.len(),
+            MAX_TOOL_CALLS_PER_TURN
+        ));
+    }
     let mut parsed = Vec::with_capacity(calls.len());
     for (index, call) in calls.iter().enumerate() {
         let function = call
@@ -277,5 +301,51 @@ mod tests {
             "tool_calls": [{"function": {"arguments": "{}"}}]
         }))
         .is_err());
+    }
+
+    #[test]
+    fn parse_tool_calls_caps_the_calls_per_turn() {
+        // Regresión A5: la lista de tool_calls viajaba SIN tope desde el wire
+        // del proveedor (o de una respuesta manipulada): 5.000 calls = 5.000
+        // dispatches + ~10 MB de mensajes `tool` antes del próximo chequeo.
+        let calls: Vec<serde_json::Value> = (0..20)
+            .map(|index| {
+                json!({
+                    "id": format!("call-{index}"),
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": "{}"}
+                })
+            })
+            .collect();
+        let message = json!({"role": "assistant", "content": null, "tool_calls": calls});
+        let err = parse_tool_calls(&message).expect_err("excede el tope por turno");
+        assert!(err.contains("tool call"), "{err}");
+        // Exactamente el tope sigue siendo válido.
+        let calls: Vec<serde_json::Value> = (0..super::MAX_TOOL_CALLS_PER_TURN)
+            .map(|index| {
+                json!({
+                    "id": format!("call-{index}"),
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": "{}"}
+                })
+            })
+            .collect();
+        let message = json!({"role": "assistant", "content": null, "tool_calls": calls});
+        assert_eq!(
+            parse_tool_calls(&message).map(|parsed| parsed.len()),
+            Ok(super::MAX_TOOL_CALLS_PER_TURN)
+        );
+    }
+
+    #[test]
+    fn validate_schema_depth_recurses_into_one_of() {
+        // Regresión A8: `validate_schema_depth` no recursaba en los
+        // subschemas de `oneOf`: la profundidad se evadía anidando ahí.
+        let mut deep = serde_json::json!({"type": "string"});
+        for _ in 0..12 {
+            deep = serde_json::json!({"type": "object", "oneOf": [deep]});
+        }
+        let tool = ToolSchema::new("ok", "descripción", deep);
+        assert!(tool.validate().is_err());
     }
 }

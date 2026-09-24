@@ -95,7 +95,16 @@ impl std::error::Error for ClassroomError {}
 
 /// Código de sala: newtype validado `1..=32`, ASCII alfanumérico + `-`/`_`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct ClassroomCode(String);
+
+impl TryFrom<String> for ClassroomCode {
+    type Error = ClassroomError;
+
+    fn try_from(code: String) -> Result<Self, Self::Error> {
+        Self::try_new(&code)
+    }
+}
 
 impl ClassroomCode {
     /// Valida y construye. `Err(InvalidCode)` si vacío, largo o con caracteres fuera de `[A-Za-z0-9_-]`.
@@ -128,11 +137,30 @@ impl ClassroomCode {
 }
 
 /// Nombre display de alumno: newtype saneado `1..=64` chars tras trim.
+///
+/// `Deserialize` es estricto (vía `try_from`): valida los invariantes sin
+/// truncar — el cap con recorte es solo del constructor [`Self::try_new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String")]
 pub struct LearnerName(String);
 
+impl TryFrom<String> for LearnerName {
+    type Error = ClassroomError;
+
+    fn try_from(raw: String) -> Result<Self, Self::Error> {
+        let trimmed = raw.trim();
+        if trimmed.chars().count() > MAX_LEARNER_NAME_LEN {
+            return Err(ClassroomError::InvalidName(format!(
+                "excede {MAX_LEARNER_NAME_LEN} chars"
+            )));
+        }
+        Self::try_new(trimmed)
+    }
+}
+
 impl LearnerName {
-    /// Sanea (trim + cap 64 chars). `Err(InvalidName)` si queda vacío.
+    /// Sanea (trim + cap 64 chars). `Err(InvalidName)` si queda vacío o si el
+    /// nombre trae caracteres de control (anti-inyección en UI/CSV).
     pub fn try_new(raw: &str) -> Result<Self, ClassroomError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -141,6 +169,11 @@ impl LearnerName {
         let capped: String = trimmed.chars().take(MAX_LEARNER_NAME_LEN).collect();
         if capped.trim().is_empty() {
             return Err(ClassroomError::InvalidName("vacío".to_string()));
+        }
+        if capped.chars().any(char::is_control) {
+            return Err(ClassroomError::InvalidName(
+                "con caracteres de control".to_string(),
+            ));
         }
         Ok(Self(capped))
     }
@@ -157,7 +190,16 @@ impl LearnerName {
 /// Evita salas eternas (PII local igual se acota en tiempo, como GeoGebra
 /// Classroom que expira por sesión). `60s..=24h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "u64")]
 pub struct CodeTtlSecs(u64);
+
+impl TryFrom<u64> for CodeTtlSecs {
+    type Error = ClassroomError;
+
+    fn try_from(secs: u64) -> Result<Self, Self::Error> {
+        Self::try_new(secs)
+    }
+}
 
 impl CodeTtlSecs {
     /// Valida `MIN_CODE_TTL_SECS..=MAX_CODE_TTL_SECS`. `Err(InvalidTtl)` si fuera de rango.
@@ -199,6 +241,7 @@ pub enum ClassroomPhase {
 
 /// Miembro del roster: nombre + mano + epoch de unión (para orden estable).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawRosterMember")]
 pub struct RosterMember {
     /// Nombre display saneado.
     pub name: String,
@@ -208,6 +251,27 @@ pub struct RosterMember {
     pub joined_epoch: u64,
 }
 
+/// Forma cruda entrante de un miembro (se revalida en `try_from`).
+#[derive(Debug, Deserialize)]
+struct RawRosterMember {
+    name: String,
+    hand_raised: bool,
+    joined_epoch: u64,
+}
+
+impl TryFrom<RawRosterMember> for RosterMember {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawRosterMember) -> Result<Self, Self::Error> {
+        let clean = LearnerName::try_from(raw.name)?;
+        Ok(Self {
+            name: clean.as_str().to_string(),
+            hand_raised: raw.hand_raised,
+            joined_epoch: raw.joined_epoch,
+        })
+    }
+}
+
 /// Sesión autoritativa del aula (Cerebro puro).
 ///
 /// Transiciones válidas (el resto retorna `Err(InvalidTransition)`):
@@ -215,7 +279,12 @@ pub struct RosterMember {
 /// - `Lobby → Live` (`start_live`).
 /// - `Lobby → Closed` / `Live → Closed` (`close`).
 /// - `join/leave/manos/ejercicio` solo en `Lobby` o `Live`.
+///
+/// `Deserialize` es estricto (vía `try_from`): el roster respeta
+/// `MAX_ROSTER_SIZE`, cada nombre sus invariantes y el ejercicio su cap —
+/// nada de lo que `join`/`set_exercise` rechazarían entra por JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawClassroomSession")]
 pub struct ClassroomSession {
     phase: ClassroomPhase,
     code: Option<ClassroomCode>,
@@ -223,9 +292,57 @@ pub struct ClassroomSession {
     exercise: Option<String>,
     snapshot_digest: String,
     /// Expiración del código (`epoch` secs, reloj de pared del caller).
-    /// `None` = sin expiración (compat con sesiones viejas, `#[serde(default)]`).
+    /// `None` = sin expiración (compat con sesiones viejas).
+    code_expires_epoch: Option<u64>,
+}
+
+/// Forma cruda entrante de la sesión (se revalida en `try_from`).
+#[derive(Debug, Deserialize)]
+struct RawClassroomSession {
+    phase: ClassroomPhase,
+    code: Option<ClassroomCode>,
+    roster: BTreeMap<String, RosterMember>,
+    exercise: Option<String>,
+    snapshot_digest: String,
     #[serde(default)]
     code_expires_epoch: Option<u64>,
+}
+
+impl TryFrom<RawClassroomSession> for ClassroomSession {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawClassroomSession) -> Result<Self, Self::Error> {
+        if raw.roster.len() > MAX_ROSTER_SIZE {
+            return Err(ClassroomError::RosterFull);
+        }
+        for (key, member) in &raw.roster {
+            if key != &member.name {
+                return Err(ClassroomError::InvalidName(
+                    "clave de roster distinta del nombre".to_string(),
+                ));
+            }
+        }
+        if let Some(exercise) = raw.exercise.as_deref() {
+            if exercise.chars().count() > MAX_EXERCISE_CHARS {
+                return Err(ClassroomError::InvalidMessage(format!(
+                    "ejercicio excede {MAX_EXERCISE_CHARS} chars"
+                )));
+            }
+        }
+        if raw.snapshot_digest.chars().count() > crate::MAX_SNAPSHOT_DIGEST_LEN {
+            return Err(ClassroomError::InvalidMessage(
+                "snapshot_digest excede su presupuesto".to_string(),
+            ));
+        }
+        Ok(Self {
+            phase: raw.phase,
+            code: raw.code,
+            roster: raw.roster,
+            exercise: raw.exercise,
+            snapshot_digest: raw.snapshot_digest,
+            code_expires_epoch: raw.code_expires_epoch,
+        })
+    }
 }
 
 impl ClassroomSession {
@@ -597,22 +714,32 @@ impl ClassroomSession {
     }
 }
 
-/// Escapa un campo CSV (RFC 4180 mínimo): entrecomilla si contiene `, " \n \r` y duplica `"`.
+/// Escapa un campo CSV (RFC 4180 mínimo): entrecomilla si contiene `, " \n \r`
+/// y duplica `"`. Además neutraliza prefijos de fórmula (CSV injection):
+/// una celda que empieza con `=`, `+`, `-`, `@`, `\t` o `\r` se exporta
+/// con `'` delante para que Excel/LibreOffice no la ejecute al abrir.
 fn escape_csv_field(raw: &str) -> String {
-    if raw.contains([',', '"', '\n', '\r']) {
-        let mut quoted = String::with_capacity(raw.len().saturating_add(2));
+    let mut value = if raw.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        let mut guarded = String::with_capacity(raw.len().saturating_add(1));
+        guarded.push('\'');
+        guarded.push_str(raw);
+        guarded
+    } else {
+        raw.to_string()
+    };
+    if value.contains([',', '"', '\n', '\r']) {
+        let mut quoted = String::with_capacity(value.len().saturating_add(2));
         quoted.push('"');
-        for ch in raw.chars() {
+        for ch in value.chars() {
             if ch == '"' {
                 quoted.push('"');
             }
             quoted.push(ch);
         }
         quoted.push('"');
-        quoted
-    } else {
-        raw.to_string()
+        value = quoted;
     }
+    value
 }
 
 #[cfg(test)]
@@ -885,5 +1012,77 @@ mod tests {
             csv.contains("\"Ana \"\"La\"\" Profe\",false,8\r\n"),
             "{csv}"
         );
+    }
+
+    #[test]
+    fn csv_export_neutralizes_formula_prefixes() {
+        // Regresión A4: RFC 4180 estaba bien, pero un alumno "=SUM(A1)" o
+        // "+cmd|..." llegaba a la primera celda del CSV y Excel/LibreOffice lo
+        // interpretaba (CSV injection) al abrir el roster exportado.
+        assert_eq!(escape_csv_field("=SUM(A1)"), "'=SUM(A1)");
+        assert_eq!(escape_csv_field("+cmd| calc"), "'+cmd| calc");
+        assert_eq!(escape_csv_field("-2+3"), "'-2+3");
+        assert_eq!(escape_csv_field("@import"), "'@import");
+        assert_eq!(escape_csv_field("Ana"), "Ana");
+        let mut session = ClassroomSession::new_idle();
+        session.open_lobby(code_fixture()).expect("lobby");
+        session.join("=SUM(A1)", 1).expect("join hostil");
+        let csv = session.export_roster_csv();
+        assert!(csv.contains("'=SUM(A1),false,1\r\n"), "{csv}");
+    }
+
+    #[test]
+    fn serde_rejects_hostile_newtypes() {
+        // Regresión A3: la validación de `try_new` se evadía por el
+        // `Deserialize` derivado (sin `try_from`).
+        assert!(serde_json::from_str::<ClassroomCode>(r#""bad code!""#).is_err());
+        assert!(serde_json::from_str::<ClassroomCode>(&format!("\"{}\"", "a".repeat(33))).is_err());
+        assert!(serde_json::from_str::<LearnerName>(r#""\u001b[31mAna""#).is_err());
+        assert!(serde_json::from_str::<LearnerName>(&format!("\"{}\"", "x".repeat(65))).is_err());
+        assert!(serde_json::from_str::<CodeTtlSecs>("30").is_err());
+    }
+
+    #[test]
+    fn serde_rejects_oversized_or_dirty_session() {
+        // Regresión A3: `ClassroomSession` deserializaba roster sin cap y sin
+        // validar nombres/ejercicio (todos los `MAX_*` evadibles por JSON).
+        let mut roster = serde_json::Map::new();
+        for index in 0..(MAX_ROSTER_SIZE + 1) {
+            roster.insert(
+                format!("al-{index}"),
+                serde_json::json!({
+                    "name": format!("al-{index}"),
+                    "hand_raised": false,
+                    "joined_epoch": 0_u64
+                }),
+            );
+        }
+        let fat = serde_json::json!({
+            "phase": "Lobby",
+            "code": "AULA-1",
+            "roster": roster,
+            "exercise": null,
+            "snapshot_digest": "",
+        });
+        assert!(serde_json::from_value::<ClassroomSession>(fat).is_err());
+
+        let long_exercise = "e".repeat(MAX_EXERCISE_CHARS + 1);
+        let dirty = serde_json::json!({
+            "phase": "Lobby",
+            "code": "AULA-1",
+            "roster": {"Ana": {"name": "Ana", "hand_raised": false, "joined_epoch": 1}},
+            "exercise": long_exercise,
+            "snapshot_digest": "",
+        });
+        assert!(serde_json::from_value::<ClassroomSession>(dirty).is_err());
+
+        let evil_name = serde_json::json!({
+            "phase": "Lobby",
+            "code": "AULA-1",
+            "roster": {"x": {"name": "\u{1b}[31mAna", "hand_raised": false, "joined_epoch": 1}},
+            "exercise": null,
+            "snapshot_digest": "",
+        });
+        assert!(serde_json::from_value::<ClassroomSession>(evil_name).is_err());
     }
 }

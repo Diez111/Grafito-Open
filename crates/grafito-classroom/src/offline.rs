@@ -29,9 +29,18 @@ pub const MAX_OFFLINE_BACKOFF_SECS: u64 = 3_600;
 /// Tope del JSON persistido en disco (128×2048 + holgura de framing ≈ 320 KiB).
 /// Fail-closed: lo que exceda se descarta honesto al cargar, jamás se trunca a medias.
 pub const MAX_OFFLINE_PERSIST_BYTES: usize = 327_680;
+/// Horizonte de `next_retry_epoch` (año 3000): un retry más lejos está
+/// atascado para siempre en la práctica (`u64::MAX` jamás vence) y se rechaza
+/// como inválido. Mismo orden de magnitud que `crdt::MAX_HLC_WALL_SECS`.
+pub const MAX_OFFLINE_RETRY_EPOCH_SECS: u64 = 32_503_680_000;
 
 /// Envelope offline: qué reintentar + cuándo.
+///
+/// `Deserialize` es estricto (vía `try_from`): mismas invariantes que
+/// `enqueue` (`kind` saneado `1..=64`, cuerpo acotado sin controles,
+/// `attempts <= MAX_OFFLINE_ATTEMPTS`, `next_retry_epoch` dentro del horizonte).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawEnvelope")]
 pub struct OfflineEnvelope {
     /// ID monótono local (para dedup en la UI).
     pub id: u64,
@@ -45,11 +54,89 @@ pub struct OfflineEnvelope {
     pub next_retry_epoch: u64,
 }
 
+/// Forma cruda entrante de un envelope (se revalida en `try_from`).
+#[derive(Debug, Deserialize)]
+struct RawEnvelope {
+    id: u64,
+    kind: String,
+    body: String,
+    attempts: u8,
+    next_retry_epoch: u64,
+}
+
+impl TryFrom<RawEnvelope> for OfflineEnvelope {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawEnvelope) -> Result<Self, Self::Error> {
+        let kind = sanitize_kind(&raw.kind)?;
+        validate_body(&raw.body)?;
+        if raw.attempts > MAX_OFFLINE_ATTEMPTS {
+            return Err(ClassroomError::InvalidMessage(format!(
+                "attempts {} excede {MAX_OFFLINE_ATTEMPTS}",
+                raw.attempts
+            )));
+        }
+        if raw.next_retry_epoch > MAX_OFFLINE_RETRY_EPOCH_SECS {
+            return Err(ClassroomError::InvalidMessage(format!(
+                "next_retry_epoch {} excede el horizonte {MAX_OFFLINE_RETRY_EPOCH_SECS}",
+                raw.next_retry_epoch
+            )));
+        }
+        Ok(Self {
+            id: raw.id,
+            kind,
+            body: raw.body,
+            attempts: raw.attempts,
+            next_retry_epoch: raw.next_retry_epoch,
+        })
+    }
+}
+
 /// Outbox volátil acotada (FIFO por `next_retry_epoch`, estable por `id`).
+///
+/// `Deserialize` es estricto (vía `try_from`): cada envelope se revalida y la
+/// cola respeta `MAX_OFFLINE_QUEUE` (para la carga tolerante a lo parcial
+/// está [`decode_persist`]).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawOutbox")]
 pub struct OfflineOutbox {
     queue: VecDeque<OfflineEnvelope>,
     next_id: u64,
+    /// Envelopes descartados por política acotada (evicción en `mark_failed`).
+    dropped: usize,
+}
+
+/// Forma cruda entrante de la outbox (la usa `decode_persist`, que decide
+/// por-envelope con tolerancia a lo parcial).
+#[derive(Debug, Deserialize)]
+struct RawOutbox {
+    #[serde(default)]
+    queue: Vec<RawEnvelope>,
+    #[serde(default = "default_next_id")]
+    next_id: u64,
+}
+
+fn default_next_id() -> u64 {
+    1
+}
+
+impl TryFrom<RawOutbox> for OfflineOutbox {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawOutbox) -> Result<Self, Self::Error> {
+        if raw.queue.len() > MAX_OFFLINE_QUEUE {
+            return Err(ClassroomError::QueueFull);
+        }
+        let mut queue = VecDeque::with_capacity(raw.queue.len());
+        for envelope in raw.queue {
+            queue.push_back(OfflineEnvelope::try_from(envelope)?);
+        }
+        Ok(Self {
+            queue,
+            next_id: raw.next_id,
+            dropped: 0,
+        })
+    }
 }
 
 impl OfflineOutbox {
@@ -59,6 +146,7 @@ impl OfflineOutbox {
         Self {
             queue: VecDeque::new(),
             next_id: 1,
+            dropped: 0,
         }
     }
 
@@ -74,10 +162,20 @@ impl OfflineOutbox {
         self.queue.is_empty()
     }
 
+    /// Envelopes descartados por política acotada (aviso honesto, nunca
+    /// pérdida silenciosa): hoy solo la evicción de [`Self::mark_failed`]
+    /// cuando la cola se llenó entre `pop_ready` y el reencolado.
+    #[must_use]
+    pub fn dropped_count(&self) -> usize {
+        self.dropped
+    }
+
     /// Encola (`now` = reloj del caller para `next_retry` inicial).
     ///
     /// `Err(QueueFull)` si hay 128 (fail-closed). `Err(InvalidMessage)` si
-    /// `kind`/`body` inválidos. Retorna el `id` asignado.
+    /// `kind`/`body` inválidos. Retorna el `id` asignado. El retry inicial se
+    /// acota al horizonte `MAX_OFFLINE_RETRY_EPOCH_SECS` (nunca un envelope
+    /// atascado para siempre).
     pub fn enqueue(&mut self, kind: &str, body: &str, now: u64) -> Result<u64, ClassroomError> {
         let clean_kind = sanitize_kind(kind)?;
         validate_body(body)?;
@@ -94,7 +192,7 @@ impl OfflineOutbox {
             kind: clean_kind,
             body: body.to_string(),
             attempts: 0,
-            next_retry_epoch: now,
+            next_retry_epoch: now.min(MAX_OFFLINE_RETRY_EPOCH_SECS),
         });
         Ok(id)
     }
@@ -117,10 +215,16 @@ impl OfflineOutbox {
 
     /// Marca un fallo y lo reencola con backoff, o lo descarta si agotó intentos.
     ///
-    /// `Ok(true)` = reencolado con `attempts+1` y `next = now + backoff`.
+    /// `Ok(true)` = reencolado con `attempts+1` y `next = now + backoff` (el
+    /// retry se acota al horizonte `MAX_OFFLINE_RETRY_EPOCH_SECS`).
     /// `Ok(false)` = descartado honesto (ya consumió `MAX_OFFLINE_ATTEMPTS`).
     /// Backoff: `2^attempts` secs (1,2,4,8,16…), cap 1h. Si el `id` no existe,
     /// retorna `Ok(false)` (no-op honesto, sin crear nada).
+    ///
+    /// Política si la cola se llenó entre `pop_ready` y este reencolado: el
+    /// reintento NUNCA se pierde — se evicciona el envelope menos urgente
+    /// (mayor `(next_retry, id)`) y el descarte se cuenta en
+    /// [`Self::dropped_count`] (aviso honesto, jamás pérdida silenciosa).
     pub fn mark_failed(
         &mut self,
         envelope: OfflineEnvelope,
@@ -130,19 +234,26 @@ impl OfflineOutbox {
             return Ok(false);
         }
         if self.queue.len() >= MAX_OFFLINE_QUEUE {
-            return Err(ClassroomError::QueueFull);
+            let least_urgent = self
+                .queue
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, e)| (e.next_retry_epoch, e.id))
+                .map(|(index, _)| index);
+            if let Some(index) = least_urgent {
+                self.queue.remove(index);
+                self.dropped = self.dropped.saturating_add(1);
+            }
         }
         let next_attempts = envelope.attempts.saturating_add(1);
         let backoff = backoff_secs(next_attempts);
         self.queue.push_back(OfflineEnvelope {
             attempts: next_attempts,
-            next_retry_epoch: now.saturating_add(backoff),
+            next_retry_epoch: now
+                .saturating_add(backoff)
+                .min(MAX_OFFLINE_RETRY_EPOCH_SECS),
             ..envelope
         });
-        // Reordena por (next_retry, id) para que `pop_ready` siga FIFO estable.
-        let mut sorted: Vec<OfflineEnvelope> = self.queue.drain(..).collect();
-        sorted.sort_by_key(|e| (e.next_retry_epoch, e.id));
-        self.queue = sorted.into_iter().collect();
         Ok(true)
     }
 
@@ -207,9 +318,10 @@ impl PersistLoad {
 /// 1. vacío/en blanco → outbox vacía limpia (primera corrida, sin aviso);
 /// 2. `len > MAX_OFFLINE_PERSIST_BYTES` → todo corrupto (vacía + `corrupt`);
 /// 3. JSON inválido → todo corrupto;
-/// 4. JSON válido → se revalida cada envelope (`kind`/`body` con las mismas
-///    reglas de `enqueue`); los inválidos se cuentan en `discarded` y el
-///    resto se conserva (cap 128, los de menor `id` primero);
+/// 4. JSON válido → se revalida cada envelope (`kind`/`body`/`attempts`/
+///    `next_retry_epoch` con las mismas reglas de `enqueue`); los inválidos,
+///    los `id` duplicados y los retries atascados se cuentan en `discarded`
+///    y el resto se conserva (cap 128, los de menor `id` primero);
 /// 5. `next_id` se recalcula como `max(id)+1` (mínimo 1) para no reusar ids.
 #[must_use]
 pub fn decode_persist(json: &str) -> PersistLoad {
@@ -227,7 +339,7 @@ pub fn decode_persist(json: &str) -> PersistLoad {
             corrupt: true,
         };
     }
-    let raw: OfflineOutbox = match serde_json::from_str(json) {
+    let raw: RawOutbox = match serde_json::from_str(json) {
         Ok(raw) => raw,
         Err(_) => {
             return PersistLoad {
@@ -240,12 +352,17 @@ pub fn decode_persist(json: &str) -> PersistLoad {
     let mut kept: Vec<OfflineEnvelope> = Vec::new();
     let mut discarded = 0_usize;
     for envelope in raw.queue {
-        let kind_ok = sanitize_kind(&envelope.kind).is_ok();
-        let body_ok = validate_body(&envelope.body).is_ok();
-        if kind_ok && body_ok {
-            kept.push(envelope);
-        } else {
-            discarded = discarded.saturating_add(1);
+        // Dedup real por `id`: el contrato de la UI lo asume (nunca dos filas
+        // con el mismo id en el panel).
+        match OfflineEnvelope::try_from(envelope) {
+            Ok(clean) => {
+                if kept.iter().any(|existing| existing.id == clean.id) {
+                    discarded = discarded.saturating_add(1);
+                } else {
+                    kept.push(clean);
+                }
+            }
+            Err(_) => discarded = discarded.saturating_add(1),
         }
     }
     kept.sort_by_key(|e| e.id);
@@ -261,6 +378,7 @@ pub fn decode_persist(json: &str) -> PersistLoad {
         outbox: OfflineOutbox {
             queue: kept.into_iter().collect(),
             next_id,
+            dropped: 0,
         },
         discarded,
         corrupt: false,
@@ -468,5 +586,76 @@ mod tests {
         let mut back = loaded.outbox;
         let first = back.pop_ready(5);
         assert_eq!(first.map(|e| e.id), Some(1));
+    }
+
+    #[test]
+    fn serde_rejects_hostile_envelope_and_oversized_outbox() {
+        // Regresión A3: `enqueue` validaba pero el `Deserialize` derivado no.
+        assert!(serde_json::from_str::<OfflineEnvelope>(
+            r#"{"id":1,"kind":"bad kind!","body":"x","attempts":0,"next_retry_epoch":5}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<OfflineEnvelope>(
+            r#"{"id":1,"kind":"chat","body":"a\u0000b","attempts":0,"next_retry_epoch":5}"#
+        )
+        .is_err());
+        // Regresión A8: `next_retry_epoch = u64::MAX` dejaba el envelope
+        // atascado para siempre (nunca `pop_ready`).
+        assert!(serde_json::from_str::<OfflineEnvelope>(
+            r#"{"id":1,"kind":"chat","body":"x","attempts":0,"next_retry_epoch":18446744073709551615}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<OfflineEnvelope>(
+            r#"{"id":1,"kind":"chat","body":"x","attempts":200,"next_retry_epoch":5}"#
+        )
+        .is_err());
+        let big = "x".repeat(MAX_OFFLINE_BODY_BYTES + 1);
+        assert!(serde_json::from_str::<OfflineOutbox>(
+            &serde_json::json!({
+                "queue": [{"id": 1, "kind": "chat", "body": big, "attempts": 0, "next_retry_epoch": 5}],
+                "next_id": 2
+            })
+            .to_string()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn decode_persist_dedups_ids_and_unsticks_retries() {
+        // Regresión A8: ids duplicados rompían el "dedup en la UI" del doc y
+        // `next_retry_epoch = u64::MAX` dejaba el envelope pegado para siempre.
+        let json = serde_json::json!({
+            "queue": [
+                {"id": 1, "kind": "chat", "body": "uno", "attempts": 0, "next_retry_epoch": 5},
+                {"id": 1, "kind": "chat", "body": "duplicado", "attempts": 0, "next_retry_epoch": 5},
+                {"id": 2, "kind": "chat", "body": "pegado", "attempts": 3, "next_retry_epoch": u64::MAX},
+            ],
+            "next_id": 3,
+        })
+        .to_string();
+        let loaded = decode_persist(&json);
+        assert!(!loaded.corrupt);
+        assert_eq!(loaded.discarded, 2);
+        assert_eq!(loaded.outbox.len(), 1);
+    }
+
+    #[test]
+    fn mark_failed_keeps_the_retrying_envelope_when_full() {
+        // Regresión A8: la cola podía llenarse entre `pop_ready` y
+        // `mark_failed` y el reintento se perdía sin el "descarte honesto"
+        // con aviso. Política única: se evicciona el menos urgente (mayor
+        // `(next_retry, id)`), el reintento entra y el descarte se cuenta.
+        let mut outbox = OfflineOutbox::new();
+        for index in 0..MAX_OFFLINE_QUEUE {
+            outbox
+                .enqueue("chat", &format!("m{index}"), 0)
+                .expect("fill");
+        }
+        let envelope = outbox.pop_ready(0).expect("listo");
+        outbox.enqueue("chat", "llenó el hueco", 0).expect("refill");
+        let kept = outbox.mark_failed(envelope, 0).expect("reintento");
+        assert!(kept);
+        assert_eq!(outbox.len(), MAX_OFFLINE_QUEUE);
+        assert_eq!(outbox.dropped_count(), 1);
     }
 }

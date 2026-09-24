@@ -164,6 +164,106 @@ pub fn validate_instruction_path(
 /// para evitar ejecución arbitraria via `sh -c`.
 pub const ALLOWED_ENGINE_BINARIES: &[&str] = &["python3", "grafito-manim"];
 
+/// Módulos de Python admitidos para `python3 -m <módulo>` (allowlist exacta).
+///
+/// VULN 1 (RCE): `python3 -c "…"` / `-m http.server` pasaban la validación
+/// porque solo se filtraban metacaracteres **de shell** — Python no los
+/// necesita para ejecutar código arbitrario. La tupla completa se exige
+/// contra un patrón conocido; `-m` solo con módulos de esta lista.
+pub const ALLOWED_PYTHON_MODULES: &[&str] = &["grafito_engine"];
+
+/// Largo máximo de un argumento de `engine.command`.
+pub const MAX_ENGINE_ARG_CHARS: usize = 128;
+
+/// Charset estricto de argumentos: `^[A-Za-z0-9_.=/-]{1,128}$`.
+///
+/// Mata `(`, `'`, espacios, comillas y todo el resto del payload de
+/// `python3 -c "exec(__import__('os').system('rm -rf ~'))"`.
+fn is_safe_engine_arg(argument: &str) -> bool {
+    !argument.is_empty()
+        && argument.len() <= MAX_ENGINE_ARG_CHARS
+        && argument
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '=' | '/' | '-'))
+}
+
+/// Valida la **tupla completa** de `engine.command` (fail-closed).
+///
+/// Formas admitidas (nada más):
+/// - `["python3", "-m", <módulo allowlisted>, ...args no-flags]`
+/// - `["grafito-manim", ...args no-flags]`
+///
+/// Rechaza: `-c`, `-m` de módulos no allowlisted, scripts sueltos, binarios no
+/// allowlisted y cualquier flag (`-u`, `-E`, `-X`, `--version`, …) porque un
+/// flag de interpreter abre ejecución arbitraria o evasión (`-E` ignora
+/// `PYTHONPATH`, `-c` ejecuta código, `-m` importa cualquier módulo).
+fn validate_engine_command(command: &[String]) -> Result<(), String> {
+    if command.is_empty() || command.len() > MAX_ENGINE_COMMAND_ARGS {
+        return Err("plugin engine command is empty or exceeds the argument limit".into());
+    }
+    let binary = &command[0];
+    if !ALLOWED_ENGINE_BINARIES.contains(&binary.as_str()) {
+        return Err(format!(
+            "plugin engine command binary '{}' is not in allowlist {:?}",
+            binary, ALLOWED_ENGINE_BINARIES
+        ));
+    }
+    for argument in command {
+        if argument.contains('\u{0}') {
+            return Err("plugin engine command contains a NUL argument".into());
+        }
+        if !is_safe_engine_arg(argument) {
+            return Err(format!(
+                "plugin engine command argument '{argument}' must match ^[A-Za-z0-9_.=/-]{{1,128}}$"
+            ));
+        }
+        // Denylist explícita de binarios de shell como argumento (defensa en
+        // profundidad sobre el charset).
+        let lowered = argument.to_ascii_lowercase();
+        if matches!(
+            lowered.as_str(),
+            "sh" | "bash" | "cmd" | "powershell" | "pwsh" | "zsh" | "fish"
+        ) {
+            return Err(format!(
+                "plugin engine command argument '{argument}' is denied (shell binary)"
+            ));
+        }
+    }
+    match command {
+        [bin, flag, module, rest @ ..] if bin == "python3" && flag == "-m" => {
+            if !ALLOWED_PYTHON_MODULES.contains(&module.as_str()) {
+                return Err(format!(
+                    "plugin engine python module '{module}' is not in allowlist {:?}",
+                    ALLOWED_PYTHON_MODULES
+                ));
+            }
+            for argument in rest {
+                if argument.starts_with('-') {
+                    return Err(format!(
+                        "plugin engine command argument '{argument}' (flag) is denied"
+                    ));
+                }
+            }
+        }
+        [bin, rest @ ..] if bin == "grafito-manim" => {
+            for argument in rest {
+                if argument.starts_with('-') {
+                    return Err(format!(
+                        "plugin engine command argument '{argument}' (flag) is denied"
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(
+                "plugin engine command must be ['python3','-m',<allowlisted module>,...] or ['grafito-manim',...]"
+                    .into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Límites para `engine.capabilities`.
 pub const MAX_ENGINE_CAPABILITIES: usize = 16;
 pub const MAX_CAPABILITY_CHARS: usize = 64;
@@ -172,60 +272,8 @@ fn validate_engine(engine: &EngineSection) -> Result<(), String> {
     if engine.transport != "stdio" {
         return Err("plugin engine transport must be stdio".into());
     }
-    if engine.command.is_empty() || engine.command.len() > MAX_ENGINE_COMMAND_ARGS {
-        return Err("plugin engine command is empty or exceeds the argument limit".into());
-    }
-    // Allowlist: solo binarios conocidos. Rechaza `sh`, `bash`, `cmd`, `powershell`, etc.
-    let binary = &engine.command[0];
-    if !ALLOWED_ENGINE_BINARIES.contains(&binary.as_str()) {
-        return Err(format!(
-            "plugin engine command binary '{}' is not in allowlist {:?}",
-            binary, ALLOWED_ENGINE_BINARIES
-        ));
-    }
-    for argument in &engine.command {
-        if argument.is_empty() || argument.contains('\u{0}') {
-            return Err("plugin engine command contains an empty or NUL argument".into());
-        }
-        // Denylist shell metacaracteres y `sh -c` pattern.
-        // Incluso con allowlist, rechazamos inyección via args como `; rm -rf /`, `|`, `&&`, etc.
-        if argument.contains(';')
-            || argument.contains('&')
-            || argument.contains('|')
-            || argument.contains('`')
-            || argument.contains('$')
-            || argument.contains('\n')
-            || argument.contains('\r')
-        {
-            return Err(format!(
-                "plugin engine command argument '{argument}' contains shell metacharacters"
-            ));
-        }
-        // Bloquea intento de shell indirection incluso si binario es allowlisted
-        // (ej. ["python3", "-c", "import os; os.system(...)"] se permite solo si -c no es shell,
-        // pero bloqueamos `sh -c` via allowlist; aquí bloqueamos `-c` suelto si parece shell)
-        // Denylist explícito para args que indican shell execution
-        let lowered = argument.to_ascii_lowercase();
-        if lowered == "sh"
-            || lowered == "bash"
-            || lowered == "cmd"
-            || lowered == "powershell"
-            || lowered == "pwsh"
-        {
-            return Err(format!(
-                "plugin engine command argument '{argument}' is denied (shell binary)"
-            ));
-        }
-    }
-    // Detecta patrón `sh -c` aunque `sh` sea rechazado por allowlist, documenta razón
-    if engine.command.iter().any(|arg| arg == "-c")
-        && engine
-            .command
-            .iter()
-            .any(|arg| matches!(arg.as_str(), "sh" | "bash" | "cmd" | "powershell"))
-    {
-        return Err("plugin engine command contains denied 'sh -c' pattern".into());
-    }
+    // VULN 1: la validación vive en la tupla completa + charset estricto.
+    validate_engine_command(&engine.command)?;
     if engine.protocol_version == 0 || engine.protocol_version > 1_000 {
         return Err("plugin engine protocol version is outside the supported range".into());
     }
@@ -364,5 +412,83 @@ protocol_version = 1
         let mut invalid = manifest;
         invalid.engine.as_mut().unwrap().transport = "http".into();
         assert!(validate_manifest(&invalid, &ctx()).is_err());
+    }
+
+    /// Manifiesto `[engine]` mínimo con el `command` dado (VULN 1).
+    fn engine_manifest(command: &str) -> PluginManifest {
+        crate::registry::parse_manifest(&format!(
+            r#"[plugin]
+id = "grafito.manim-engine"
+name = "Motor Manim"
+version = "1.0.0"
+category = "engine"
+
+[engine]
+transport = "stdio"
+command = {command}
+protocol_version = 1
+"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn engine_python_arbitrary_code_is_rejected() {
+        // VULN 1 (RCE): `python3 -c` / `-m` arbitrario pasaba `validate_manifest`
+        // porque los argumentos solo se filtraban por metacaracteres de shell,
+        // y Python no los necesita para ejecutar código.
+        for command in [
+            r#"["python3", "-c", "print(1)"]"#,
+            r#"["python3", "-c", "exec(__import__('os').system('rm -rf ~'))"]"#,
+            r#"["python3", "-m", "http.server"]"#,
+            r#"["python3", "-m", "http.server", "8888"]"#,
+            r#"["python3", "-m", "os"]"#,
+            r#"["python3", "-u", "run.py"]"#,
+            r#"["python3", "--version"]"#,
+            r#"["python3", "cualquier_script.py"]"#,
+            r#"["python3", "-m", "grafito_engine", "-c"]"#,
+        ] {
+            let manifest = engine_manifest(command);
+            assert!(
+                validate_manifest(&manifest, &ctx()).is_err(),
+                "ejecución arbitraria vía manifiesto debe rechazarse: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_args_use_strict_charset() {
+        // VULN 1 capa 2: charset `^[A-Za-z0-9_.=/-]{1,128}$` mata paréntesis,
+        // comillas, espacios y demás payload de `python3 -c`.
+        for command in [
+            r#"["grafito-manim", "escena (1); rm -rf /"]"#,
+            r#"["grafito-manim", "a'b"]"#,
+            r#"["grafito-manim", "con espacio"]"#,
+            r#"["python3", "-m", "grafito_engine", "con espacio"]"#,
+            r#"["python3", "-m", "grafito_engine", "-c"]"#,
+            r#"["grafito-manim", "--version"]"#,
+        ] {
+            let manifest = engine_manifest(command);
+            assert!(
+                validate_manifest(&manifest, &ctx()).is_err(),
+                "argumento fuera de charset/flags debe rechazarse: {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn engine_known_tuples_are_accepted() {
+        // Anti sobre-bloqueo: las tuplas conocidas siguen vivas.
+        for command in [
+            r#"["python3", "-m", "grafito_engine"]"#,
+            r#"["grafito-manim"]"#,
+            r#"["grafito-manim", "escena_1"]"#,
+        ] {
+            let manifest = engine_manifest(command);
+            assert!(
+                validate_manifest(&manifest, &ctx()).is_ok(),
+                "tupla conocida debe seguir válida: {command}"
+            );
+        }
     }
 }

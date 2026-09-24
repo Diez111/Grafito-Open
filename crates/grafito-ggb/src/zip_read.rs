@@ -188,17 +188,8 @@ fn validar_no_enlace(nombre: &str, modo: Option<u32>) -> Result<(), GgbError> {
     }
     Ok(())
 }
+/// Fail-closed ante DOCTYPE/ENTITY (implementación única y case-insensitive
+/// en `parse::rechazar_doctype`; VULN 8).
 fn rechazar_doctype(xml: &[u8]) -> Result<(), GgbError> {
-    if contiene(xml, b"<!DOCTYPE") || contiene(xml, b"<!ENTITY") {
-        return Err(GgbError::XmlMalformado {
-            detalle: "DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string(),
-        });
-    }
-    Ok(())
-}
-fn contiene(hay: &[u8], aguja: &[u8]) -> bool {
-    if aguja.is_empty() || hay.len() < aguja.len() {
-        return false;
-    }
-    hay.windows(aguja.len()).any(|v| v == aguja)
+    crate::parse::rechazar_doctype(xml)
 }

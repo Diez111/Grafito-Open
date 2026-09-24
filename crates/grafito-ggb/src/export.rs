@@ -11,9 +11,12 @@
 //! importador); ida y vuelta dentro de 1e-6.
 
 use crate::error::GgbError;
+use crate::map::sanitize_etiqueta;
 use crate::GGB_XML_NAME;
-use crate::{MAX_ELEMS, MAX_EXPR_CHARS};
+use crate::MAX_ELEMS;
+use quick_xml::events::attributes::Attribute;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
+use quick_xml::name::QName;
 use quick_xml::Writer;
 use std::collections::BTreeSet;
 use std::io::{Cursor, Write};
@@ -122,6 +125,14 @@ fn fmt_num(v: f64) -> String {
     }
 }
 
+/// Etiqueta exportable: charset estricto del importador + punto fijo de
+/// [`sanitize_etiqueta`] (map.rs).
+///
+/// VULN 2/VULN 3 (auditoría): antes se aceptaba casi todo (`"`, `<`, `&`,
+/// `-`, espacios) y el XML viajaba con la etiqueta cruda (posible inyección)
+/// mientras el importador la renombraba en silencio (`A-B` → `A_B`, colisión
+/// con la `A_B` real). Ahora: o la etiqueta sobrevive idéntica ida y vuelta,
+/// o se **omite con motivo** en [`ExportReport`].
 fn clean_label(raw: &str) -> Result<String, String> {
     let label = raw.trim().to_string();
     if label.is_empty() {
@@ -135,8 +146,14 @@ fn clean_label(raw: &str) -> Result<String, String> {
     if label.contains('\0') {
         return Err("etiqueta con NUL".to_string());
     }
-    if label.len() > MAX_EXPR_CHARS {
-        return Err(format!("etiqueta excede {MAX_EXPR_CHARS} caracteres"));
+    let charset_ok = label
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '\'');
+    if !charset_ok {
+        return Err("etiqueta fuera de [A-Za-z0-9_'] (XML y roundtrip seguros)".to_string());
+    }
+    if sanitize_etiqueta(&label) != label {
+        return Err("etiqueta no canónica: el importador la renombraría (colisión)".to_string());
     }
     Ok(label)
 }
@@ -385,6 +402,24 @@ pub fn export_ggb_bytes(items: &[GgbExportItem]) -> Result<(Vec<u8>, ExportRepor
     Ok((bytes, report))
 }
 
+/// Escapa **todo** valor de atributo antes de escribirlo (VULN 2).
+///
+/// `quick-xml` 0.42 escapa al convertir `(&str, &str)` → `Attribute`
+/// (`events/attributes.rs:363`), pero `BytesStart::push_attr` escribe `value`
+/// crudo (FIXME `events/mod.rs:306`) si el `Attribute` se construye a mano.
+/// El escape vive aquí, explícito y **una sola vez** (se arma el `Attribute`
+/// directo justamente para no escapar dos veces). `quick_xml::escape::escape`
+/// cubre `< > & ' " \r`; `\n`/`\t` se emiten como referencia numérica para que
+/// la normalización de valores de atributo no los convierta en espacios.
+fn push_attr(elem: &mut BytesStart<'_>, key: &str, value: &str) {
+    let escaped = quick_xml::escape::escape(value);
+    let escaped = escaped.replace('\n', "&#10;").replace('\t', "&#9;");
+    elem.push_attribute(Attribute {
+        key: QName(key),
+        value: escaped.into(),
+    });
+}
+
 fn write_open(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: &str,
@@ -392,7 +427,7 @@ fn write_open(
 ) -> Result<(), GgbError> {
     let mut elem = BytesStart::new(name);
     for (key, value) in attrs {
-        elem.push_attribute((*key, *value));
+        push_attr(&mut elem, key, value);
     }
     writer
         .write_event(Event::Start(elem))
@@ -416,7 +451,7 @@ fn write_empty(
 ) -> Result<(), GgbError> {
     let mut elem = BytesStart::new(name);
     for (key, value) in attrs {
-        elem.push_attribute((*key, value.as_str()));
+        push_attr(&mut elem, key, value);
     }
     writer
         .write_event(Event::Empty(elem))
@@ -488,7 +523,7 @@ fn write_command(
     write_open(writer, "command", &[("name", name)])?;
     let mut elem = BytesStart::new("input");
     for (i, input) in inputs.iter().enumerate() {
-        elem.push_attribute((format!("a{i}").as_str(), *input));
+        push_attr(&mut elem, &format!("a{i}"), input);
     }
     writer
         .write_event(Event::Empty(elem))
@@ -496,7 +531,7 @@ fn write_command(
             detalle: GgbError::recorta(&e.to_string()),
         })?;
     let mut out = BytesStart::new("output");
-    out.push_attribute(("a0", output));
+    push_attr(&mut out, "a0", output);
     writer
         .write_event(Event::Empty(out))
         .map_err(|e| GgbError::XmlMalformado {
@@ -621,6 +656,173 @@ mod export_tests {
         assert_eq!(
             omitidos_resumen(&ExportReport::default(), &[], 3),
             "sin omitidos"
+        );
+    }
+
+    // --- Regresión de la auditoría de seguridad (rojo-hoy). ---
+
+    /// Exporta y descomprime `geogebra.xml` para inspeccionar el XML crudo.
+    fn export_xml(items: Vec<GgbExportItem>) -> (String, ExportReport) {
+        let (bytes, report) = export_ggb_bytes(&items).expect("exporta");
+        let cursor = std::io::Cursor::new(&bytes);
+        let mut zip = zip::ZipArchive::new(cursor).expect("zip legible");
+        let mut file = zip.by_name(crate::GGB_XML_NAME).expect("geogebra.xml");
+        let mut xml = String::new();
+        std::io::Read::read_to_string(&mut file, &mut xml).expect("lee xml");
+        (xml, report)
+    }
+
+    /// `true` si el XML parsea limpio con quick-xml sin eventos inyectados.
+    fn parsea_limpio(xml: &str) -> bool {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        let mut reader = Reader::from_reader(xml.as_bytes());
+        let mut buf = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => return true,
+                Ok(Event::Start(e) | Event::Empty(e)) => {
+                    let qname = e.name();
+                    let name: &str = qname.as_ref();
+                    if name == "ggbscript" || name == "script" {
+                        return false;
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => return false,
+            }
+            buf.clear();
+        }
+    }
+
+    #[test]
+    fn export_label_xml_injection_never_emits_raw_markup() {
+        // VULN 2: `label` crudo + `quick-xml` sin escapar atributos → XML
+        // corrupto o con nodos inyectados (`A"/><ggbscript>…`).
+        let hostile = "A\"/><ggbscript>alert(1)</ggbscript>";
+        let items = vec![
+            GgbExportItem::Point {
+                label: hostile.into(),
+                x: 1.0,
+                y: 2.0,
+            },
+            GgbExportItem::Point {
+                label: "B".into(),
+                x: 3.0,
+                y: 4.0,
+            },
+        ];
+        let (xml, report) = export_xml(items);
+        assert!(
+            report.omitidos.iter().any(|(label, _)| label == hostile),
+            "etiqueta hostil debe omitirse honesta: {:?}",
+            report.omitidos
+        );
+        assert!(
+            !xml.contains("ggbscript"),
+            "nunca markup crudo en el XML: {xml}"
+        );
+        assert!(parsea_limpio(&xml), "el XML debe parsear limpio: {xml}");
+        // Regla de oro: lo exportado debe re-importar.
+        let (bytes, _) = export_ggb_bytes(&[GgbExportItem::Point {
+            label: "B".into(),
+            x: 3.0,
+            y: 4.0,
+        }])
+        .expect("re-exporta");
+        let report = crate::import_ggb_bytes(&bytes).expect("re-importa");
+        assert!(
+            report.objetos.iter().any(|o| o.etiqueta == "B"),
+            "roundtrip de la etiqueta limpia: {:?}",
+            report.objetos
+        );
+    }
+
+    #[test]
+    fn export_writers_escape_attribute_values() {
+        // VULN 2 capa 2: TODO valor pasa por `quick_xml::escape::escape` antes
+        // de `push_attribute` (quick-xml 0.42 no lo hace: FIXME en events/mod.rs).
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+        use quick_xml::Writer;
+        // Nota: `\n`/`\t` crudos en atributos se normalizan a espacio al
+        // parsear (XML attribute-value); los valores reales del export no los
+        // contienen (charset estricto de etiquetas + literales numéricos).
+        let raw = "a\"b<c&d'e f";
+        let mut writer = Writer::new(Cursor::new(Vec::new()));
+        write_open(&mut writer, "element", &[("type", "point"), ("label", raw)])
+            .expect("write_open");
+        write_empty(&mut writer, "coords", &[("x", "1".to_string())]).expect("write_empty");
+        write_command(&mut writer, "Segment", &[raw, "(1, 2)"], raw).expect("write_command");
+        write_close(&mut writer, "element").expect("write_close");
+        let xml = String::from_utf8(writer.into_inner().into_inner()).expect("utf-8");
+        assert!(xml.contains("&quot;"), "comillas escapadas: {xml}");
+        assert!(xml.contains("&lt;"), "menor escapado: {xml}");
+        assert!(xml.contains("&amp;"), "ampersand escapado: {xml}");
+        assert!(!xml.contains("<c&d"), "nunca valor crudo: {xml}");
+
+        // El XML parsea limpio y los valores vuelven idénticos (sin pérdida).
+        let mut reader = Reader::from_reader(xml.as_bytes());
+        let mut buf = Vec::new();
+        let mut valores = Vec::new();
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Eof) => break,
+                Ok(Event::Start(e) | Event::Empty(e)) => {
+                    for attr in e.attributes() {
+                        let attr = attr.expect("attr");
+                        let value = attr
+                            .normalized_value(quick_xml::XmlVersion::default())
+                            .expect("des-escapa");
+                        if value.contains('b') || value.contains('c') {
+                            valores.push(value.into_owned());
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => panic!("XML malformado tras escapar: {error}"),
+            }
+            buf.clear();
+        }
+        assert!(
+            valores.iter().filter(|v| v.as_str() == raw).count() >= 2,
+            "idéntico tras escapar/des-escapar: {valores:?}"
+        );
+    }
+
+    #[test]
+    fn export_labels_renamed_by_import_are_omitted_honest() {
+        // VULN 3: `clean_label` aceptaba casi todo pero `sanitize_etiqueta`
+        // (import) reducía `A-B`/`A B` a `A_B` → colisión silenciosa de
+        // etiquetas distintas en una sola.
+        let items = vec![
+            GgbExportItem::Point {
+                label: "A-B".into(),
+                x: 1.0,
+                y: 1.0,
+            },
+            GgbExportItem::Point {
+                label: "A_B".into(),
+                x: 2.0,
+                y: 2.0,
+            },
+        ];
+        let (bytes, report) = export_ggb_bytes(&items).expect("exporta");
+        assert!(
+            report.omitidos.iter().any(|(label, _)| label == "A-B"),
+            "A-B se renombra al importar: debe omitirse con aviso honesto: {:?}",
+            report.omitidos
+        );
+        let reimport = crate::import_ggb_bytes(&bytes).expect("re-importa");
+        let etiquetas: Vec<&str> = reimport
+            .objetos
+            .iter()
+            .map(|o| o.etiqueta.as_str())
+            .collect();
+        assert_eq!(
+            etiquetas.iter().filter(|l| **l == "A_B").count(),
+            1,
+            "A-B y A_B no deben colisionar en una etiqueta: {etiquetas:?}"
         );
     }
 }

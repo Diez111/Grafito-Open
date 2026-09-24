@@ -362,9 +362,9 @@ pub fn classify_route(problem: &str) -> ModelRoute {
             let normalized = normalize_text(problem);
             let tokens = tokenize_words(&normalized);
             let hit = tokens.iter().any(|word| {
-                REASONING_HINTS.iter().any(|hint| {
-                    *word == **hint || word.starts_with(hint) || hint.starts_with(word.as_str())
-                })
+                REASONING_HINTS
+                    .iter()
+                    .any(|hint| *word == **hint || word.starts_with(hint))
             });
             if hit {
                 ModelRoute::Reasoner
@@ -468,6 +468,21 @@ mod tests {
         assert_eq!(
             classify_route("determinante de la matriz [[1,2],[3,4]]"),
             ModelRoute::Reasoner
+        );
+    }
+
+    #[test]
+    fn function_words_stay_on_the_fast_route() {
+        // Regresión A6: la tercera comparación `hint.starts_with(word)`
+        // matcheaba cualquier token prefijo de una pista: "de" es prefijo de
+        // demostra/demuestra/derive/deduci/differen… → toda oración en español
+        // con "de" que caía en `MathKind::General` ruteaba a `Reasoner`
+        // ("explicame esto de otra forma" → Reasoner). La ruta Fast moría para
+        // prosa trivial: más costo y latencia.
+        assert_eq!(classify_route("hola de nuevo"), ModelRoute::Fast);
+        assert_eq!(
+            classify_route("explicame esto de otra forma"),
+            ModelRoute::Fast
         );
     }
 }

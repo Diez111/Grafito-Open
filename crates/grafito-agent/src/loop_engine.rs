@@ -1,7 +1,7 @@
 //! Loop de agente acotado y su contrato con proveedores y despachadores.
 
 use crate::ledger::{JSpaceLedger, MAX_LEDGER_RENDER_BYTES};
-use crate::schema::{ToolCall, ToolResult, ToolSchema};
+use crate::schema::{ToolCall, ToolResult, ToolSchema, MAX_TOOL_CALLS_PER_TURN};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -294,7 +294,37 @@ where
                 });
                 accumulated_chars += message_chars(&assistant_msg);
                 messages.push(assistant_msg);
-                for call in &calls {
+                for (index, call) in calls.iter().enumerate() {
+                    // Presupuesto de tool_calls por turno (A5): los primeros
+                    // `MAX_TOOL_CALLS_PER_TURN` se ejecutan; el excedente NO se
+                    // despacha y queda anotado honesto. Cada `tool_call` del
+                    // mensaje assistant igual recibe su mensaje `tool` (el
+                    // protocolo OpenAI exige paridad id↔resultado): el
+                    // excedente lleva una nota de descarte, nunca silencio.
+                    if index >= MAX_TOOL_CALLS_PER_TURN {
+                        all_tools_ok = false;
+                        if let Some(tracked) = tracked.as_mut() {
+                            tracked.record_tool_outcome(
+                                &call.name,
+                                false,
+                                &format!(
+                                    "descartada: excede el tope de {MAX_TOOL_CALLS_PER_TURN} tool_calls por turno"
+                                ),
+                            );
+                            emit_ledger(&mut on_event, tracked);
+                        }
+                        let note = format!(
+                            "tool no ejecutada: descartada por presupuesto (máximo {MAX_TOOL_CALLS_PER_TURN} tool_calls por turno)"
+                        );
+                        let tool_msg = json!({
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": note,
+                        });
+                        accumulated_chars += message_chars(&tool_msg);
+                        messages.push(tool_msg);
+                        continue;
+                    }
                     on_event(AgentEvent::ToolStarted {
                         name: call.name.clone(),
                         args_summary: summarize_args(&call.arguments),
@@ -832,5 +862,85 @@ mod tests {
         assert_eq!(retry_backoff_ms(200, 6), 200 * 64);
         assert_eq!(retry_backoff_ms(200, 100), 200 * 64);
         assert_eq!(retry_backoff_ms(0, 3), 0);
+    }
+
+    #[test]
+    fn tool_calls_per_turn_are_capped_with_an_honest_note() {
+        // Regresión A5: `AgentChatResponse::ToolCalls { calls }` se despachaba
+        // ÍNTEGRO sin cap de cantidad (los límites de chars se chequean solo al
+        // inicio de cada turno). Un modelo buggy con 20 calls producía 20
+        // dispatches antes del próximo chequeo de presupuesto.
+        struct CountingDispatcher {
+            count: Mutex<usize>,
+        }
+        impl ToolDispatcher for CountingDispatcher {
+            fn dispatch(&self, call: &ToolCall) -> ToolResult {
+                let mut guard = self.count.lock().unwrap_or_else(|p| {
+                    log::warn!("lock poisoned");
+                    p.into_inner()
+                });
+                *guard += 1;
+                ToolResult::text(&call.id, true, "ok")
+            }
+        }
+        let calls: Vec<ToolCall> = (0..20)
+            .map(|index| ToolCall {
+                id: format!("call-{index}"),
+                name: "echo".into(),
+                arguments: json!({}),
+            })
+            .collect();
+        let completer = ScriptedCompleter {
+            responses: Mutex::new(vec![
+                AgentChatResponse::ToolCalls { calls },
+                AgentChatResponse::Text {
+                    content: "listo".into(),
+                    truncated: false,
+                },
+            ]),
+        };
+        let dispatcher = CountingDispatcher {
+            count: Mutex::new(0),
+        };
+        let ledger = crate::ledger::JSpaceLedger::with_task("probar", "cerrar");
+        let mut events = Vec::new();
+        let outcome = run_agent_with_ledger(
+            &completer,
+            &dispatcher,
+            "system",
+            &[user_message("hola")],
+            &tools(),
+            &AgentBudget::default(),
+            Some(&ledger),
+            &Cancellation::default(),
+            |event| events.push(event),
+        )
+        .expect("el loop corta en el tope, no aborta");
+        let dispatched = *dispatcher.count.lock().unwrap_or_else(|p| {
+            log::warn!("lock poisoned");
+            p.into_inner()
+        });
+        assert_eq!(
+            dispatched,
+            crate::schema::MAX_TOOL_CALLS_PER_TURN,
+            "se ejecutan solo los primeros N"
+        );
+        assert_eq!(outcome.tool_turns, 1);
+        assert!(
+            !outcome.verified,
+            "el excedente deja el turno sin verificar"
+        );
+        let ledger_render = events
+            .iter()
+            .filter_map(|event| match event {
+                AgentEvent::Ledger { render } => Some(render.clone()),
+                _ => None,
+            })
+            .next_back()
+            .expect("aviso en el ledger");
+        assert!(
+            ledger_render.contains("descartada"),
+            "aviso honesto del excedente: {ledger_render}"
+        );
     }
 }

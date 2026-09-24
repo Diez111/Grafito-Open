@@ -814,3 +814,112 @@ fn adversarial_parsear_rechaza_doctype_sin_zip() {
     let res = crate::parse::parsear(xml);
     assert!(res.is_err(), "parsear debe rechazar DOCTYPE directo");
 }
+
+// --- Regresión de la auditoría de seguridad (rojo-hoy). ---
+
+#[test]
+fn table_survives_a_stray_a0_numeric() {
+    // VULN 4: `row_from_label("A0")` → None + `?` abortaba TODA la tabla.
+    let xml = format!(
+        r#"{}<element type="numeric" label="A0"><value val="9"/></element><element type="numeric" label="A1"><value val="1"/></element><element type="numeric" label="B1"><value val="2"/></element><element type="numeric" label="A2"><value val="2"/></element><element type="numeric" label="B2"><value val="4"/></element>{}"#,
+        xml_header(),
+        xml_footer()
+    );
+    let rep = import_ggb_bytes(&ggb_with_xml(&xml)).expect("importa con A0 suelto");
+    assert!(
+        rep.tipos.contains_key("DataTable"),
+        "un A0 no debe descartar la DataTable de toda la hoja: {:?}",
+        rep.omitidos
+    );
+    assert!(
+        rep.tipos.contains_key("ScatterPlot"),
+        "ScatterPlot esperado junto a la DataTable"
+    );
+}
+
+#[test]
+fn expression_payload_cannot_inject_extra_commands() {
+    // VULN 5: `Function[{rhs}]` con `exp` crudo permite cerrar el comando y
+    // emitir `Delete[A]` (el llamador ejecuta `script()` línea por línea).
+    let xml = format!(
+        r#"{}<expression label="f" exp="x]; Delete[A]; Function[x" type="function"/>{}"#,
+        xml_header(),
+        xml_footer()
+    );
+    let rep = import_ggb_bytes(&ggb_with_xml(&xml)).expect("importa con payload");
+    for objeto in &rep.objetos {
+        assert!(
+            !objeto.comando.contains("Delete["),
+            "comando inyectado desde exp: {}",
+            objeto.comando
+        );
+        assert!(
+            !objeto.comando.contains(';'),
+            "segundo comando posible desde exp: {}",
+            objeto.comando
+        );
+        assert_eq!(
+            objeto.comando.matches('[').count(),
+            objeto.comando.matches(']').count(),
+            "corchetes desbalanceados = comando cerrado a la fuerza: {}",
+            objeto.comando
+        );
+    }
+}
+
+#[test]
+fn command_references_are_sanitized_before_emission() {
+    // VULN 5: `Angle[{a}, {b}, …]` insertaba atributos crudos del XML como
+    // referencias; una etiqueta con `]` cierra el comando.
+    let xml = format!(
+        "{}{}{}{}",
+        xml_header(),
+        r#"<element type="vector" label="s1"><coords x="1" y="0" z="1" w="1"/><startPoint x="0" y="0"/></element>"#,
+        r#"<element type="vector" label="s2]"><coords x="0" y="1" z="1" w="1"/><startPoint x="0" y="0"/></element>"#,
+        r#"<command name="Angle"><input a0="s1" a1="s2]"/><output a0="alpha"/></command>"#,
+    ) + &xml_footer();
+    let rep = import_ggb_bytes(&ggb_with_xml(&xml)).expect("importa con etiqueta hostil");
+    let angle = rep
+        .objetos
+        .iter()
+        .find(|o| o.tipo == "Angle")
+        .unwrap_or_else(|| panic!("Angle esperado: {:?}", rep.objetos));
+    assert_eq!(
+        angle.comando.matches('[').count(),
+        angle.comando.matches(']').count(),
+        "referencia cruda rompe el comando: {}",
+        angle.comando
+    );
+    assert!(
+        !angle.comando.contains(';'),
+        "referencia cruda permite inyectar comandos: {}",
+        angle.comando
+    );
+    for objeto in &rep.objetos {
+        assert_eq!(
+            objeto.comando.matches('[').count(),
+            objeto.comando.matches(']').count(),
+            "comando desbalanceado: {}",
+            objeto.comando
+        );
+    }
+}
+
+#[test]
+fn reject_lowercase_doctype_and_entity() {
+    // VULN 8: `rechazar_doctype` era case-sensitive (`<!DOCTYPE` literal):
+    // `<!doctype` pasaba el filtro de ambas copias (parse y zip_read).
+    for xml in [
+        r#"<?xml version="1.0"?><!doctype foo [<!entity xxe SYSTEM "file:///etc/passwd">]><geogebra><construction></construction></geogebra>"#,
+        r#"<?xml version="1.0"?><!DoCtYpE foo [<!EnTiTy xxe SYSTEM "file:///etc/passwd">]><geogebra><construction></construction></geogebra>"#,
+    ] {
+        assert!(
+            import_ggb_bytes(&ggb_with_xml(xml)).is_err(),
+            "DOCTYPE minúscula debe rechazarse igual: {xml}"
+        );
+        assert!(
+            crate::parse::parsear(xml.as_bytes()).is_err(),
+            "parsear directo también debe rechazarlo: {xml}"
+        );
+    }
+}

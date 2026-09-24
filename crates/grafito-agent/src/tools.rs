@@ -133,41 +133,38 @@ fn string_arg(call: &ToolCall, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Rechaza cualquier string >2000 bytes (recursivo en objetos/arrays).
+/// Rechaza cualquier string >2000 bytes (recursivo en objetos/arrays anidados:
+/// `{"a":[{"b":"<5000 bytes>"}]}` también cae, no solo el nivel plano).
 fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
     fn check(call_id: &str, key: &str, value: &Value) -> Option<ToolResult> {
-        if let Some(text) = value.as_str() {
-            if text.len() > MAX_ARG_BYTES {
-                return Some(ToolResult::text(
-                    call_id,
-                    false,
-                    ToolError::PresupuestoExcedido(format!(
-                        "el argumento '{key}' excede el límite de {MAX_ARG_BYTES} bytes (E_PRESUPUESTO)"
-                    ))
-                    .to_string(),
-                ));
-            }
-        } else if let Some(map) = value.as_object() {
-            for (k, v) in map {
-                if let Some(r) = check(call_id, k, v) {
-                    return Some(r);
+        match value {
+            Value::String(text) => {
+                if text.len() > MAX_ARG_BYTES {
+                    return Some(ToolResult::text(
+                        call_id,
+                        false,
+                        ToolError::PresupuestoExcedido(format!(
+                            "el argumento '{key}' excede el límite de {MAX_ARG_BYTES} bytes (E_PRESUPUESTO)"
+                        ))
+                        .to_string(),
+                    ));
                 }
             }
-        } else if let Some(arr) = value.as_array() {
-            for item in arr {
-                if let Some(text) = item.as_str() {
-                    if text.len() > MAX_ARG_BYTES {
-                        return Some(ToolResult::text(
-                            call_id,
-                            false,
-                            ToolError::PresupuestoExcedido(format!(
-                                "un elemento de '{key}' excede el límite de {MAX_ARG_BYTES} bytes (E_PRESUPUESTO)"
-                            ))
-                            .to_string(),
-                        ));
+            Value::Object(map) => {
+                for (nested_key, nested) in map {
+                    if let Some(r) = check(call_id, nested_key, nested) {
+                        return Some(r);
                     }
                 }
             }
+            Value::Array(items) => {
+                for item in items {
+                    if let Some(r) = check(call_id, key, item) {
+                        return Some(r);
+                    }
+                }
+            }
+            _ => {}
         }
         None
     }
@@ -3013,7 +3010,7 @@ pub fn get_curriculum_tool_schema() -> ToolSchema {
 pub fn suggest_next_tool_schema() -> ToolSchema {
     ToolSchema::new(
         "suggest_next",
-        "Sugiere el siguiente objetivo de aprendizaje usando el perfil pedagógico (mock puro ordenado por mastery; enlaza a LOs reales del currículum).",
+        "Sugiere el siguiente objetivo de aprendizaje desde un perfil MOCK determinista (ordenado por mastery, enlazado a LOs reales del currículum). NOTA honesta: esta hoja del DAG no lee el perfil pedagógico real del alumno (eso vive en grafito-profile / el consumidor); la sugerencia es un placeholder.",
         json!({
             "type": "object",
             "properties": {},
@@ -3098,6 +3095,28 @@ mod tests {
     fn safe_dispatch(name: &str, args: Value) -> ToolResult {
         let dispatcher = SafeGrafitoDispatcher;
         dispatcher.dispatch(&call("t1", name, args))
+    }
+
+    // — presupuesto de argumentos —
+    #[test]
+    fn reject_oversized_string_args_recurses_into_nested_arrays() {
+        // Regresión A7: `check` solo miraba `item.as_str()` en los arrays:
+        // `{"a":[{"b":"<5000 bytes>"}]}` evadía el filtro. Hoy inofensivo
+        // (los tools no leen anidamientos y `parse_tool_calls` capa el JSON),
+        // pero es una red de seguridad que fallaba ABIERTA si cambia cualquiera
+        // de las dos: ahora recursa en objetos y arrays anidados.
+        let big = "x".repeat(MAX_ARG_BYTES + 3_000);
+        let nested_obj = call("t1", "echo", json!({"a": [{"b": big}]}));
+        assert!(reject_oversized_string_args(&nested_obj).is_some());
+        let deep = call("t1", "echo", json!({"a": [[[{"b": big}]]]}));
+        assert!(reject_oversized_string_args(&deep).is_some());
+        let nested_list = call("t1", "echo", json!({"a": [[big]]}));
+        assert!(reject_oversized_string_args(&nested_list).is_some());
+        // Caso plano sigue rechazado y uno sano pasa.
+        let flat = call("t1", "echo", json!({"a": big}));
+        assert!(reject_oversized_string_args(&flat).is_some());
+        let ok = call("t1", "echo", json!({"a": [{"b": "chico"}]}));
+        assert!(reject_oversized_string_args(&ok).is_none());
     }
 
     // — evaluate_expr —

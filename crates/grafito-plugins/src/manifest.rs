@@ -86,6 +86,13 @@ fn default_engine_transport() -> String {
 }
 
 /// Límites de validación.
+///
+/// Cota anti-OOM del manifiesto completo: se rechaza antes de parsear y la
+/// lectura de disco va con `take` + `O_NOFOLLOW` (ver `registry::read_manifest_bounded`).
+pub const MAX_MANIFEST_BYTES: usize = 64 * 1024;
+/// Cota por sección coleccionable (`[[tools]]`, `[[commands]]`, `[[scenes]]`,
+/// `instructions.files`, `engine.command`, `engine.capabilities`).
+pub const MAX_MANIFEST_SECTION_ENTRIES: usize = 1024;
 pub const MAX_PLUGIN_ID_CHARS: usize = 64;
 pub const MAX_PLUGIN_NAME_CHARS: usize = 120;
 pub const MAX_PLUGIN_DESCRIPTION_CHARS: usize = 512;

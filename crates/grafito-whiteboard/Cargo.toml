@@ -10,6 +10,10 @@ description = "Modelo puro de pizarra de dibujo libre (estilo Excalidraw) para G
 
 [dependencies]
 serde = { workspace = true }
+log.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
 
 [lints]
 workspace = true

@@ -41,16 +41,18 @@ pub mod transport;
 
 pub use crdt::{
     CrdtEntry, CrdtId, CrdtSiteId, HlcTimestamp, WhiteboardCrdt, MAX_CRDT_ENTRIES,
-    MAX_CRDT_VALUE_BYTES,
+    MAX_CRDT_VALUE_BYTES, MAX_HLC_CLOCK_SKEW_SECS, MAX_HLC_WALL_SECS,
 };
 #[cfg(feature = "aula-iroh")]
 pub use iroh_transport::{
-    AulaTicket, IrohTransport, AULA_ALPN, IROH_CONNECT_TIMEOUT, IROH_POLL_TIMEOUT,
-    IROH_SEND_TIMEOUT,
+    derive_admission_token, AulaTicket, IrohTransport, ADMISSION_HKDF_INFO, ADMISSION_TOKEN_LEN,
+    AULA_ALPN, AULA_HANDSHAKE_VERSION, IROH_ADMISSION_TIMEOUT, IROH_CONNECT_TIMEOUT,
+    IROH_POLL_TIMEOUT, IROH_SEND_TIMEOUT,
 };
 pub use offline::{
     decode_persist, OfflineEnvelope, OfflineOutbox, PersistLoad, MAX_OFFLINE_ATTEMPTS,
     MAX_OFFLINE_BACKOFF_SECS, MAX_OFFLINE_BODY_BYTES, MAX_OFFLINE_PERSIST_BYTES, MAX_OFFLINE_QUEUE,
+    MAX_OFFLINE_RETRY_EPOCH_SECS,
 };
 pub use session::{
     ClassroomCode, ClassroomError, ClassroomPhase, ClassroomSession, CodeTtlSecs, LearnerName,

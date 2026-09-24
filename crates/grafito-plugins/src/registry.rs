@@ -61,14 +61,28 @@ impl PluginRegistry {
             collect_manifests(dir, 0, &mut candidates);
         }
         let mut seen_ids = std::collections::HashSet::new();
-        let plugins = candidates
-            .into_iter()
-            .filter(|path| {
-                let id = manifest_id_of(path).unwrap_or_default();
-                seen_ids.insert(id)
-            })
-            .map(|path| load_plugin(&path, ctx))
-            .collect();
+        let mut plugins = Vec::new();
+        for path in candidates {
+            // VULN 7: UNA sola lectura compartida entre la deduplicación por id
+            // y la carga (antes eran dos `fs::read_to_string`: un swap de
+            // archivo entre ambas rompía la dedup). La lectura va con
+            // `O_NOFOLLOW` y cap de bytes: un manifiesto gigante o un FIFO no
+            // tumban el arranque.
+            let raw = match read_manifest_bounded(&path) {
+                Ok(raw) => raw,
+                Err(error) => {
+                    if seen_ids.insert(String::new()) {
+                        plugins.push(unreadable_plugin(&path, error));
+                    }
+                    continue;
+                }
+            };
+            let id = manifest_id_of(&raw).unwrap_or_default();
+            if !seen_ids.insert(id) {
+                continue;
+            }
+            plugins.push(load_plugin(&path, &raw, ctx));
+        }
         Self { plugins }
     }
 
@@ -254,12 +268,11 @@ impl PluginRegistry {
                 block.push_str(&text);
                 block.push('\n');
             }
-            if block.chars().count() > section.budget_bytes {
-                block = block
-                    .chars()
-                    .take(section.budget_bytes.saturating_sub(1))
-                    .collect::<String>();
-                block.push('…');
+            // VULN 8: el nombre dice bytes → se mide en bytes (antes
+            // `chars().count()`, y UTF-8 multibyte pasaba hasta 4× el
+            // presupuesto rumbo al prompt).
+            if block.len() > section.budget_bytes {
+                block = truncate_bytes(&block, section.budget_bytes);
             }
             if !block.trim().is_empty() {
                 output.push_str(&format!("[{}]\n", plugin.manifest.plugin.name));
@@ -267,12 +280,10 @@ impl PluginRegistry {
                 output.push('\n');
             }
         }
-        if output.chars().count() > max_bytes {
-            output = output
-                .chars()
-                .take(max_bytes.saturating_sub(30))
-                .collect::<String>();
-            output.push_str("\n[instrucciones truncadas]\n");
+        const TRUNCATION_MARKER: &str = "\n[instrucciones truncadas]\n";
+        if output.len() > max_bytes {
+            output = truncate_bytes(&output, max_bytes.saturating_sub(TRUNCATION_MARKER.len()));
+            output.push_str(TRUNCATION_MARKER);
         }
         output
     }
@@ -351,30 +362,85 @@ fn collect_manifests(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Lee el id de un manifiesto sin cargar el plugin completo (para deduplicar).
-fn manifest_id_of(path: &Path) -> Option<String> {
-    let raw = fs::read_to_string(path).ok()?;
-    parse_manifest(&raw).ok().map(|manifest| manifest.plugin.id)
+/// Lee el manifiesto con `O_NOFOLLOW` (anti-swap/FIFO) y cota de bytes
+/// (anti-OOM). Compartida entre la dedup por id y la carga (VULN 7).
+fn read_manifest_bounded(path: &Path) -> Result<String, String> {
+    #[cfg(unix)]
+    let fh = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+            .map_err(|error| format!("cannot read manifest (O_NOFOLLOW): {error}"))?
+    };
+    #[cfg(not(unix))]
+    let fh = {
+        match fs::symlink_metadata(path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err("manifest is a symlink (rejected)".to_string());
+            }
+            Ok(meta) if !meta.is_file() => {
+                return Err("manifest is not a regular file".to_string());
+            }
+            Err(error) => return Err(format!("manifest metadata failed: {error}")),
+            _ => {}
+        }
+        std::fs::File::open(path).map_err(|error| format!("cannot read manifest: {error}"))?
+    };
+    // Fail-closed por metadata (corta antes de leer 100 MB) + lectura acotada
+    // igual por si el archivo cambia después del stat (TOCTOU).
+    if let Ok(meta) = fh.metadata() {
+        if meta.len() > MAX_MANIFEST_BYTES as u64 {
+            return Err(format!(
+                "plugin manifest excede {MAX_MANIFEST_BYTES} bytes ({} bytes)",
+                meta.len()
+            ));
+        }
+    }
+    use std::io::Read as _;
+    let mut limited = fh.take(MAX_MANIFEST_BYTES as u64 + 1);
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve(MAX_MANIFEST_BYTES + 1)
+        .map_err(|_| "cannot reserve memory for manifest".to_string())?;
+    limited
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read manifest: {error}"))?;
+    if bytes.len() > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "plugin manifest excede {MAX_MANIFEST_BYTES} bytes ({} bytes)",
+            bytes.len()
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| "manifest is not valid UTF-8".to_string())
 }
 
-fn load_plugin(path: &Path, ctx: &ValidationContext) -> LoadedPlugin {
+/// Plugin sin manifiesto legible: queda visible con su error (nunca silencio).
+fn unreadable_plugin(path: &Path, error: String) -> LoadedPlugin {
+    LoadedPlugin {
+        manifest: empty_manifest(),
+        dir: path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from(".")),
+        enabled: false,
+        error: Some(error),
+        fingerprint: 0,
+    }
+}
+
+/// Id del manifiesto ya leído (para deduplicar sin releer el archivo).
+fn manifest_id_of(raw: &str) -> Option<String> {
+    parse_manifest(raw).ok().map(|manifest| manifest.plugin.id)
+}
+
+fn load_plugin(path: &Path, raw: &str, ctx: &ValidationContext) -> LoadedPlugin {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let raw = match fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            return LoadedPlugin {
-                manifest: empty_manifest(),
-                dir: dir.clone(),
-                enabled: false,
-                error: Some(format!("cannot read manifest: {error}")),
-                fingerprint: 0,
-            }
-        }
-    };
-    let manifest = match parse_manifest(&raw) {
+    let manifest = match parse_manifest(raw) {
         Ok(manifest) => manifest,
         Err(error) => {
             return LoadedPlugin {
@@ -386,7 +452,7 @@ fn load_plugin(path: &Path, ctx: &ValidationContext) -> LoadedPlugin {
             }
         }
     };
-    let fingerprint = simple_fingerprint(&raw);
+    let fingerprint = simple_fingerprint(raw);
     match validate_manifest(&manifest, ctx) {
         Ok(()) => {
             let enabled = manifest.plugin.activation != "manual";
@@ -408,10 +474,75 @@ fn load_plugin(path: &Path, ctx: &ValidationContext) -> LoadedPlugin {
     }
 }
 
-/// Parsea el TOML del manifiesto.
+/// Parsea el TOML del manifiesto con cotas anti-OOM (VULN 7).
+///
+/// El límite de bytes del texto completo y el de entradas por sección evitan
+/// que un `grafito-plugin.toml` hostil agote memoria en el arranque. La
+/// lectura de disco va acotada por separado en [`read_manifest_bounded`].
 pub fn parse_manifest(raw: &str) -> Result<PluginManifest, String> {
-    toml::from_str::<PluginManifest>(raw)
-        .map_err(|error| format!("invalid plugin manifest: {error}"))
+    if raw.len() > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "plugin manifest excede {MAX_MANIFEST_BYTES} bytes ({} bytes)",
+            raw.len()
+        ));
+    }
+    let manifest = toml::from_str::<PluginManifest>(raw)
+        .map_err(|error| format!("invalid plugin manifest: {error}"))?;
+    let sections: [(&str, usize); 6] = [
+        ("tools", manifest.tools.len()),
+        ("commands", manifest.commands.len()),
+        ("scenes", manifest.scenes.len()),
+        (
+            "instructions.files",
+            manifest
+                .instructions
+                .as_ref()
+                .map(|section| section.files.len())
+                .unwrap_or(0),
+        ),
+        (
+            "engine.command",
+            manifest
+                .engine
+                .as_ref()
+                .map(|engine| engine.command.len())
+                .unwrap_or(0),
+        ),
+        (
+            "engine.capabilities",
+            manifest
+                .engine
+                .as_ref()
+                .map(|engine| engine.capabilities.len())
+                .unwrap_or(0),
+        ),
+    ];
+    for (name, count) in sections {
+        if count > MAX_MANIFEST_SECTION_ENTRIES {
+            return Err(format!(
+                "plugin manifest section '{name}' exceeds {MAX_MANIFEST_SECTION_ENTRIES} entries"
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+/// Trunca a `max_bytes` **bytes** respetando fronteras UTF-8 y marcando el
+/// corte con `…` honesto (si entra: reserva 3 bytes para la marca).
+fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let marca = if max_bytes > 3 { 3 } else { 0 };
+    let mut end = max_bytes - marca;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = text[..end].to_string();
+    if marca > 0 {
+        out.push('…');
+    }
+    out
 }
 
 fn empty_manifest() -> PluginManifest {
@@ -753,6 +884,147 @@ budget_bytes = 4096
         assert!(
             !instructions.contains(&"a".repeat(100)),
             "oversized file > MAX_INSTRUCTION_FILE_BYTES should be rejected"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn manifest_sections_are_capped() {
+        // VULN 7: `parse_manifest` no limitaba la cantidad de entradas por
+        // sección (10M de [[tools]] → OOM en el arranque).
+        for seccion in ["tools", "commands", "scenes"] {
+            let mut raw = String::from(
+                r#"[plugin]
+id = "huge"
+name = "Huge"
+version = "1.0.0"
+category = "skills"
+"#,
+            );
+            let campo = match seccion {
+                "tools" => "id",
+                "commands" => "id",
+                _ => "template",
+            };
+            for i in 0..(MAX_MANIFEST_SECTION_ENTRIES + 1) {
+                raw.push_str(&format!("[[{seccion}]]\n{campo} = \"e{i}\"\n"));
+            }
+            assert!(
+                parse_manifest(&raw).is_err(),
+                "sección [{seccion}] con >{MAX_MANIFEST_SECTION_ENTRIES} entradas debe rechazarse"
+            );
+        }
+        assert_eq!(
+            MAX_MANIFEST_BYTES,
+            64 * 1024,
+            "cota de manifiesto documentada"
+        );
+    }
+
+    #[test]
+    fn manifest_over_64kib_is_rejected() {
+        // VULN 7: `fs::read_to_string` sin cap → OOM con un manifiesto gigante.
+        let dir = std::env::temp_dir().join("grafito_plugins_oversized_manifest_fixture");
+        let plugin_dir = dir.join("big");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        let mut raw = String::from(
+            r#"[plugin]
+id = "big"
+name = "Big"
+version = "1.0.0"
+category = "skills"
+description = ""#,
+        );
+        raw.push_str(&"a".repeat(MAX_MANIFEST_BYTES * 2));
+        raw.push_str("\"\n");
+        fs::write(plugin_dir.join(PLUGIN_MANIFEST_FILENAME), &raw).unwrap();
+
+        let registry = PluginRegistry::load(&dir, &ctx());
+        assert_eq!(registry.plugins.len(), 1);
+        let error = registry.plugins[0]
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("manifiesto >{MAX_MANIFEST_BYTES} bytes debe rechazarse"));
+        assert!(
+            error.contains(&MAX_MANIFEST_BYTES.to_string()),
+            "error honesto con la cota violada, fue: {error}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn manifest_of_100mb_is_rejected() {
+        // VULN 7: un `grafito-plugin.toml` de 100 MB no debe siquiera cargarse
+        // en memoria (lectura con cap + O_NOFOLLOW), ni colgar el arranque.
+        let dir = std::env::temp_dir().join("grafito_plugins_100mb_manifest_fixture");
+        let plugin_dir = dir.join("huge");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        let path = plugin_dir.join(PLUGIN_MANIFEST_FILENAME);
+        {
+            use std::io::Write as _;
+            let mut file = fs::File::create(&path).unwrap();
+            file.write_all(
+                b"[plugin]\nid = \"huge\"\nname = \"Huge\"\nversion = \"1.0.0\"\ncategory = \"skills\"\ndescription = \"",
+            )
+            .unwrap();
+            let chunk = vec![b'a'; 1 << 20];
+            for _ in 0..100 {
+                file.write_all(&chunk).unwrap();
+            }
+            file.write_all(b"\"\n").unwrap();
+        }
+        assert!(
+            fs::metadata(&path).unwrap().len() > 100_000_000,
+            "el fixture debe pesar >100 MB"
+        );
+
+        let registry = PluginRegistry::load(&dir, &ctx());
+        assert_eq!(registry.plugins.len(), 1);
+        let error = registry.plugins[0]
+            .error
+            .clone()
+            .unwrap_or_else(|| panic!("manifiesto de 100 MB debe rechazarse"));
+        assert!(
+            error.contains(&MAX_MANIFEST_BYTES.to_string()),
+            "error honesto con la cota violada, fue: {error}"
+        );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn instructions_budget_is_measured_in_bytes_not_chars() {
+        // VULN 8: `block.chars().count() > section.budget_bytes` medía chars
+        // donde el nombre dice bytes → UTF-8 multibyte pasaba 3× el presupuesto.
+        let dir = std::env::temp_dir().join("grafito_plugins_bytes_budget_fixture");
+        let plugin_dir = dir.join("bytes");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(PLUGIN_MANIFEST_FILENAME),
+            r#"[plugin]
+id = "bytes"
+name = "Bytes"
+version = "1.0.0"
+category = "skills"
+
+[instructions]
+files = ["intro.md"]
+budget_bytes = 4
+"#,
+        )
+        .unwrap();
+        // 3 chars multibyte = 6 bytes: supera 4 bytes pero NO 4 chars.
+        fs::write(plugin_dir.join("intro.md"), "áéí").unwrap();
+
+        let registry = PluginRegistry::load(&dir, &ctx());
+        let instructions = registry.instructions_bounded(256);
+        assert!(
+            !instructions.contains("áéí"),
+            "el presupuesto debe medirse en bytes: {instructions:?}"
+        );
+        assert!(
+            instructions.len() <= 64,
+            "salida acotada en bytes: {} bytes",
+            instructions.len()
         );
         fs::remove_dir_all(&dir).unwrap();
     }

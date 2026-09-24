@@ -61,7 +61,8 @@ impl JSpaceLedger {
         Ok(())
     }
 
-    /// Renderiza el ledger en texto plano, truncado a un presupuesto de bytes.
+    /// Renderiza el ledger en texto plano, truncado a un presupuesto de bytes
+    /// (lo que paga el prompt), cortando en frontera de char y con `…` final.
     pub fn render_bounded(&self, max_bytes: usize) -> String {
         let max_bytes = max_bytes.min(MAX_LEDGER_RENDER_BYTES);
         let mut lines = Vec::new();
@@ -74,15 +75,8 @@ impl JSpaceLedger {
         if !self.next.trim().is_empty() {
             lines.push(format!("Next: {}", self.next.trim()));
         }
-        let mut render = lines.join("\n");
-        if render.chars().count() > max_bytes {
-            render = render
-                .chars()
-                .take(max_bytes.saturating_sub(1))
-                .collect::<String>();
-            render.push('…');
-        }
-        render
+        let render = lines.join("\n");
+        truncate_bytes(&render, max_bytes)
     }
 
     /// Devuelve si quedan problemas abiertos sin resolver.
@@ -175,6 +169,31 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
         + "…"
 }
 
+/// Trunca a `max_bytes` BYTES reales (lo que paga el prompt), cortando en la
+/// frontera de char más larga que entre y dejando `…` (3 bytes) si hubo recorte.
+fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    const ELLIPSIS: char = '…';
+    if max_bytes < ELLIPSIS.len_utf8() {
+        // Presupuesto más chico que el elipsis: corte seco en frontera de char.
+        let mut cut = max_bytes;
+        while cut > 0 && !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        return text[..cut].to_string();
+    }
+    let budget = max_bytes - ELLIPSIS.len_utf8();
+    let mut cut = budget;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = text[..cut].to_string();
+    out.push(ELLIPSIS);
+    out
+}
+
 fn push_ledger_lines(lines: &mut Vec<String>, label: &str, items: &[String]) {
     if items.is_empty() {
         return;
@@ -252,5 +271,19 @@ mod tests {
         let loaded = JSpaceLedger::load_from_file(&path).expect("load ledger");
         assert_eq!(loaded, ledger);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn render_bounded_is_limited_in_bytes() {
+        // Regresión A8: `render_bounded` comparaba `chars().count()` contra
+        // `max_bytes` (chars vs bytes): un render multibyte podía exceder el
+        // presupuesto de BYTES que paga el prompt.
+        let mut ledger = JSpaceLedger::with_task("g", "n");
+        ledger.goal = "ñ".repeat(MAX_LEDGER_GOAL_CHARS);
+        let render = ledger.render_bounded(MAX_LEDGER_RENDER_BYTES);
+        assert!(render.len() <= MAX_LEDGER_RENDER_BYTES);
+        let small = ledger.render_bounded(64);
+        assert!(small.len() <= 64, "son {} bytes", small.len());
+        assert!(small.ends_with('…'));
     }
 }

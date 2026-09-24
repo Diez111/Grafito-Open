@@ -2732,9 +2732,11 @@ name = "grafito-classroom"
 version = "1.2.1"
 dependencies = [
  "grafito-profile",
+ "hkdf",
  "iroh",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -2917,7 +2919,9 @@ dependencies = [
 name = "grafito-whiteboard"
 version = "1.2.1"
 dependencies = [
+ "log",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

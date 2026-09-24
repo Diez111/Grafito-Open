@@ -14,6 +14,12 @@
 //! PII siempre local: valores acotados a 2048 bytes, entradas a 5000
 //! (igual que roster), tombstones explícitos con `compact_tombstones`.
 //! Sin red: `merge` es en memoria entre dos réplicas locales.
+//!
+//! Borde hostil (con P2P encima, `merge`/`upsert_remote`/JSON son el canal de
+//! inyección): TODO lo entrante pasa por `validate_crdt_value` + techo de
+//! reloj (`MAX_HLC_CLOCK_SKEW_SECS`) y `upsert_remote`/`merge` rechazan/saltean
+//! `ts.site == self.site` (nadie se suplanta a sí mismo sin autenticar).
+//! `Deserialize` es estricto vía `try_from` (valores, `wall` y cap de entradas).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -24,6 +30,14 @@ use crate::session::ClassroomError;
 pub const MAX_CRDT_ENTRIES: usize = 5_000;
 /// Tope por valor de pizarra (igual que `MAX_MESSAGE_BYTES`).
 pub const MAX_CRDT_VALUE_BYTES: usize = 2_048;
+/// Cota ABSOLUTA de `HlcTimestamp::wall` (año 3000, reloj de pared en secs).
+/// `u64::MAX` u otros forzados jamás representan un reloj real: se rechazan.
+pub const MAX_HLC_WALL_SECS: u64 = 32_503_680_000;
+/// Techo de desfase de reloj admitido en escrituras remotas: `ts.wall` puede
+/// aventajar al `now` del caller como mucho estos segundos (5 min). Un `wall`
+/// futuro más allá de este techo dejaría los objetos locales indeletables
+/// (`remove` compara `existing.ts >= ts`): por eso se corta acá.
+pub const MAX_HLC_CLOCK_SKEW_SECS: u64 = 300;
 
 /// Sitio/replica: newtype `u16` (0..=65535, el QR/loopback usa `0` por default).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -103,7 +117,11 @@ impl HlcTimestamp {
 }
 
 /// Entrada de pizarra: valor + LWW + tombstone.
+///
+/// `Deserialize` es estricto (vía `try_from`): valor acotado sin controles y
+/// `ts.wall` dentro de `MAX_HLC_WALL_SECS`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCrdtEntry")]
 pub struct CrdtEntry {
     /// Contenido (texto/JSON corto, `<= MAX_CRDT_VALUE_BYTES` bytes).
     pub value: String,
@@ -113,15 +131,68 @@ pub struct CrdtEntry {
     pub deleted: bool,
 }
 
+/// Forma cruda entrante de una entrada (se revalida en `try_from`).
+#[derive(Debug, Deserialize)]
+struct RawCrdtEntry {
+    value: String,
+    ts: HlcTimestamp,
+    deleted: bool,
+}
+
+impl TryFrom<RawCrdtEntry> for CrdtEntry {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawCrdtEntry) -> Result<Self, Self::Error> {
+        validate_crdt_value(&raw.value)?;
+        if raw.ts.wall > MAX_HLC_WALL_SECS {
+            return Err(ClassroomError::InvalidMessage(format!(
+                "ts.wall {} excede {MAX_HLC_WALL_SECS}",
+                raw.ts.wall
+            )));
+        }
+        Ok(Self {
+            value: raw.value,
+            ts: raw.ts,
+            deleted: raw.deleted,
+        })
+    }
+}
+
 /// Pizarra CRDT en memoria (una réplica local).
 ///
 /// `BTreeMap` para orden determinista (igual que roster). Sin red: dos réplicas
-/// se fusionan con [`Self::merge`] en memoria.
+/// se fusionan con [`Self::merge`] en memoria. `Deserialize` es estricto
+/// (vía `try_from`): cap `MAX_CRDT_ENTRIES` + entradas ya validadas.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(try_from = "RawWhiteboardCrdt")]
 pub struct WhiteboardCrdt {
     site: u16,
     counter: u64,
     entries: BTreeMap<CrdtId, CrdtEntry>,
+}
+
+/// Forma cruda entrante de una réplica (se revalida en `try_from`).
+#[derive(Debug, Deserialize)]
+struct RawWhiteboardCrdt {
+    site: u16,
+    counter: u64,
+    #[serde(default)]
+    entries: BTreeMap<CrdtId, CrdtEntry>,
+}
+
+impl TryFrom<RawWhiteboardCrdt> for WhiteboardCrdt {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawWhiteboardCrdt) -> Result<Self, Self::Error> {
+        if raw.entries.len() > MAX_CRDT_ENTRIES {
+            return Err(ClassroomError::StorageFull { what: "Crdt" });
+        }
+        Ok(Self {
+            site: raw.site,
+            counter: raw.counter,
+            entries: raw.entries,
+        })
+    }
 }
 
 impl WhiteboardCrdt {
@@ -225,13 +296,26 @@ impl WhiteboardCrdt {
     /// Retorna `Ok(true)` si se aplicó (nuevo o más reciente), `Ok(false)` si
     /// el local ya era más reciente (stale honesto). `Err` si valor inválido
     /// o almacén lleno para IDs nuevos.
+    ///
+    /// Anti-forja (el remoto no es de confianza):
+    /// - `ts.site == self.site` → `Err`: nadie se suplanta a esta réplica sin
+    ///   autenticar (con P2P encima, forzar `site` propio ganaría LWW "gratis");
+    /// - `ts.wall > now + MAX_HLC_CLOCK_SKEW_SECS` (o `> MAX_HLC_WALL_SECS`)
+    ///   → `Err`: sin techo, un `wall` arbitrario gana LWW para siempre y deja
+    ///   los objetos locales indeletables (`remove` compara `existing.ts >= ts`).
+    ///   Con el techo, el desfase queda acotado a la ventana de skew.
+    ///
+    /// `now` es el reloj de pared del caller (secs), mismo contrato que
+    /// [`Self::insert_local`]/[`Self::remove`].
     pub fn upsert_remote(
         &mut self,
         id: CrdtId,
         value: &str,
         ts: HlcTimestamp,
+        now: u64,
     ) -> Result<bool, ClassroomError> {
         validate_crdt_value(value)?;
+        validate_remote_ts(ts, self.site, now)?;
         match self.entries.get(&id) {
             Some(existing) if existing.ts >= ts => Ok(false),
             Some(_) => {
@@ -286,40 +370,57 @@ impl WhiteboardCrdt {
     /// Fusiona `other` en `self` con LWW por entrada (en memoria, sin red).
     ///
     /// Retorna cuántas entradas se aplicaron (nuevas o más recientes).
-    /// Conmutativa e idempotente sobre el set vivo (testeado): el orden de
-    /// `merge` no cambia el resultado final si los `ts` son fijos.
-    /// Si el almacén está lleno, los IDs nuevos se saltean honestamente
-    /// (no se pierde lo ya guardado; el conteo solo cuenta aplicados).
-    pub fn merge(&mut self, other: &Self) -> usize {
+    ///
+    /// Réplica remota = hostil hasta demostrar lo contrario; cada entrada pasa
+    /// por `validate_crdt_value` + [`validate_remote_ts`] y las que faltan se
+    /// saltean honestamente (el conteo solo cuenta aplicadas). Entradas con
+    /// `ts.site == self.site` también se saltean (nadie suplanta a esta
+    /// réplica sin autenticar; un fork local debe reclamar un `site` propio).
+    ///
+    /// Conmutativa e idempotente sobre el set vivo (testeado), incluso con el
+    /// almacén lleno: se aplica LWW sin tope y al final se recorta a los
+    /// `MAX_CRDT_ENTRIES` más recientes `(ts, id)` — una función determinista
+    /// del conjunto resultante, así el orden de fusión no decide qué queda.
+    /// Limitación honesta: un recorte puede descartar tombstones antiguos
+    /// (igual que [`Self::compact_tombstones`]: llamar solo cuando el delete
+    /// ya no volverá).
+    pub fn merge(&mut self, other: &Self, now: u64) -> usize {
         let mut applied = 0_usize;
         for (id, remote) in &other.entries {
+            if validate_crdt_value(&remote.value).is_err() {
+                continue;
+            }
+            if validate_remote_ts(remote.ts, self.site, now).is_err() {
+                continue;
+            }
             match self.entries.get(id) {
                 Some(local) if local.ts >= remote.ts => {}
-                Some(_) => {
-                    if let Some(slot) = self.entries.get_mut(id) {
-                        *slot = remote.clone();
-                        applied = applied.saturating_add(1);
-                    }
-                }
-                None => {
-                    if self.entries.len() >= MAX_CRDT_ENTRIES {
-                        continue;
-                    }
+                _ => {
                     self.entries.insert(*id, remote.clone());
                     applied = applied.saturating_add(1);
                 }
             }
         }
-        // Avanza el contador para que futuros `ts` locales superen a los vistos
-        // (HLC mínimo: max local/remoto por wall igual). Sin reloj perfecto,
-        // basta con no retroceder: si el remoto trae `counter` mayor con el
-        // mismo `wall`, lo adoptamos para evitar empates eternos.
-        for remote in other.entries.values() {
-            if remote.ts.site == self.site && remote.ts.counter > self.counter {
-                self.counter = remote.ts.counter;
+        self.trim_to_capacity();
+        applied
+    }
+
+    /// Recorta a `MAX_CRDT_ENTRIES` conservando las entradas más recientes
+    /// `(ts, id)` (determinista: el resultado no depende del orden de fusión).
+    fn trim_to_capacity(&mut self) {
+        while self.entries.len() > MAX_CRDT_ENTRIES {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(id, entry)| (entry.ts, **id))
+                .map(|(id, _)| *id);
+            match oldest {
+                Some(id) => {
+                    self.entries.remove(&id);
+                }
+                None => break,
             }
         }
-        applied
     }
 
     /// Compacta tombstones (los elimina). Retorna cuántos se quitaron.
@@ -347,6 +448,30 @@ fn validate_crdt_value(value: &str) -> Result<(), ClassroomError> {
         return Err(ClassroomError::InvalidMessage(
             "valor CRDT con caracteres de control".to_string(),
         ));
+    }
+    Ok(())
+}
+
+/// Validación de un timestamp remoto (hostil hasta demostrar lo contrario):
+/// sin suplantación de `site` propio y con `wall` dentro del techo de reloj.
+fn validate_remote_ts(ts: HlcTimestamp, own_site: u16, now: u64) -> Result<(), ClassroomError> {
+    if ts.site == own_site {
+        return Err(ClassroomError::InvalidMessage(
+            "ts.site remoto suplanta a esta réplica".to_string(),
+        ));
+    }
+    if ts.wall > MAX_HLC_WALL_SECS {
+        return Err(ClassroomError::InvalidMessage(format!(
+            "ts.wall {} excede {MAX_HLC_WALL_SECS}",
+            ts.wall
+        )));
+    }
+    let ceiling = now.saturating_add(MAX_HLC_CLOCK_SKEW_SECS);
+    if ts.wall > ceiling {
+        return Err(ClassroomError::InvalidMessage(format!(
+            "ts.wall {} desborda el techo de reloj {ceiling}",
+            ts.wall
+        )));
     }
     Ok(())
 }
@@ -385,12 +510,14 @@ mod tests {
         let id = board.insert_local("v1", 100).expect("insert");
         let old_ts = HlcTimestamp::new(50, 1, 2);
         let applied_old = board
-            .upsert_remote(id, "viejo", old_ts)
+            .upsert_remote(id, "viejo", old_ts, 100)
             .expect("upsert viejo");
         assert!(!applied_old);
         assert_eq!(board.get(&id), Some("v1"));
         let new_ts = HlcTimestamp::new(200, 99, 2);
-        let applied_new = board.upsert_remote(id, "v2", new_ts).expect("upsert nuevo");
+        let applied_new = board
+            .upsert_remote(id, "v2", new_ts, 200)
+            .expect("upsert nuevo");
         assert!(applied_new);
         assert_eq!(board.get(&id), Some("v2"));
     }
@@ -405,7 +532,9 @@ mod tests {
         assert_eq!(board.len_total(), 1);
         // Escritura más vieja no revive al borrado.
         let stale = HlcTimestamp::new(5, 1, 2);
-        assert!(!board.upsert_remote(id, "revive", stale).expect("stale"));
+        assert!(!board
+            .upsert_remote(id, "revive", stale, 100)
+            .expect("stale"));
         assert_eq!(board.get(&id), None);
         // Compactar elimina el tombstone.
         assert_eq!(board.compact_tombstones(), 1);
@@ -429,39 +558,39 @@ mod tests {
         // Merge cruzado en ambos órdenes sobre clones frescos.
         let mut ab = a.clone();
         let mut ba = b.clone();
-        let n1 = ab.merge(&b);
-        let n2 = ba.merge(&a);
+        let n1 = ab.merge(&b, 100);
+        let n2 = ba.merge(&a, 100);
         assert_eq!(n1, 1);
         assert_eq!(n2, 1);
         assert_eq!(ab.live_sorted(), ba.live_sorted());
         assert!(ab.get(&id_a).is_some());
         assert!(ab.get(&id_b).is_some());
         // Idempotente: segunda fusión no aplica nada.
-        assert_eq!(ab.merge(&b), 0);
-        assert_eq!(ba.merge(&a), 0);
+        assert_eq!(ab.merge(&b, 100), 0);
+        assert_eq!(ba.merge(&a, 100), 0);
     }
 
     #[test]
     fn merge_lww_conflict_resolves_to_newest() {
+        // Escrituras remotas legítimas: `ts.site` DISTINTO del propio (nadie
+        // se suplanta a sí mismo — ver `upsert_remote_rejects_own_site...`).
         let mut a = WhiteboardCrdt::new(1);
         let id = a.insert_local("base", 100).expect("base");
-        let b = a.clone();
-        // Misma réplica lógica, dos escrituras con ts distintos.
-        let ts_old = HlcTimestamp::new(150, 10, 1);
-        let ts_new = HlcTimestamp::new(160, 11, 1);
-        // Simula divergencia: cada clon recibe una escritura distinta.
+        let ts_old = HlcTimestamp::new(150, 10, 2);
+        let ts_new = HlcTimestamp::new(160, 11, 3);
+        // Cada clon recibe una escritura remota distinta; merge converge al
+        // más nuevo en ambos órdenes.
         let mut c1 = a.clone();
-        let mut c2 = b.clone();
-        c1.upsert_remote(id, "viejo", ts_old).expect("viejo");
-        c2.upsert_remote(id, "nuevo", ts_new).expect("nuevo");
-        c1.merge(&c2);
+        let mut c2 = a.clone();
+        c1.upsert_remote(id, "viejo", ts_old, 160).expect("viejo");
+        c2.upsert_remote(id, "nuevo", ts_new, 160).expect("nuevo");
+        c1.merge(&c2, 160);
         assert_eq!(c1.get(&id), Some("nuevo"));
-        // Y al revés también converge al más nuevo.
-        let mut c3 = b.clone();
-        c3.upsert_remote(id, "viejo", ts_old).expect("viejo");
+        let mut c3 = a.clone();
         let mut c4 = a.clone();
-        c4.upsert_remote(id, "nuevo", ts_new).expect("nuevo");
-        c4.merge(&c3);
+        c3.upsert_remote(id, "viejo", ts_old, 160).expect("viejo");
+        c4.upsert_remote(id, "nuevo", ts_new, 160).expect("nuevo");
+        c4.merge(&c3, 160);
         assert_eq!(c4.get(&id), Some("nuevo"));
     }
 
@@ -472,7 +601,12 @@ mod tests {
         assert!(board.insert_local(&big, 1).is_err());
         assert!(board.insert_local("a\x00b", 1).is_err());
         assert!(board
-            .upsert_remote(CrdtId::from_parts(1, 1), &big, HlcTimestamp::new(1, 1, 1))
+            .upsert_remote(
+                CrdtId::from_parts(1, 1),
+                &big,
+                HlcTimestamp::new(1, 1, 2),
+                1
+            )
             .is_err());
         // Llenar hasta el tope con inserciones locales.
         let mut full = WhiteboardCrdt::new(3);
@@ -500,5 +634,126 @@ mod tests {
         let json = serde_json::to_string(&board).expect("serialize");
         let back: WhiteboardCrdt = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.live_sorted(), board.live_sorted());
+    }
+
+    #[test]
+    fn serde_rejects_hostile_replica() {
+        // Regresión A3: un `WhiteboardCrdt` deserializado de JSON evadía TODOS
+        // los presupuestos `MAX_CRDT_*` (valores >2048 B, controles, 1M de
+        // entradas, `wall` forjado). Con P2P encima, canal de inyección.
+        let json_of = |entry: CrdtEntry| serde_json::to_string(&entry).expect("json");
+        let oversize = CrdtEntry {
+            value: "x".repeat(MAX_CRDT_VALUE_BYTES + 1),
+            ts: HlcTimestamp::new(1, 1, 2),
+            deleted: false,
+        };
+        assert!(serde_json::from_str::<CrdtEntry>(&json_of(oversize)).is_err());
+        let control = CrdtEntry {
+            value: "a\x00b".to_string(),
+            ts: HlcTimestamp::new(1, 1, 2),
+            deleted: false,
+        };
+        assert!(serde_json::from_str::<CrdtEntry>(&json_of(control)).is_err());
+        let forged_wall = CrdtEntry {
+            value: "ok".to_string(),
+            ts: HlcTimestamp::new(u64::MAX, 1, 2),
+            deleted: false,
+        };
+        assert!(serde_json::from_str::<CrdtEntry>(&json_of(forged_wall)).is_err());
+
+        let mut entries = BTreeMap::new();
+        for index in 0..(MAX_CRDT_ENTRIES + 1) {
+            entries.insert(
+                CrdtId::from_parts(2, index as u64),
+                CrdtEntry {
+                    value: "v".to_string(),
+                    ts: HlcTimestamp::new(1, 1, 2),
+                    deleted: false,
+                },
+            );
+        }
+        let fat = WhiteboardCrdt {
+            site: 1,
+            counter: 0,
+            entries,
+        };
+        assert!(serde_json::from_str::<WhiteboardCrdt>(&json_of_board(&fat)).is_err());
+    }
+
+    fn json_of_board(board: &WhiteboardCrdt) -> String {
+        serde_json::to_string(board).expect("json")
+    }
+
+    #[test]
+    fn merge_validates_hostile_remote_values() {
+        // Regresión A3: `merge` clonaba `remote` sin pasar por
+        // `validate_crdt_value` (a diferencia de `insert_local`/`upsert_remote`).
+        let mut hostile = WhiteboardCrdt::new(9);
+        let oversize = CrdtId::from_parts(9, 1);
+        let forged = CrdtId::from_parts(9, 2);
+        hostile.entries.insert(
+            oversize,
+            CrdtEntry {
+                value: "x".repeat(MAX_CRDT_VALUE_BYTES + 1),
+                ts: HlcTimestamp::new(50, 1, 9),
+                deleted: false,
+            },
+        );
+        hostile.entries.insert(
+            forged,
+            CrdtEntry {
+                value: "parece válido".to_string(),
+                ts: HlcTimestamp::new(u64::MAX, 2, 9),
+                deleted: false,
+            },
+        );
+        let mut board = WhiteboardCrdt::new(1);
+        board.merge(&hostile, 100);
+        assert_eq!(board.len_total(), 0, "valores hostiles jamás entran");
+        assert!(board.get(&oversize).is_none());
+        assert!(board.get(&forged).is_none());
+    }
+
+    #[test]
+    fn upsert_remote_rejects_own_site_and_forged_wall() {
+        // Regresión A3 (LWW forgeable): `ts.site == self.site` sin autenticar
+        // y `ts.wall` arbitrario (`u64::MAX` = gana "para siempre" y deja los
+        // objetos locales indeletables: `remove` compara `existing.ts >= ts`).
+        let mut board = WhiteboardCrdt::new(1);
+        let id = board.insert_local("v", 100).expect("insert");
+        assert!(board
+            .upsert_remote(id, "forjado", HlcTimestamp::new(150, 5, 1), 150)
+            .is_err());
+        assert!(board
+            .upsert_remote(id, "eterno", HlcTimestamp::new(u64::MAX, 5, 2), 150)
+            .is_err());
+        assert!(board
+            .upsert_remote(id, "legítimo", HlcTimestamp::new(150, 5, 2), 150)
+            .is_ok());
+        assert_eq!(board.get(&id), Some("legítimo"));
+    }
+
+    #[test]
+    fn merge_is_commutative_when_the_store_is_full() {
+        // Regresión A8: con el almacén casi lleno, el orden de `merge`
+        // decidía qué entraba (no conmutativa). Ahora se recorta a los
+        // `MAX_CRDT_ENTRIES` más recientes: resultado independiente del orden.
+        let mut full = WhiteboardCrdt::new(1);
+        for _ in 0..(MAX_CRDT_ENTRIES - 1) {
+            full.insert_local("viejo", 1).expect("fill");
+        }
+        let mut remote_b = WhiteboardCrdt::new(2);
+        let id_b = remote_b.insert_local("de-B", 200).expect("b");
+        let mut remote_c = WhiteboardCrdt::new(3);
+        let id_c = remote_c.insert_local("de-C", 200).expect("c");
+        let mut bc = full.clone();
+        let mut cb = full.clone();
+        bc.merge(&remote_b, 300);
+        bc.merge(&remote_c, 300);
+        cb.merge(&remote_c, 300);
+        cb.merge(&remote_b, 300);
+        assert_eq!(bc.live_sorted(), cb.live_sorted());
+        assert!(bc.get(&id_b).is_some(), "lo más reciente no se pierde");
+        assert!(bc.get(&id_c).is_some(), "lo más reciente no se pierde");
     }
 }

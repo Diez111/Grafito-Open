@@ -455,21 +455,27 @@ fn io_attrs(e: &BytesStart<'_>) -> Result<Vec<String>, GgbError> {
     pares.sort_by_key(|(i, _)| *i);
     Ok(pares.into_iter().map(|(_, v)| v).collect())
 }
-fn rechazar_doctype(xml: &[u8]) -> Result<(), GgbError> {
+/// Fail-closed ante `<!DOCTYPE`/`<!ENTITY` en cualquier combinación de
+/// mayúsculas (VULN 8: el filtro era case-sensitive y `<!doctype` pasaba).
+/// La copia de `zip_read` usa esta misma función (defensa en profundidad).
+pub(crate) fn rechazar_doctype(xml: &[u8]) -> Result<(), GgbError> {
     // Defensa en profundidad junto a `zip_read::extraer`: `quick-xml` 0.42 con
     // `default-features = false` no expande DTD ni entidades externas (el
     // lector solo emite `DocType` como evento, que este parser ignora), pero
     // un `<!DOCTYPE` explícito se rechaza fail-closed sin llegar a parsear.
-    if contiene(xml, b"<!DOCTYPE") || contiene(xml, b"<!ENTITY") {
+    if contiene_ignorando_mayusculas(xml, b"<!DOCTYPE")
+        || contiene_ignorando_mayusculas(xml, b"<!ENTITY")
+    {
         return Err(GgbError::XmlMalformado {
             detalle: "DOCTYPE/ENTITY rechazado (bomba de entidades)".to_string(),
         });
     }
     Ok(())
 }
-fn contiene(hay: &[u8], aguja: &[u8]) -> bool {
+fn contiene_ignorando_mayusculas(hay: &[u8], aguja: &[u8]) -> bool {
     if aguja.is_empty() || hay.len() < aguja.len() {
         return false;
     }
-    hay.windows(aguja.len()).any(|v| v == aguja)
+    hay.windows(aguja.len())
+        .any(|v| v.eq_ignore_ascii_case(aguja))
 }

@@ -24,7 +24,13 @@ fn fmt_num(v: f64) -> String {
 fn fmt_point(x: f64, y: f64) -> String {
     format!("({}, {})", fmt_num(x), fmt_num(y))
 }
-fn sanitize_etiqueta(raw: &str) -> String {
+/// Etiqueta canónica: `[alnum_']` unicode, `' '`/`'-'` → `'_'`, cap 64 bytes.
+///
+/// VULN 5 (auditoría): toda referencia que entra al lenguaje de comandos
+/// (`comando` que el llamador ejecuta) pasa SIEMPRE por aquí — claves de
+/// `puntos`/`lineas`/`circulos`, lookups y nombres emitidos — para que un
+/// atributo XML con `]`, `;` o `\n` no pueda cerrar el comando.
+pub(crate) fn sanitize_etiqueta(raw: &str) -> String {
     let t = raw.trim();
     if t.is_empty() {
         return String::new();
@@ -41,6 +47,58 @@ fn sanitize_etiqueta(raw: &str) -> String {
         }
     }
     out
+}
+
+/// Resuelve una referencia a punto del XML: etiqueta sanitizada o literal
+/// `(x, y)`. Nunca usa la cadena cruda como clave (VULN 5).
+fn resuelve_punto(puntos: &BTreeMap<String, (f64, f64)>, raw: &str) -> Option<(f64, f64)> {
+    let clave = sanitize_etiqueta(raw);
+    if !clave.is_empty() {
+        if let Some(p) = puntos.get(&clave) {
+            return Some(*p);
+        }
+    }
+    parse_point_literal(raw)
+}
+
+/// Resuelve una referencia a recta/vector del XML por etiqueta sanitizada.
+fn resuelve_linea(
+    lineas: &BTreeMap<String, ((f64, f64), (f64, f64))>,
+    raw: &str,
+) -> Option<((f64, f64), (f64, f64))> {
+    let clave = sanitize_etiqueta(raw);
+    if clave.is_empty() {
+        return None;
+    }
+    lineas.get(&clave).copied()
+}
+
+/// Charset del argumento de `Function[...]`: alfanumérico (unicode), `_'`,
+/// espacio y operadores `+ - * / ^ ( ) . , >` (la flecha `->` de GeoGebra).
+///
+/// Sin `[`, `]`, `;` ni saltos de línea no hay forma de cerrar el comando y
+/// emitir un segundo (VULN 5: `exp = "x]; Delete[A]; Function[x"`).
+fn expr_arg_segura(arg: &str) -> bool {
+    !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_alphanumeric()
+                || matches!(
+                    c,
+                    '_' | '\''
+                        | ' '
+                        | '\t'
+                        | '+'
+                        | '-'
+                        | '*'
+                        | '/'
+                        | '^'
+                        | '('
+                        | ')'
+                        | '.'
+                        | ','
+                        | '>'
+                )
+        })
 }
 fn is_3d(tipo: &str) -> bool {
     tipo.to_ascii_lowercase().ends_with("3d")
@@ -469,8 +527,16 @@ fn extraer_tabla_de_numericos(
             if !v.is_finite() {
                 continue;
             }
-            let col = col_from_label(&el.etiqueta)?;
-            let row = row_from_label(&el.etiqueta)?;
+            // VULN 4: antes `col_from_label(...)?` + `row_from_label(...)?`
+            // abortaban TODA la función ante un `A0` (fila 0) o un label sin
+            // parsear: la DataTable/ScatterPlot de la hoja entera desaparecía.
+            // Ahora se saltea solo ese elemento.
+            let Some(col) = col_from_label(&el.etiqueta) else {
+                continue;
+            };
+            let Some(row) = row_from_label(&el.etiqueta) else {
+                continue;
+            };
             if col > 25 || row > 100000 {
                 continue;
             }
@@ -628,7 +694,10 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
         if el.tipo.eq_ignore_ascii_case("point") {
             if let Some([x, y, _, _]) = el.coords {
                 if x.is_finite() && y.is_finite() && !el.etiqueta.trim().is_empty() {
-                    puntos.insert(el.etiqueta.clone(), (x, y));
+                    let clave = sanitize_etiqueta(&el.etiqueta);
+                    if !clave.is_empty() {
+                        puntos.insert(clave, (x, y));
+                    }
                 }
             }
         }
@@ -690,7 +759,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 continue;
                             }
                             let cmd = format!("Point[{}]", fmt_point(x, y));
-                            puntos.entry(el.etiqueta.clone()).or_insert((x, y));
+                            puntos.entry(etiqueta.clone()).or_insert((x, y));
                             try_push_mapeado(&mut reporte, etiqueta, "Point".to_string(), cmd);
                         } else {
                             reporte.omitidos.push(OmittedObject {
@@ -804,7 +873,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                             }
                             let cmd =
                                 format!("Vector[{}, {}]", fmt_point(sx, sy), fmt_point(ex, ey));
-                            lineas.insert(el.etiqueta.clone(), ((sx, sy), (ex, ey)));
+                            lineas.insert(etiqueta.clone(), ((sx, sy), (ex, ey)));
                             try_push_mapeado(
                                 &mut reporte,
                                 etiqueta.clone(),
@@ -863,7 +932,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                 continue;
                             }
                             let cmd = format!("Circle[{}, {}]", fmt_point(cx, cy), fmt_num(r));
-                            circulos.insert(el.etiqueta.clone(), ((cx, cy), r));
+                            circulos.insert(etiqueta.clone(), ((cx, cy), r));
                             try_push_mapeado(&mut reporte, etiqueta, "Circle".to_string(), cmd);
                         } else {
                             reporte.omitidos.push(OmittedObject {
@@ -1015,8 +1084,8 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                         if entradas.len() >= 2 {
                             let a = entradas[0].trim();
                             let b = entradas[1].trim();
-                            let pa = puntos.get(a).copied().or_else(|| parse_point_literal(a));
-                            let pb = puntos.get(b).copied().or_else(|| parse_point_literal(b));
+                            let pa = resuelve_punto(&puntos, a);
+                            let pb = resuelve_punto(&puntos, b);
                             if let (Some((x1, y1)), Some((x2, y2))) = (pa, pb) {
                                 let kind = match nombre.as_str() {
                                     "segment" => "Segment",
@@ -1054,8 +1123,8 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                         if entradas.len() >= 2 {
                             let a = entradas[0].trim();
                             let b = entradas[1].trim();
-                            let pa = puntos.get(a).copied().or_else(|| parse_point_literal(a));
-                            let pb = puntos.get(b).copied().or_else(|| parse_point_literal(b));
+                            let pa = resuelve_punto(&puntos, a);
+                            let pb = resuelve_punto(&puntos, b);
                             if let (Some(s), Some(e_)) = (pa, pb) {
                                 let c = format!(
                                     "Vector[{}, {}]",
@@ -1092,10 +1161,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                         if entradas.len() >= 2 {
                             let center_label = entradas[0].trim();
                             let second = entradas[1].trim();
-                            let pc = puntos
-                                .get(center_label)
-                                .copied()
-                                .or_else(|| parse_point_literal(center_label));
+                            let pc = resuelve_punto(&puntos, center_label);
                             if let Some((cx, cy)) = pc {
                                 if let Ok(r) = second.parse::<f64>() {
                                     if r.is_finite() && r > 1e-12 {
@@ -1118,11 +1184,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                                             razon: "radio no finito o nulo".to_string(),
                                         });
                                     }
-                                } else if let Some((px, py)) = puntos
-                                    .get(second)
-                                    .copied()
-                                    .or_else(|| parse_point_literal(second))
-                                {
+                                } else if let Some((px, py)) = resuelve_punto(&puntos, second) {
                                     let r = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
                                     if r.is_finite() && r > 1e-12 {
                                         let c = format!(
@@ -1172,9 +1234,7 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                             let mut faltan: Vec<String> = Vec::new();
                             for e in entradas {
                                 let t = e.trim();
-                                if let Some(p) =
-                                    puntos.get(t).copied().or_else(|| parse_point_literal(t))
-                                {
+                                if let Some(p) = resuelve_punto(&puntos, t) {
                                     verts.push(p);
                                 } else {
                                     faltan.push(t.to_string());
@@ -1255,9 +1315,9 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                             let a = entradas[0].trim();
                             let b = entradas[1].trim();
                             let c_ = entradas[2].trim();
-                            let pa = puntos.get(a).copied().or_else(|| parse_point_literal(a));
-                            let pb = puntos.get(b).copied().or_else(|| parse_point_literal(b));
-                            let pc = puntos.get(c_).copied().or_else(|| parse_point_literal(c_));
+                            let pa = resuelve_punto(&puntos, a);
+                            let pb = resuelve_punto(&puntos, b);
+                            let pc = resuelve_punto(&puntos, c_);
                             if let (Some(pa_), Some(pb_), Some(pc_)) = (pa, pb, pc) {
                                 if let Some(ang) = angle_at(pb_, pa_, pc_) {
                                     let poly_cmd = format!(
@@ -1300,10 +1360,14 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                             // R3.3: Angle de 2 rectas → constraint real
                             // `Angle[l1, l2, grados]` (agudo 0..90°) + Text medida
                             // omitido como en el caso de 3 puntos.
-                            let a = entradas[0].trim();
-                            let b = entradas[1].trim();
-                            let l1 = lineas.get(a).copied();
-                            let l2 = lineas.get(b).copied();
+                            // VULN 5: las referencias se emiten SIEMPRE
+                            // sanitizadas — `a`/`b` crudos cerraban el comando.
+                            let a_raw = entradas[0].trim();
+                            let b_raw = entradas[1].trim();
+                            let a = sanitize_etiqueta(a_raw);
+                            let b = sanitize_etiqueta(b_raw);
+                            let l1 = resuelve_linea(&lineas, a_raw);
+                            let l2 = resuelve_linea(&lineas, b_raw);
                             if let (Some((p1, p2)), Some((p3, p4))) = (l1, l2) {
                                 if let Some(ang) = angle_between_lines(p1, p2, p3, p4) {
                                     let cmd_str = format!("Angle[{a}, {b}, {}]", fmt_num(ang));
@@ -1356,8 +1420,8 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
                         if entradas.len() >= 2 {
                             let o1 = entradas[0].trim();
                             let o2 = entradas[1].trim();
-                            let l1 = lineas.get(o1).copied();
-                            let l2 = lineas.get(o2).copied();
+                            let l1 = resuelve_linea(&lineas, o1);
+                            let l2 = resuelve_linea(&lineas, o2);
                             if let (Some((p1, p2)), Some((p3, p4))) = (l1, l2) {
                                 if let Some((x, y)) = line_intersection(p1, p2, p3, p4) {
                                     let cmd = format!("Point[{}]", fmt_point(x, y));
@@ -1442,13 +1506,29 @@ pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
         {
             match valida_expr(&expr.exp) {
                 Ok(clean) => {
-                    let cmd = if clean.contains('=') {
+                    let arg = if clean.contains('=') {
                         let parts: Vec<&str> = clean.splitn(2, '=').collect();
-                        let rhs = parts.get(1).map(|s| s.trim()).unwrap_or(&clean);
-                        format!("Function[{rhs}]")
+                        parts
+                            .get(1)
+                            .map(|s| s.trim().to_string())
+                            .unwrap_or_else(|| clean.clone())
                     } else {
-                        format!("Function[{clean}]")
+                        clean.clone()
                     };
+                    // VULN 5: lo que va ADENTRO de `Function[...]` se valida
+                    // contra el charset del lenguaje de comandos: sin `]`, `[`,
+                    // `;` ni saltos de línea no se puede cerrar el comando y
+                    // emitir un segundo (`exp = "x]; Delete[A]; Function[x"`).
+                    if !expr_arg_segura(&arg) {
+                        reporte.omitidos.push(OmittedObject {
+                            tipo: "Function".to_string(),
+                            label: et,
+                            razon: "expresión con caracteres no permitidos en Function[...]"
+                                .to_string(),
+                        });
+                        continue;
+                    }
+                    let cmd = format!("Function[{arg}]");
                     if cmd.len() > MAX_EXPR_CHARS {
                         reporte.omitidos.push(OmittedObject {
                             tipo: "Function".to_string(),

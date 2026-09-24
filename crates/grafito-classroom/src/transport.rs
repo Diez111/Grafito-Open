@@ -8,11 +8,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-use crate::session::ClassroomError;
+use crate::session::{ClassroomError, LearnerName, MAX_LEARNER_NAME_LEN};
 
 /// Tope de mensajes encolados (igual que el canal del agente: 128).
 pub const MAX_TRANSPORT_QUEUE: usize = 128;
-/// Tope por mensaje (cuerpo + remitente acotados; coherente con 2000 de ejercicio).
+/// Tope por mensaje (cuerpo + remitente acotados; coherente con los 2000 chars
+/// del ejercicio activo [`crate::MAX_EXERCISE_CHARS`], más holgura de framing).
 pub const MAX_MESSAGE_BYTES: usize = 2_048;
 /// Intentos máximos de un reintento acotado (1..=8, default 3).
 pub const MAX_SEND_ATTEMPTS: u8 = 8;
@@ -42,7 +43,13 @@ pub enum ClassroomMessageKind {
 }
 
 /// Mensaje inmutable del aula (remitente + tipo + cuerpo acotado).
+///
+/// Todo mensaje que cruza el borde (constructor **o** deserialización) pasa
+/// por [`ClassroomMessage::validate`]: remitente `1..=64` chars sin controles,
+/// cuerpo `<= MAX_MESSAGE_BYTES` sin controles salvo `\n\t` (anti inyección
+/// en UI). `Deserialize` es estricto vía `try_from` (nunca trunca: rechaza).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawClassroomMessage")]
 pub struct ClassroomMessage {
     /// Remitente display (ya saneado `1..=64`).
     pub from: String,
@@ -52,41 +59,72 @@ pub struct ClassroomMessage {
     pub body: String,
 }
 
+/// Forma cruda entrante (JSON remoto/hostil) que se revalida en `try_from`.
+#[derive(Debug, Deserialize)]
+struct RawClassroomMessage {
+    from: String,
+    kind: ClassroomMessageKind,
+    body: String,
+}
+
+impl TryFrom<RawClassroomMessage> for ClassroomMessage {
+    type Error = ClassroomError;
+
+    fn try_from(raw: RawClassroomMessage) -> Result<Self, Self::Error> {
+        let msg = Self {
+            from: raw.from,
+            kind: raw.kind,
+            body: raw.body,
+        };
+        msg.validate()?;
+        Ok(msg)
+    }
+}
+
 impl ClassroomMessage {
     /// Construye validando remitente y cuerpo (todo `Result`, sin pánicos).
+    ///
+    /// El remitente se sanea con [`LearnerName::try_new`] (trim + cap 64
+    /// chars); después todo pasa por [`Self::validate`], la MISMA validación
+    /// que usan `send()` y el `pump()` entrante (sin fail-open en el borde).
     pub fn try_new(
         from: &str,
         kind: ClassroomMessageKind,
         body: &str,
     ) -> Result<Self, ClassroomError> {
-        let clean_from = crate::session::LearnerName::try_new(from)
+        let clean_from = LearnerName::try_new(from)
             .map_err(|_| ClassroomError::InvalidName(from.trim().to_string()))?;
-        if body.len() > MAX_MESSAGE_BYTES {
-            return Err(ClassroomError::InvalidMessage(format!(
-                "cuerpo excede {MAX_MESSAGE_BYTES} bytes"
-            )));
-        }
-        // Rechazar controles (salvo \n\t) para evitar inyección en UI.
-        if body
-            .chars()
-            .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
-            return Err(ClassroomError::InvalidMessage(
-                "cuerpo con caracteres de control".to_string(),
-            ));
-        }
-        Ok(Self {
+        let msg = Self {
             from: clean_from.as_str().to_string(),
             kind,
             body: body.to_string(),
-        })
+        };
+        msg.validate()?;
+        Ok(msg)
     }
 
-    /// Valida un mensaje ya construido (tamaño + remitente no vacío).
+    /// Valida un mensaje ya construido (remitente + cuerpo + controles).
+    ///
+    /// Única puerta de verdad del borde wire: `send()` (salida) y el `pump()`
+    /// entrante (P2P) llaman solo esto, así que el chequeo anti-inyección de
+    /// UI vive ACÁ y no solo en el constructor.
     pub fn validate(&self) -> Result<(), ClassroomError> {
-        if self.from.trim().is_empty() || self.from.len() > 64 {
+        let trimmed = self.from.trim();
+        if trimmed.is_empty() {
             return Err(ClassroomError::InvalidMessage(
                 "remitente inválido".to_string(),
+            ));
+        }
+        // Presupuesto en chars (igual que `LearnerName` / dashboard): 64
+        // ideogramas son válidos aunque ocupen 256 bytes.
+        if self.from.chars().count() > MAX_LEARNER_NAME_LEN {
+            return Err(ClassroomError::InvalidMessage(
+                "remitente inválido".to_string(),
+            ));
+        }
+        if self.from.chars().any(char::is_control) {
+            return Err(ClassroomError::InvalidMessage(
+                "remitente con caracteres de control".to_string(),
             ));
         }
         if self.body.len() > MAX_MESSAGE_BYTES {
@@ -94,11 +132,28 @@ impl ClassroomMessage {
                 "cuerpo excede {MAX_MESSAGE_BYTES} bytes"
             )));
         }
+        // Rechazar controles (salvo \n\t) para evitar inyección en UI.
+        if self
+            .body
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+        {
+            return Err(ClassroomError::InvalidMessage(
+                "cuerpo con caracteres de control".to_string(),
+            ));
+        }
         Ok(())
     }
 }
 
 /// Contrato de transporte (la sesión no depende de una red concreta).
+///
+/// Política de cola llena (una sola para todas las implementaciones):
+/// - **salida** (`send`): rechazo honesto `Err(QueueFull)` — nunca evicción
+///   silenciosa de mensajes ya encolados;
+/// - **entrada** (bombeo de red): rechazo del mensaje nuevo + contador de
+///   descartes ([`Self::dropped_count`]) — jamás se descarta el más viejo sin
+///   aviso.
 pub trait ClassroomTransport {
     /// Encola un mensaje para entrega local. `Err(QueueFull)` si está llena.
     fn send(&mut self, msg: ClassroomMessage) -> Result<(), ClassroomError>;
@@ -112,6 +167,11 @@ pub trait ClassroomTransport {
     fn is_connected(&self) -> bool;
     /// Desconecta (vacía la cola; `send` posterior falla honesto).
     fn disconnect(&mut self);
+    /// Mensajes entrantes descartados por cola llena (aviso honesto, nunca
+    /// pérdida silenciosa). Default `0` cuando toda descarga va por `Err`.
+    fn dropped_count(&self) -> usize {
+        0
+    }
 }
 
 /// Loopback en memoria: cola `VecDeque` acotada, sin red, sin threads.
@@ -131,7 +191,16 @@ pub struct LoopbackTransport {
 /// Solo `QueueFull` se reintenta; `InvalidMessage`/desconectado fallan rápido
 /// sin consumir intentos extra.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(try_from = "u8")]
 pub struct RetryBudget(u8);
+
+impl TryFrom<u8> for RetryBudget {
+    type Error = ClassroomError;
+
+    fn try_from(attempts: u8) -> Result<Self, Self::Error> {
+        Self::try_new(attempts)
+    }
+}
 
 impl RetryBudget {
     /// Valida `1..=8`. `Err(InvalidMessage)` si fuera de rango (sin nuevo variante).
@@ -360,5 +429,62 @@ mod tests {
             .send_with_retry(msg_fixture("Ana", "x"), RetryBudget::default_budget())
             .expect_err("desconectado");
         assert!(matches!(err, ClassroomError::InvalidMessage(_)));
+    }
+
+    #[test]
+    fn validate_rejects_control_chars_on_the_wire_path() {
+        // Regresión A2: el filtro de controles vivía SOLO en `try_new`
+        // ("para evitar inyección en UI") pero `send()` y el `pump()` entrante
+        // solo llaman `validate()`: un mensaje remoto viajaba con `\x1b`/ANSI
+        // al chat de la UI. Fail-open en el borde exacto donde importa.
+        let hostile_body = ClassroomMessage {
+            from: "Ana".to_string(),
+            kind: ClassroomMessageKind::Chat,
+            body: "limpiar\x1b[31mrojo".to_string(),
+        };
+        assert!(hostile_body.validate().is_err());
+        let hostile_from = ClassroomMessage {
+            from: "\u{1b}[31mAna".to_string(),
+            kind: ClassroomMessageKind::Chat,
+            body: "hola".to_string(),
+        };
+        assert!(hostile_from.validate().is_err());
+    }
+
+    #[test]
+    fn wire_deserialization_rejects_hostile_messages() {
+        // Regresión A3: campos `pub` + `Deserialize` sin validación = el
+        // constructor validado se evadía con un JSON remoto.
+        assert!(serde_json::from_str::<ClassroomMessage>(
+            r#"{"from":"Ana","kind":"chat","body":"a\u0000b"}"#
+        )
+        .is_err());
+        assert!(serde_json::from_str::<ClassroomMessage>(
+            r#"{"from":"\u001b[31mAna","kind":"chat","body":"hola"}"#
+        )
+        .is_err());
+        let big_body = "x".repeat(MAX_MESSAGE_BYTES + 1);
+        assert!(serde_json::from_str::<ClassroomMessage>(
+            &serde_json::json!({"from": "Ana", "kind": "chat", "body": big_body}).to_string()
+        )
+        .is_err());
+        let big_from = "x".repeat(65);
+        assert!(serde_json::from_str::<ClassroomMessage>(
+            &serde_json::json!({"from": big_from, "kind": "chat", "body": "hola"}).to_string()
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sender_budget_unifies_to_chars() {
+        // Regresión A3 [PRUEBA chars-vs-bytes]: `LearnerName::try_new` capaba
+        // a 64 CHARS pero `validate` exigía 64 BYTES: 40 ideogramas (120
+        // bytes) pasaban el constructor y `send()` fallaba SIEMPRE.
+        let name = "数".repeat(40);
+        let msg = ClassroomMessage::try_new(&name, ClassroomMessageKind::Chat, "hola")
+            .expect("constructor acepta 40 chars");
+        assert!(msg.validate().is_ok());
+        let mut transport = LoopbackTransport::new();
+        assert!(transport.send(msg).is_ok());
     }
 }
