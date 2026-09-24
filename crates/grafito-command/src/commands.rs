@@ -28,6 +28,10 @@ use grafito_geometry::analysis::{
     tangent_line_at, volume_of_revolution, AnalysisFeature, AnalysisResult, IntersectionCurve,
 };
 use grafito_geometry::boolean::polygon_to_geo;
+use grafito_geometry::cas::{
+    laurent_principal_part, laurent_residue, ResidueMethod, MAX_LAURENT_ORDER,
+};
+use grafito_geometry::cas_steps::{steps_for_op, CasOp, MAX_CAS_STEPS, MAX_STEP_BYTES};
 use grafito_geometry::exact as conic_exact;
 use grafito_geometry::expr::{evaluate, prepare_function_ast};
 use grafito_geometry::locus_equation;
@@ -35,6 +39,8 @@ use grafito_geometry::matrices::{
     cholesky, condition_number, eigenvalues, eigenvectors, lu_decomposition, null_space,
     qr_decomposition, rank, solve_linear_system, svd, Matrix,
 };
+use grafito_geometry::poly_tools::PolyTerm;
+use grafito_geometry::solve::{sylvester_resultant, BiPoly};
 use grafito_geometry::statistics;
 use grafito_geometry::symbolic;
 use grafito_geometry::{
@@ -14741,6 +14747,52 @@ fn handle_remaining_cas_commands(
                 Err(e) => return CommandOutcome::Error(format!("Topp39Scan: {e}")),
             }
         }
+        // ── Frente G1 (contrato grafito-geometry) ────────────────────────────
+        // Brazos sin guard de aridad (estilo `Topp39Scan`): la aridad se valida
+        // dentro y responde error honesto, así `Canonical[]` no cae al
+        // fallback "Comando no reconocido".
+        "HeatEquation" => {
+            return run_heat_equation_command(&cmd.args, document);
+        }
+        "WaveEquation" => {
+            return run_wave_equation_command(&cmd.args, document);
+        }
+        "Laplace2D" => {
+            return run_laplace_2d_command(&cmd.args, document);
+        }
+        "FourierSeries" => {
+            return run_fourier_series_command(&cmd.args, document);
+        }
+        "FourierCoeffs" => {
+            return run_fourier_coeffs_command(&cmd.args, document);
+        }
+        "NDerivativeSym" => {
+            return run_nderivative_sym_command(&cmd.args, document);
+        }
+        "Partial" => {
+            return run_partial_command(&cmd.args, document);
+        }
+        "SubstituteInt" => {
+            return run_substitute_int_command(&cmd.args, document);
+        }
+        "LambertW" => {
+            return run_lambert_w_command(&cmd.args, document);
+        }
+        "SolveTranscendental" => {
+            return run_solve_transcendental_command(&cmd.args, document);
+        }
+        "LaurentSeries" => {
+            return run_laurent_series_command(&cmd.args, document);
+        }
+        "SumClosed" => {
+            return run_sum_closed_command(&cmd.args, document);
+        }
+        "ParseLatex" => {
+            return run_parse_latex_command(&cmd.args, document);
+        }
+        "ToLatex" => {
+            return run_to_latex_command(&cmd.args, document);
+        }
         _ => {}
     }
     result = match execute_cas_command_typed(document, cmd) {
@@ -15175,6 +15227,430 @@ fn complex_mapping_target_is_supported(target: &GeoObject) -> bool {
             | GeoObject::RegressionLine(_)
             | GeoObject::VectorField2D(_)
     )
+}
+
+// ── PolyGCD / Resultant / Residue / PrincipalPart / StepByStep ──────────────
+// Brazos delegantes sobre el motor de grafito-geometry: `poly_tools` para
+// extraer coeficientes/términos, `symbolic::poly_gcd_subresultant` para el MCD,
+// `solve::sylvester_resultant` para la eliminación, `cas::laurent_*` para
+// Laurent y `cas_steps::steps_for_op` para la traza pedagógica. Cero matemática
+// duplicada: acá solo hay validación de entrada, presupuestos y formateo.
+
+/// Nombres de variable de los términos polinómicos, en orden de aparición.
+fn poly_var_names(terms: &[PolyTerm]) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for term in terms {
+        for name in term.powers.keys() {
+            if !names.iter().any(|seen| seen == name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    names
+}
+
+/// Convierte términos polinómicos en `BiPoly` con clave `(exp_resto, exp_eliminada)`
+/// (convención de `solve::sylvester_resultant`: se elimina la segunda) y
+/// devuelve el grado en la variable eliminada.
+fn bipoly_from_terms(terms: &[PolyTerm], rest_var: &str, elim: &str) -> (BiPoly, usize) {
+    let mut poly = BiPoly::new();
+    let mut deg_elim = 0usize;
+    for term in terms {
+        let e_rest = term.powers.get(rest_var).copied().unwrap_or(0);
+        let e_elim = term.powers.get(elim).copied().unwrap_or(0);
+        deg_elim = deg_elim.max(usize::try_from(e_elim).unwrap_or(0));
+        *poly.entry((e_rest, e_elim)).or_insert(0.0) += term.coef;
+    }
+    poly.retain(|_, coef| *coef != 0.0);
+    (poly, deg_elim)
+}
+
+fn run_poly_gcd_command(args: &[String], document: &Document) -> Result<String, String> {
+    if !(2..=3).contains(&args.len()) {
+        return Err("PolyGCD requiere PolyGCD[p, q] o PolyGCD[p, q, variable]".to_string());
+    }
+    let p = expand_all_cas(args[0].trim(), document);
+    let q = expand_all_cas(args[1].trim(), document);
+    for (role, value) in [("p", &p), ("q", &q)] {
+        if value.trim().is_empty() {
+            return Err(format!("PolyGCD requiere {role} no vacío"));
+        }
+        check_w1_budget("PolyGCD", role, value)?;
+    }
+    let terms_p = grafito_geometry::poly_tools::poly_terms(&p)
+        .map_err(|error| format!("PolyGCD: {error}"))?;
+    let terms_q = grafito_geometry::poly_tools::poly_terms(&q)
+        .map_err(|error| format!("PolyGCD: {error}"))?;
+    let var = match args.get(2) {
+        Some(raw) => clean_symbol_arg(raw),
+        None => {
+            let mut names = poly_var_names(&terms_p);
+            for name in poly_var_names(&terms_q) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+            if names.len() > 1 {
+                return Err(format!(
+                    "PolyGCD: se admite una sola variable (detectadas: {}); indícala como PolyGCD[p, q, variable]",
+                    names.join(", ")
+                ));
+            }
+            names.into_iter().next().unwrap_or_else(|| "x".to_string())
+        }
+    };
+    if !is_math_identifier(&var) {
+        return Err(format!(
+            "PolyGCD: variable '{var}' no es un identificador válido"
+        ));
+    }
+    let a = grafito_geometry::poly_tools::poly_coeffs(&p, &var)
+        .map_err(|error| format!("PolyGCD: {error}"))?;
+    let b = grafito_geometry::poly_tools::poly_coeffs(&q, &var)
+        .map_err(|error| format!("PolyGCD: {error}"))?;
+    let gcd = symbolic::poly_gcd_subresultant(a, b);
+    let shown = grafito_geometry::poly_tools::poly_from_coeffs(&gcd, &var)
+        .map_err(|error| format!("PolyGCD: {error}"))?;
+    Ok(format!("PolyGCD[{p}, {q}] = {shown}"))
+}
+
+fn run_resultant_command(args: &[String], document: &Document) -> Result<String, String> {
+    if args.len() != 3 {
+        return Err("Resultant requiere Resultant[f, g, x]".to_string());
+    }
+    let f = expand_all_cas(args[0].trim(), document);
+    let g = expand_all_cas(args[1].trim(), document);
+    let elim = clean_symbol_arg(&args[2]);
+    if !is_math_identifier(&elim) {
+        return Err(format!(
+            "Resultant: la variable a eliminar '{elim}' no es un identificador válido"
+        ));
+    }
+    for (role, value) in [("f", &f), ("g", &g)] {
+        if value.trim().is_empty() {
+            return Err(format!("Resultant requiere {role} no vacío"));
+        }
+        check_w1_budget("Resultant", role, value)?;
+    }
+    let terms_f = grafito_geometry::poly_tools::poly_terms(&f)
+        .map_err(|error| format!("Resultant: {error}"))?;
+    let terms_g = grafito_geometry::poly_tools::poly_terms(&g)
+        .map_err(|error| format!("Resultant: {error}"))?;
+    // La eliminación de Sylvester del motor expresa el resultado en UNA
+    // variable restante; con más de una hay error honesto (no hay múltiple).
+    let mut rest = poly_var_names(&terms_f);
+    for name in poly_var_names(&terms_g) {
+        if !rest.contains(&name) {
+            rest.push(name);
+        }
+    }
+    rest.retain(|name| name != &elim);
+    if rest.len() > 1 {
+        return Err(format!(
+            "Resultant: admite a lo sumo dos variables (detectadas: {} y {elim})",
+            rest.join(", ")
+        ));
+    }
+    let rest_var = rest.into_iter().next().unwrap_or_default();
+    let (f1, m) = bipoly_from_terms(&terms_f, &rest_var, &elim);
+    let (f2, n) = bipoly_from_terms(&terms_g, &rest_var, &elim);
+    if f1.is_empty() || f2.is_empty() {
+        return Err("Resultant: polinomio nulo; nada que eliminar".to_string());
+    }
+    let coeffs = sylvester_resultant(&f1, &f2, m, n).ok_or_else(|| {
+        "Resultant: eliminación degenerada o fuera de presupuesto (m + n ≤ 8 y grado resultante ≤ 32); resultante idénticamente nula o ecuaciones dependientes".to_string()
+    })?;
+    let out_var = if rest_var.is_empty() {
+        "x"
+    } else {
+        rest_var.as_str()
+    };
+    let shown = grafito_geometry::poly_tools::poly_from_coeffs(&coeffs, out_var)
+        .map_err(|error| format!("Resultant: {error}"))?;
+    Ok(format!("Resultant[{f}, {g}, elim. {elim}] = {shown}"))
+}
+
+/// Valida `Residue[f, x, x0]` / `PrincipalPart[f, x, x0]` y devuelve (expr, var, x0).
+fn laurent_args(
+    command: &str,
+    args: &[String],
+    document: &Document,
+) -> Result<(String, String, f64), String> {
+    if args.len() != 3 {
+        return Err(format!("{command} requiere {command}[f, x, x0]"));
+    }
+    let expr = expand_all_cas(args[0].trim(), document);
+    if expr.trim().is_empty() {
+        return Err(format!("{command} requiere una expresión no vacía"));
+    }
+    check_w1_budget(command, "f", &expr)?;
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return Err(format!(
+            "{command}: variable '{var}' no es un identificador válido"
+        ));
+    }
+    let at = require_finite(parse_numeric_arg(&args[2], &document.variables))
+        .map_err(|error| format!("{command}: x0 {error}"))?;
+    Ok((expr, var, at))
+}
+
+fn run_residue_command(args: &[String], document: &Document) -> Result<String, String> {
+    let (expr, var, at) = laurent_args("Residue", args, document)?;
+    let outcome = laurent_residue(&expr, &var, at, MAX_LAURENT_ORDER)
+        .map_err(|error| format!("Residue: {error}"))?;
+    let method = match outcome.method {
+        ResidueMethod::AnalyticZero => "analítica o evitable".to_string(),
+        ResidueMethod::SimplePole => "polo simple".to_string(),
+        ResidueMethod::HigherPole => format!("polo de orden {}", outcome.pole_order),
+    };
+    Ok(format!(
+        "Residue[{expr}, {var}, {}] = {} (método: {}; orden del polo: {})",
+        fmt_scalar(at),
+        fmt_scalar(outcome.residue),
+        method,
+        outcome.pole_order
+    ))
+}
+
+fn run_principal_part_command(args: &[String], document: &Document) -> Result<String, String> {
+    let (expr, var, at) = laurent_args("PrincipalPart", args, document)?;
+    let terms = laurent_principal_part(&expr, &var, at, MAX_LAURENT_ORDER)
+        .map_err(|error| format!("PrincipalPart: {error}"))?;
+    let at_shown = fmt_scalar(at);
+    if terms.is_empty() {
+        return Ok(format!(
+            "PrincipalPart[{expr}, {var}, {at_shown}] = 0 (sin polo en {var} = {at_shown})"
+        ));
+    }
+    let base = if at == 0.0 {
+        var.clone()
+    } else {
+        format!("({var} - {at_shown})")
+    };
+    let mut parts = Vec::with_capacity(terms.len());
+    for (power, coeff) in &terms {
+        // `power` es -k con k ≥ 1 (potencias negativas de la parte principal).
+        let order = -*power;
+        let shown_coeff = fmt_scalar(*coeff);
+        // Coeficientes que `fmt_scalar` redondea a cero no aportan término
+        // (el motor puede arrastrar ruido ~1e-10 en la fórmula de derivadas);
+        // mostrar "-0/(x - a)" sería mentira visible.
+        if matches!(shown_coeff.as_str(), "0" | "-0") {
+            continue;
+        }
+        let denom = if order == 1 {
+            base.clone()
+        } else {
+            format!("{base}^{order}")
+        };
+        parts.push(format!("{shown_coeff}/{denom}"));
+    }
+    if parts.is_empty() {
+        return Ok(format!(
+            "PrincipalPart[{expr}, {var}, {at_shown}] = 0 (sin polo en {var} = {at_shown})"
+        ));
+    }
+    Ok(format!(
+        "PrincipalPart[{expr}, {var}, {at_shown}] = {}",
+        parts.join(" + ").replace("+ -", "- ")
+    ))
+}
+
+/// Trunca a `MAX_STEP_BYTES` en borde UTF-8 (mismo presupuesto del stepper).
+fn truncate_step_field(text: &str) -> String {
+    if text.len() <= MAX_STEP_BYTES {
+        return text.to_string();
+    }
+    let mut end = MAX_STEP_BYTES;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
+/// Interpreta la operación envuelta: `StepByStep[Derivative[f, x]]` (anidada)
+/// o `StepByStep[Derivative, f, x]` (plana); normaliza con el parser común.
+fn parse_step_call(args: &[String]) -> Option<CasCmd> {
+    let head = args.first()?.trim().trim_matches('"');
+    if args.len() == 1 {
+        return parse_cas_command(head);
+    }
+    parse_cas_command(&format!("{head}[{}]", args[1..].join(", ")))
+}
+
+fn step_var(cmd: &CasCmd, index: usize, default: &str) -> String {
+    cmd.args
+        .get(index)
+        .map(|raw| clean_symbol_arg(raw))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn step_number(cmd: &CasCmd, index: usize, role: &str) -> Result<f64, String> {
+    let raw = cmd
+        .args
+        .get(index)
+        .ok_or_else(|| format!("StepByStep: falta el argumento {role}"))?;
+    let value: f64 = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("StepByStep: {role} debe ser numérico"))?;
+    if !value.is_finite() {
+        return Err(format!("StepByStep: {role} debe ser finito"));
+    }
+    Ok(value)
+}
+
+fn step_index(cmd: &CasCmd, index: usize, role: &str, default: usize) -> Result<usize, String> {
+    let Some(raw) = cmd.args.get(index) else {
+        return Ok(default);
+    };
+    let value: usize = raw
+        .trim()
+        .parse()
+        .map_err(|_| format!("StepByStep: {role} debe ser un entero"))?;
+    Ok(value)
+}
+
+/// Mapea la llamada normalizada a la `CasOp` del stepper, con los mismos
+/// operandos y defectos que los brazos originales de cada comando.
+fn cas_op_from_call(cmd: &CasCmd, document: &Document) -> Result<CasOp, String> {
+    let arg = |index: usize, role: &str| -> Result<String, String> {
+        cmd.args
+            .get(index)
+            .map(|raw| expand_all_cas(raw.trim(), document))
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("StepByStep: falta el argumento {role}"))
+    };
+    match cmd.command.as_str() {
+        "Derivative" => Ok(CasOp::Derivative {
+            expr: arg(0, "expr")?,
+            var: step_var(cmd, 1, "x"),
+        }),
+        "Integral" => Ok(CasOp::Integral {
+            expr: arg(0, "expr")?,
+            var: step_var(cmd, 1, "x"),
+        }),
+        "Solve" => Ok(CasOp::Solve {
+            expr: arg(0, "expr")?,
+            var: step_var(cmd, 1, "x"),
+        }),
+        "Limit" => Ok(CasOp::Limit {
+            expr: arg(0, "expr")?,
+            var: step_var(cmd, 1, "x"),
+            at: step_number(cmd, 2, "x0")?,
+        }),
+        "Taylor" => {
+            let order = step_index(cmd, 3, "orden", 5)?;
+            if order > grafito_geometry::analysis::MAX_TAYLOR_ORDER {
+                return Err(format!(
+                    "StepByStep: orden de Taylor {order} excede el máximo {}",
+                    grafito_geometry::analysis::MAX_TAYLOR_ORDER
+                ));
+            }
+            Ok(CasOp::Taylor {
+                expr: arg(0, "expr")?,
+                var: step_var(cmd, 1, "x"),
+                center: step_number(cmd, 2, "centro").unwrap_or(0.0),
+                order,
+            })
+        }
+        "SolveODEN" => {
+            let coeffs = parse_w1_brace_list(cmd.args.first().map(String::as_str).unwrap_or(""));
+            if coeffs.is_empty() {
+                return Err(
+                    "StepByStep: SolveODEN requiere coeficientes {a2, a1, a0}".to_string(),
+                );
+            }
+            Ok(CasOp::OdeNthOrder {
+                coeffs,
+                rhs: arg(1, "rhs")?,
+                x: step_var(cmd, 2, "x"),
+            })
+        }
+        "EulerODE" => Ok(CasOp::OdeEuler {
+            a: arg(0, "a")?,
+            b: arg(1, "b")?,
+            rhs: arg(2, "rhs")?,
+            x: step_var(cmd, 3, "x"),
+        }),
+        "FrobeniusSeries" => Ok(CasOp::Frobenius {
+            p: arg(0, "p")?,
+            q: arg(1, "q")?,
+            x: step_var(cmd, 2, "x"),
+            center: step_number(cmd, 3, "x0").unwrap_or(0.0),
+            terms: step_index(cmd, 4, "terminos", 9)?,
+        }),
+        "LaplaceDeriv" => {
+            let order: u32 = cmd
+                .args
+                .first()
+                .map(|raw| raw.trim().parse().unwrap_or(0))
+                .unwrap_or(0);
+            if order == 0 {
+                return Err("StepByStep: LaplaceDeriv requiere n entero ≥ 1".to_string());
+            }
+            Ok(CasOp::LaplaceDerivative {
+                order,
+                y: arg(1, "y")?,
+                t: step_var(cmd, 2, "t"),
+                s: step_var(cmd, 3, "s"),
+                initials: cmd
+                    .args
+                    .get(4)
+                    .map(|raw| parse_w1_brace_list(raw))
+                    .unwrap_or_default(),
+            })
+        }
+        "LaplaceInt" => Ok(CasOp::LaplaceIntegral {
+            f: arg(0, "f")?,
+            t: step_var(cmd, 1, "t"),
+            s: step_var(cmd, 2, "s"),
+        }),
+        "GroebnerOrdered" => Ok(CasOp::GroebnerOrdered {
+            polys: parse_w1_brace_list(cmd.args.first().map(String::as_str).unwrap_or("")),
+            vars: parse_w1_brace_list(cmd.args.get(1).map(String::as_str).unwrap_or("")),
+            order: step_var(cmd, 2, "orden"),
+        }),
+        "Eliminate" => Ok(CasOp::Eliminate {
+            polys: parse_w1_brace_list(cmd.args.first().map(String::as_str).unwrap_or("")),
+            vars: parse_w1_brace_list(cmd.args.get(1).map(String::as_str).unwrap_or("")),
+            elim: parse_w1_brace_list(cmd.args.get(2).map(String::as_str).unwrap_or("")),
+        }),
+        other => Err(format!(
+            "StepByStep: '{other}' no tiene pasos soportados; usa Derivative, Integral, Limit, Taylor, Solve, SolveODEN, EulerODE, FrobeniusSeries, LaplaceDeriv, LaplaceInt, GroebnerOrdered o Eliminate"
+        )),
+    }
+}
+
+fn run_step_by_step_command(args: &[String], document: &Document) -> Result<String, String> {
+    let call = parse_step_call(args).ok_or_else(|| {
+        "StepByStep requiere StepByStep[op] con op una llamada CAS, por ejemplo StepByStep[Derivative[x^2, x]], o la forma plana StepByStep[op, arg1, ...]".to_string()
+    })?;
+    let op_name = call.command.clone();
+    let op = cas_op_from_call(&call, document)?;
+    let steps = steps_for_op(&op).map_err(|error| format!("StepByStep: {error}"))?;
+    if steps.is_empty() {
+        return Ok(format!(
+            "StepByStep[{op_name}]: el motor no emitió pasos para esta operación"
+        ));
+    }
+    let mut out = format!(
+        "StepByStep[{op_name}]: {} pasos",
+        steps.len().min(MAX_CAS_STEPS)
+    );
+    for (position, step) in steps.iter().take(MAX_CAS_STEPS).enumerate() {
+        out.push_str(&format!(
+            "\n{}. [{}] {}\n   {} → {}",
+            position + 1,
+            step.rule,
+            truncate_step_field(&step.description),
+            truncate_step_field(&step.before),
+            truncate_step_field(&step.after),
+        ));
+    }
+    Ok(out)
 }
 
 fn execute_cas_command_typed(
@@ -21903,6 +22379,14 @@ fn execute_cas_command_typed(
                 cmd.command
             )))
         }
+        // Frente fantasma+nuevos: brazos delegantes al motor de
+        // grafito-geometry (ver helpers de PolyGCD/Resultant/Residue/
+        // PrincipalPart/StepByStep sobre `execute_cas_command_typed`).
+        "PolyGCD" => Some(run_poly_gcd_command(&cmd.args, document)),
+        "Resultant" => Some(run_resultant_command(&cmd.args, document)),
+        "Residue" => Some(run_residue_command(&cmd.args, document)),
+        "PrincipalPart" => Some(run_principal_part_command(&cmd.args, document)),
+        "StepByStep" => Some(run_step_by_step_command(&cmd.args, document)),
         _ => None,
     }
 }
@@ -29493,38 +29977,53 @@ fn infinite_literal_sign(arg: &str) -> Option<i8> {
     }
 }
 
+/// Caso impropio real (límite infinito o singularidad): lo resuelve
+/// `integral::improper_integral`. Si el motor no lo resuelve se devuelve el
+/// error honesto con la misma sugerencia que se mostraba antes del frente G1.
+fn run_improper_integral_unbounded(
+    expr: &str,
+    var: &str,
+    a: f64,
+    b: f64,
+    sugerencia: &str,
+) -> CommandOutcome {
+    match geo_improper_integral(expr, var, a, b) {
+        Ok(value) => CommandOutcome::Message(format!("ImproperIntegral: {}", fmt_scalar(value))),
+        Err(error) => CommandOutcome::Error(format!(
+            "ImproperIntegral: {error}; sugerencia: {sugerencia}"
+        )),
+    }
+}
+
 fn run_improper_integral_command(args: &[String], document: &Document) -> CommandOutcome {
     let expr = expand_all_cas(&args[0], document);
     let var = clean_symbol_arg(&args[1]);
     let a_raw = args[2].trim();
     let b_raw = args[3].trim();
 
-    // Si alguno de los límites es infinito, no es un alias finito: devolver error tipado con sugerencia.
-    if let Some(sign) = infinite_literal_sign(a_raw) {
-        let sign_str = if sign < 0 { "-inf" } else { "inf" };
-        return CommandOutcome::Error(format!(
-            "ImproperIntegral: Impropia no soportada, use límites - límite inferior {sign_str} es infinito; sugerencia: use Limit o integre en intervalo finito grande, por ejemplo [0, 1e6]"
-        ));
+    // Límite infinito: impropia real (frente G1). Antes devolvía error tipado
+    // con sugerencia; ahora la resuelve `integral::improper_integral`.
+    let parse_improper_limit = |raw: &str, field: &str| -> Result<f64, CommandOutcome> {
+        match infinite_literal_sign(raw) {
+            Some(sign) => Ok(if sign < 0 {
+                f64::NEG_INFINITY
+            } else {
+                f64::INFINITY
+            }),
+            None => parse_finite_command_arg("ImproperIntegral", field, raw, &document.variables),
+        }
+    };
+    let a = command_result!(parse_improper_limit(a_raw, "a"));
+    let b = command_result!(parse_improper_limit(b_raw, "b"));
+    if !a.is_finite() || !b.is_finite() {
+        return run_improper_integral_unbounded(
+            &expr,
+            &var,
+            a,
+            b,
+            "use Limit o integre en intervalo finito grande, por ejemplo [0, 1e6]",
+        );
     }
-    if let Some(sign) = infinite_literal_sign(b_raw) {
-        let sign_str = if sign < 0 { "-inf" } else { "inf" };
-        return CommandOutcome::Error(format!(
-            "ImproperIntegral: Impropia no soportada, use límites - límite superior {sign_str} es infinito; sugerencia: use Limit o integre en intervalo finito grande, por ejemplo [0, 1e6]"
-        ));
-    }
-
-    let a = command_result!(parse_finite_command_arg(
-        "ImproperIntegral",
-        "a",
-        &args[2],
-        &document.variables,
-    ));
-    let b = command_result!(parse_finite_command_arg(
-        "ImproperIntegral",
-        "b",
-        &args[3],
-        &document.variables,
-    ));
 
     // Detectar singularidad en el borde o interior via aritmética intervalar 1D.
     // Si hay potencial error de dominio, intentar tipificar con limit_typed y cuadratura truncada;
@@ -29570,29 +30069,703 @@ fn run_improper_integral_command(args: &[String], document: &Document) -> Comman
                 _ => {}
             }
         }
-        // Intentar cuadratura truncada si el límite en el borde singular es finito
-        // (caso integrable impropio). Si no, igualmente informar error tipado.
-        if at_border {
-            return CommandOutcome::Error(format!(
-                "ImproperIntegral: Impropia no soportada, use límites - posible singularidad en el borde del intervalo [{},{}];{} sugerencia: use Limit o integre en [{}+ε, {}] con ε pequeño",
+        // Impropia real (singularidad en el borde o interior): frente G1 la
+        // resuelve `integral::improper_integral` en vez de devolver error tipado.
+        let sugerencia = if at_border {
+            format!(
+                "posible singularidad en el borde del intervalo [{},{}];{} use Limit o integre en [{}+ε, {}] con ε pequeño",
                 fmt_scalar(a),
                 fmt_scalar(b),
                 if limit_info.is_empty() { String::new() } else { format!("{limit_info};") },
                 fmt_scalar(a),
                 fmt_scalar(b)
-            ));
-        }
-        // Singularidad interior detectada: también impropia
-        return CommandOutcome::Error(format!(
-            "ImproperIntegral: Impropia no soportada, use límites - posible singularidad interior en [{},{}]; sugerencia: divida el intervalo o use Limit",
-            fmt_scalar(a),
-            fmt_scalar(b)
-        ));
+            )
+        } else {
+            format!(
+                "posible singularidad interior en [{},{}]; divida el intervalo o use Limit",
+                fmt_scalar(a),
+                fmt_scalar(b)
+            )
+        };
+        return run_improper_integral_unbounded(&expr, &var, a, b, &sugerencia);
     }
 
     match symbolic::integrate_definite(&expr, &var, a, b) {
         Ok(value) => CommandOutcome::Message(format!("ImproperIntegral: {value}")),
         Err(error) => CommandOutcome::Error(format!("ImproperIntegral: {error}")),
+    }
+}
+
+/// Entero acotado escrito a mano por el usuario (`n`, `lo`, `hi`).
+///
+/// No pasa por `parse_numeric_arg` a propósito: un `3.0` o un `1e300` acá no
+/// son órdenes válidos y el error tiene que decirlo sin ambigüedad.
+fn parse_bounded_int_arg(
+    command: &str,
+    field: &str,
+    raw: &str,
+    min: i64,
+    max: i64,
+) -> Result<i64, CommandOutcome> {
+    let value: i64 = raw.trim().parse().map_err(|_| {
+        CommandOutcome::Error(format!(
+            "{command}: {field} debe ser un entero en {min}..={max}"
+        ))
+    })?;
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(CommandOutcome::Error(format!(
+            "{command}: {field} = {value} fuera de {min}..={max}"
+        )))
+    }
+}
+
+// ── Frente G1: puente único al contrato de `grafito-geometry` ──────────────
+//
+// CONTRATO de `grafito-geometry` (firmas EXACTAS, ver docs del frente G1):
+//
+//   pde::solve_heat_1d(expr, x, t0, t_end) -> MathResult<PdeSolution>
+//   pde::solve_wave_1d(expr, x, t0, t_end) -> MathResult<PdeSolution>
+//   pde::solve_laplace_2d_rect(g_sup, g_inf, g_izq, g_der,
+//                              xmin, xmax, ymin, ymax) -> MathResult<PdeSolution>
+//   PdeSolution { xs: Vec<f64>, us: Vec<f64> }   // u muestreada en t_end
+//   integral::integrate_by_substitution(expr, var, u) -> MathResult<SubstitutionOutcome>
+//   integral::improper_integral(expr, var, lo, hi) -> MathResult<f64>
+//   latex::parse_latex(input) -> Result<ast::Expr, String>
+//   latex::to_latex(&ast::Expr) -> String
+//   symbolic::sum_closed(expr, var, lo, hi) -> MathResult<String>
+//   symbolic::lambert_w(a) -> MathResult<f64>
+//   fourier::fourier_coefficients(expr, var, l, n) -> Result<FourierCoeffs, String>
+//   fourier::fourier_series(expr, var, l, n) -> Result<ast::Expr, String>
+//   symbolic::derivative_typed(expr, var) -> MathResult<String>
+//
+// Cada `geo_*` es el ÚNICO punto de llamada a esas rutas: los handlers de
+// `commands.rs` hablan `Result<_, String>` y no nombran tipos de `geometry`
+// que todavía no existen. Si el agente publica otra forma, se corrige el
+// cuerpo de UNA función por símbolo y nada más. Los `MathResult<T>` se
+// adaptan con `math_result_a_resultado`.
+//
+// ESTADO VERIFICADO 2026-09-24 (`grep` sobre crates/grafito-geometry/src/):
+// `fourier::{fourier_coefficients, fourier_series}` y
+// `symbolic::derivative_typed` EXISTEN y están cableados (geo_fourier,
+// geo_derivative_nth, geo_partial_derivative). El resto del contrato todavía
+// NO existe: sin módulos `pde` ni `latex`, ni
+// `integral::{improper_integral, integrate_by_substitution}`, ni
+// `symbolic::{sum_closed, lambert_w}`. Hasta que salgan, cada `geo_*`
+// responde el error honesto del bloqueo (con el símbolo exacto que falta) en
+// lugar de una matemática inventada.
+
+/// Expone `pde::solve_heat_1d` y resume `u(x, t_end)`.
+fn geo_heat_1d(expr: &str, x: &str, t0: f64, t_end: f64) -> Result<String, String> {
+    // CALL SITE (contrato): grafito_geometry::pde::solve_heat_1d(expr, x, t0, t_end)
+    let _ = (expr, x, t0, t_end);
+    Err("HeatEquation: motor no disponible (falta grafito_geometry::pde::solve_heat_1d)".into())
+}
+
+/// Expone `pde::solve_wave_1d` y resume `u(x, t_end)`.
+fn geo_wave_1d(expr: &str, x: &str, t0: f64, t_end: f64) -> Result<String, String> {
+    // CALL SITE (contrato): grafito_geometry::pde::solve_wave_1d(expr, x, t0, t_end)
+    let _ = (expr, x, t0, t_end);
+    Err("WaveEquation: motor no disponible (falta grafito_geometry::pde::solve_wave_1d)".into())
+}
+
+/// Expone `pde::solve_laplace_2d_rect` y resume la solución muestreada.
+#[allow(clippy::too_many_arguments)] // espejo de `pde::solve_laplace_2d_rect`: 4 fronteras + dominio + términos
+fn geo_laplace_2d_rect(
+    g_sup: &str,
+    g_inf: &str,
+    g_izq: &str,
+    g_der: &str,
+    xmin: f64,
+    xmax: f64,
+    ymin: f64,
+    ymax: f64,
+) -> Result<String, String> {
+    // CALL SITE (contrato):
+    //   grafito_geometry::pde::solve_laplace_2d_rect(
+    //       g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax)
+    let _ = (g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax);
+    Err(
+        "Laplace2D: motor no disponible (falta grafito_geometry::pde::solve_laplace_2d_rect)"
+            .into(),
+    )
+}
+
+/// Expone `fourier::fourier_coefficients` + `fourier::fourier_series`
+/// → `(resumen de coeficientes, serie)`. `l` es el período completo `T`.
+fn geo_fourier(expr: &str, var: &str, l: f64, n: usize) -> Result<(String, String), String> {
+    let coeficientes = grafito_geometry::fourier::fourier_coefficients(expr, var, l, n)?;
+    let serie = grafito_geometry::fourier::fourier_series(expr, var, l, n)?;
+    let lista = |xs: &[f64]| {
+        xs.iter()
+            .map(|v| fmt_scalar(*v))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let resumen = format!(
+        "a0/2={} (constante), an=[{}], bn=[{}], términos={}, origen={:?}, err≈{}",
+        fmt_scalar(coeficientes.a0 / 2.0),
+        lista(&coeficientes.an),
+        lista(&coeficientes.bn),
+        coeficientes.terms,
+        coeficientes.source,
+        fmt_scalar(coeficientes.error_estimate),
+    );
+    Ok((resumen, serie.to_string()))
+}
+
+/// Adaptador de borde: `MathResult<T>` rico del dominio → `Result<T, String>`.
+///
+/// `Exact` y `Approximate` son éxito (la estimación de error viaja aparte en
+/// los comandos que la muestran); las cuatro variantes de error se mapean a un
+/// mensaje honesto que conserva cuál fue el modo de fallo.
+fn math_result_a_resultado<T>(resultado: grafito_geometry::MathResult<T>) -> Result<T, String> {
+    match resultado {
+        grafito_geometry::MathResult::Exact(valor) => Ok(valor),
+        grafito_geometry::MathResult::Approximate { value, .. } => Ok(value),
+        grafito_geometry::MathResult::DomainError(e) => Err(format!("fuera de dominio: {e:?}")),
+        grafito_geometry::MathResult::NotConverged(e) => Err(format!("sin convergencia: {e:?}")),
+        grafito_geometry::MathResult::Unsupported(e) => Err(format!("no soportado: {e:?}")),
+        grafito_geometry::MathResult::ResourceLimit(e) => {
+            Err(format!("presupuesto excedido: {e:?}"))
+        }
+    }
+}
+
+/// Expone la derivada **simbólica** `n`-ésima iterando `symbolic::derivative_typed`.
+///
+/// `grafito-geometry` no expone aún `derivative_nth`; derivar `n` veces sobre
+/// el `Expr` es exacto. El caller ya acota `n ≤ 16` porque el árbol crece
+/// factorialmente, y `MAX_EXPR_LENGTH` de validación atrapa el caso límite.
+fn geo_derivative_nth(expr: &str, var: &str, n: usize) -> Result<String, String> {
+    let mut actual = expr.to_string();
+    for _ in 0..n {
+        actual =
+            math_result_a_resultado(grafito_geometry::symbolic::derivative_typed(&actual, var))?;
+    }
+    Ok(actual)
+}
+
+/// Expone la derivada **parcial** simbólica respecto de `var`.
+///
+/// `grafito-geometry` no expone aún `partial_derivative`; derivar respecto de
+/// una variable tratando las demás como constantes es exactamente lo que hace
+/// `derivative_typed`, así que el parcial se reduce a esa llamada.
+fn geo_partial_derivative(expr: &str, var: &str) -> Result<String, String> {
+    math_result_a_resultado(grafito_geometry::symbolic::derivative_typed(expr, var))
+}
+
+/// Expone `integral::integrate_by_substitution`.
+fn geo_integrate_by_substitution(expr: &str, var: &str, u: &str) -> Result<String, String> {
+    // CALL SITE (contrato):
+    //   grafito_geometry::integral::integrate_by_substitution(expr, var, u)
+    let _ = (expr, var, u);
+    Err("SubstituteInt: motor no disponible (falta grafito_geometry::integral::integrate_by_substitution)".into())
+}
+
+/// Expone `improper::improper_integral` (admite límites infinitos y
+/// singularidades en los extremos).
+fn geo_improper_integral(expr: &str, var: &str, lo: f64, hi: f64) -> Result<f64, String> {
+    use grafito_geometry::{MathError, MathResult};
+    match grafito_geometry::improper::improper_integral(expr, var, lo, hi) {
+        MathResult::Exact(valor) => Ok(valor),
+        MathResult::Approximate { value, .. } => Ok(value),
+        MathResult::DomainError(MathError::DivergentIntegral { at, .. }) => Err(format!(
+            "Impropia divergente en {at}: la integral no tiene valor finito"
+        )),
+        MathResult::Unsupported(MathError::AntiderivativeUnavailable { .. }) => {
+            Err("Impropia no soportada, use límites: sin antiderivada simbólica".to_string())
+        }
+        otro => Err(format!("Impropia no resoluble: {otro:?}")),
+    }
+}
+
+/// Expone `latex::parse_latex`.
+fn geo_parse_latex(input: &str) -> Result<String, String> {
+    // CALL SITE (contrato): grafito_geometry::latex::parse_latex(input)
+    //   → Ok(ast) => Ok(ast.to_string())
+    let _ = input;
+    Err("ParseLatex: motor no disponible (falta grafito_geometry::latex::parse_latex)".into())
+}
+
+/// Expone `latex::to_latex`.
+fn geo_to_latex(expr: &str) -> Result<String, String> {
+    // CALL SITE (contrato):
+    //   let ast = grafito_geometry::ast::parse_ast(expr)?;
+    //   Ok(grafito_geometry::latex::to_latex(&ast))
+    let _ = expr;
+    Err("ToLatex: motor no disponible (falta grafito_geometry::latex::to_latex)".into())
+}
+
+// ── Frente G1: handlers de comandos ────────────────────────────────────────
+
+fn run_heat_equation_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "HeatEquation: se requieren 4 argumentos (expr, x, t0, t_end)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("HeatEquation: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("HeatEquation: expresión inválida o muy larga".into());
+    }
+    let t0 = command_result!(parse_finite_command_arg(
+        "HeatEquation",
+        "t0",
+        &args[2],
+        &document.variables,
+    ));
+    let t_end = command_result!(parse_finite_command_arg(
+        "HeatEquation",
+        "t_end",
+        &args[3],
+        &document.variables,
+    ));
+    if t_end < t0 {
+        return CommandOutcome::Error("HeatEquation: t_end debe ser >= t0".into());
+    }
+    match geo_heat_1d(&expr, &var, t0, t_end) {
+        Ok(resumen) => CommandOutcome::Message(format!("HeatEquation: {resumen}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_wave_equation_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "WaveEquation: se requieren 4 argumentos (expr, x, t0, t_end)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("WaveEquation: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("WaveEquation: expresión inválida o muy larga".into());
+    }
+    let t0 = command_result!(parse_finite_command_arg(
+        "WaveEquation",
+        "t0",
+        &args[2],
+        &document.variables,
+    ));
+    let t_end = command_result!(parse_finite_command_arg(
+        "WaveEquation",
+        "t_end",
+        &args[3],
+        &document.variables,
+    ));
+    if t_end < t0 {
+        return CommandOutcome::Error("WaveEquation: t_end debe ser >= t0".into());
+    }
+    match geo_wave_1d(&expr, &var, t0, t_end) {
+        Ok(resumen) => CommandOutcome::Message(format!("WaveEquation: {resumen}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_laplace_2d_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 8 {
+        return CommandOutcome::Error(
+            "Laplace2D: se requieren 8 argumentos (g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax)"
+                .into(),
+        );
+    }
+    let mut borders = Vec::with_capacity(4);
+    for (index, name) in ["g_sup", "g_inf", "g_izq", "g_der"].iter().enumerate() {
+        let border = expand_all_cas(&args[index], document);
+        if border.trim().is_empty() || border.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+            return CommandOutcome::Error(format!(
+                "Laplace2D: {name} es una expresión inválida o muy larga"
+            ));
+        }
+        borders.push(border);
+    }
+    let xmin = command_result!(parse_finite_command_arg(
+        "Laplace2D",
+        "xmin",
+        &args[4],
+        &document.variables,
+    ));
+    let xmax = command_result!(parse_finite_command_arg(
+        "Laplace2D",
+        "xmax",
+        &args[5],
+        &document.variables,
+    ));
+    let ymin = command_result!(parse_finite_command_arg(
+        "Laplace2D",
+        "ymin",
+        &args[6],
+        &document.variables,
+    ));
+    let ymax = command_result!(parse_finite_command_arg(
+        "Laplace2D",
+        "ymax",
+        &args[7],
+        &document.variables,
+    ));
+    if !(xmin < xmax && ymin < ymax) {
+        return CommandOutcome::Error("Laplace2D: se requiere xmin < xmax e ymin < ymax".into());
+    }
+    match geo_laplace_2d_rect(
+        &borders[0],
+        &borders[1],
+        &borders[2],
+        &borders[3],
+        xmin,
+        xmax,
+        ymin,
+        ymax,
+    ) {
+        Ok(resumen) => CommandOutcome::Message(format!("Laplace2D: {resumen}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+/// `FourierSeries` y `FourierCoeffs` comparten validación y motor.
+fn run_fourier_command(command: &str, args: &[String], document: &mut Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(format!(
+            "{command}: se requieren 4 argumentos (expr, var, L, n)"
+        ));
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error(format!("{command}: se requiere una variable válida"));
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error(format!("{command}: expresión inválida o muy larga"));
+    }
+    let l = command_result!(parse_finite_command_arg(
+        command,
+        "L",
+        &args[2],
+        &document.variables,
+    ));
+    if l <= 0.0 {
+        return CommandOutcome::Error(format!("{command}: L debe ser positivo"));
+    }
+    let n = command_result!(parse_bounded_int_arg(command, "n", &args[3], 1, 32));
+    match geo_fourier(&expr, &var, l, n as usize) {
+        Ok((coeficientes, serie)) => {
+            if command == "FourierSeries" {
+                let label = next_function_label(document);
+                let obj = GeoObject::Function(FunctionObj::new(&serie).with_label(&label));
+                insert_command_object!(document, obj);
+                CommandOutcome::Message(format!("FourierSeries: {coeficientes} → {label}"))
+            } else {
+                CommandOutcome::Message(format!("FourierCoeffs: {coeficientes}"))
+            }
+        }
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_fourier_series_command(args: &[String], document: &mut Document) -> CommandOutcome {
+    run_fourier_command("FourierSeries", args, document)
+}
+
+fn run_fourier_coeffs_command(args: &[String], document: &mut Document) -> CommandOutcome {
+    run_fourier_command("FourierCoeffs", args, document)
+}
+
+fn run_nderivative_sym_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "NDerivativeSym: se requieren 3 argumentos (expr, var, n)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("NDerivativeSym: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("NDerivativeSym: expresión inválida o muy larga".into());
+    }
+    // Cota anti-DoS: la derivada n-ésima simbólica crece factorialmente en el
+    // árbol; 16 es el mismo tope que `laurent_residue`.
+    let n = command_result!(parse_bounded_int_arg(
+        "NDerivativeSym",
+        "n",
+        &args[2],
+        1,
+        16
+    ));
+    match geo_derivative_nth(&expr, &var, n as usize) {
+        Ok(derivada) => CommandOutcome::Message(format!("NDerivativeSym: {derivada}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_partial_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error("Partial: se requieren 2 argumentos (expr, var)".into());
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("Partial: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("Partial: expresión inválida o muy larga".into());
+    }
+    match geo_partial_derivative(&expr, &var) {
+        Ok(parcial) => CommandOutcome::Message(format!("Partial: {parcial}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_substitute_int_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 3 {
+        return CommandOutcome::Error(
+            "SubstituteInt: se requieren 3 argumentos (expr, var, u)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("SubstituteInt: se requiere una variable válida".into());
+    }
+    let u = expand_all_cas(&args[2], document);
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("SubstituteInt: expresión inválida o muy larga".into());
+    }
+    if u.trim().is_empty() || u.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("SubstituteInt: cambio u inválido o muy largo".into());
+    }
+    match geo_integrate_by_substitution(&expr, &var, &u) {
+        Ok(primitiva) => CommandOutcome::Message(format!("SubstituteInt: {primitiva}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_lambert_w_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("LambertW: se requiere 1 argumento (a)".into());
+    }
+    let a = command_result!(parse_finite_command_arg(
+        "LambertW",
+        "a",
+        &args[0],
+        &document.variables,
+    ));
+    // Dominio real de W: a ≥ -1/e (punto de ramificación W0 = W-1 = -1).
+    let branch_point = -1.0 / std::f64::consts::E;
+    if a < branch_point {
+        return CommandOutcome::Error(format!(
+            "LambertW: fuera de dominio (a = {} < -1/e = {})",
+            fmt_scalar(a),
+            fmt_scalar(branch_point)
+        ));
+    }
+    // Rama principal W0: única raíz real de w·e^w = a en (-1, ∞) (la rama
+    // W-1 vive en (-∞, -1] y queda fuera de la ventana a propósito). El
+    // método de búsqueda vive en `grafito-geometry`; acá solo se fija el
+    // problema y la ventana.
+    let f = |w: f64| w * w.exp() - a;
+    match grafito_geometry::cas::find_root(f, (-1.0, a.max(0.0) + 1.0)) {
+        Some(w) => CommandOutcome::Message(format!(
+            "LambertW[{}] = W0 ≈ {}",
+            fmt_scalar(a),
+            fmt_scalar(w)
+        )),
+        None => CommandOutcome::Error(format!(
+            "LambertW: sin convergencia para a = {}",
+            fmt_scalar(a)
+        )),
+    }
+}
+
+fn run_solve_transcendental_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 2 {
+        return CommandOutcome::Error(
+            "SolveTranscendental: se requieren 2 argumentos (expr, var)".into(),
+        );
+    }
+    let expr_raw = expand_all_cas(&args[0], document);
+    let mut expr_clean = expr_raw.trim().to_string();
+    if expr_clean.is_empty() || expr_clean.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("SolveTranscendental: expresión inválida o muy larga".into());
+    }
+    // Acepta `f(x) = g(x)` al estilo `NSolve`: se resuelve f - g = 0.
+    if let Some((lhs, rhs)) = split_on_standalone_eq(&expr_clean) {
+        expr_clean = format!("({lhs}) - ({rhs})");
+    }
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error(
+            "SolveTranscendental: se requiere una variable válida".into(),
+        );
+    }
+    let target = var.as_str();
+    let f = |t: f64| {
+        eval_multivar_expr(&expr_clean, &document.variables, &[(target, t)]).unwrap_or(f64::NAN)
+    };
+    // Ventana numérica por defecto [-20, 20], la misma que usa `NSolve` sin
+    // límites explícitos. Acá NO se inventa un método: `find_root` es del
+    // motor CAS y devuelve la primera raíz real que encuentre.
+    match grafito_geometry::cas::find_root(f, (-20.0, 20.0)) {
+        Some(root) => CommandOutcome::Message(format!(
+            "SolveTranscendental: {var} ≈ {} (primera raíz real en [-20, 20])",
+            fmt_scalar(root)
+        )),
+        None => CommandOutcome::Error(format!(
+            "SolveTranscendental: sin raíz real de {} en la ventana [-20, 20]; acotá el problema o usá NSolve[expr, var, min, max]",
+            expr_clean
+        )),
+    }
+}
+
+fn run_laurent_series_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "LaurentSeries: se requieren 4 argumentos (expr, var, x0, n)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("LaurentSeries: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("LaurentSeries: expresión inválida o muy larga".into());
+    }
+    let x0 = command_result!(parse_finite_command_arg(
+        "LaurentSeries",
+        "x0",
+        &args[2],
+        &document.variables,
+    ));
+    // Cota anti-DoS: mismo tope que `cas::MAX_LAURENT_ORDER`.
+    let n = command_result!(parse_bounded_int_arg("LaurentSeries", "n", &args[3], 0, 16));
+    // Parte principal (potencias negativas) del motor de Laurent del CAS.
+    let principal = match grafito_geometry::cas::laurent_principal_part(&expr, &var, x0, 16) {
+        Ok(terms) => terms,
+        Err(error) => return CommandOutcome::Error(format!("LaurentSeries: {error}")),
+    };
+    // Parte regular (potencias 0..=n) vía coeficientes de Taylor del motor.
+    let compact = expr.replace(' ', "");
+    let regular = match grafito_geometry::ast::parse_ast(&compact) {
+        Ok(ast) => {
+            match grafito_geometry::analysis::taylor_coefficients_from_ast(
+                &ast, &var, x0, n as usize,
+            ) {
+                Ok(coeffs) => coeffs,
+                Err(error) => return CommandOutcome::Error(format!("LaurentSeries: {error}")),
+            }
+        }
+        Err(error) => return CommandOutcome::Error(format!("LaurentSeries: {error}")),
+    };
+    let shifted = |power: i64| -> String {
+        if x0 == 0.0 {
+            format!("{var}^{power}")
+        } else {
+            format!("({var}-{})^{power}", fmt_scalar(x0))
+        }
+    };
+    let mut terms: Vec<String> = Vec::new();
+    for (power, coeff) in &principal {
+        if coeff.abs() < 1e-12 {
+            continue;
+        }
+        terms.push(format!(
+            "{}*{}",
+            fmt_scalar(*coeff),
+            shifted(i64::from(*power))
+        ));
+    }
+    for (k, coeff) in regular.iter().enumerate() {
+        if coeff.abs() < 1e-12 {
+            continue;
+        }
+        if k == 0 {
+            terms.push(fmt_scalar(*coeff));
+        } else {
+            terms.push(format!("{}*{}", fmt_scalar(*coeff), shifted(k as i64)));
+        }
+    }
+    if terms.is_empty() {
+        return CommandOutcome::Message("LaurentSeries = 0".into());
+    }
+    CommandOutcome::Message(format!("LaurentSeries = {}", terms.join(" + ")))
+}
+
+fn run_sum_closed_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 4 {
+        return CommandOutcome::Error(
+            "SumClosed: se requieren 4 argumentos (expr, var, lo, hi)".into(),
+        );
+    }
+    let expr = expand_all_cas(&args[0], document);
+    let var = clean_symbol_arg(&args[1]);
+    if !is_math_identifier(&var) {
+        return CommandOutcome::Error("SumClosed: se requiere una variable válida".into());
+    }
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("SumClosed: expresión inválida o muy larga".into());
+    }
+    let lo = command_result!(parse_bounded_int_arg(
+        "SumClosed",
+        "lo",
+        &args[2],
+        -1_000_000,
+        1_000_000
+    ));
+    let hi = command_result!(parse_bounded_int_arg(
+        "SumClosed",
+        "hi",
+        &args[3],
+        -1_000_000,
+        1_000_000
+    ));
+    if hi < lo {
+        return CommandOutcome::Error("SumClosed: se requiere hi >= lo".into());
+    }
+    // BLOQUEO VERIFICADO: `grafito-geometry` no expone motor de sumas en forma
+    // cerrada (no hay Faulhaber ni polilogaritmos: `list_ops::list_sum` es
+    // numérico sobre datos y no sirve). Preferimos el error honesto a una suma
+    // directa disfrazada de cerrada. Requiere, p. ej.,
+    // `grafito_geometry::symbolic::sum_closed(expr, var, lo, hi)`.
+    CommandOutcome::Error(format!(
+        "SumClosed: sin motor de sumas en forma cerrada en grafito-geometry (falta, p. ej., grafito_geometry::symbolic::sum_closed); no se resuelve Σ_{{{var}={lo}..{hi}}} {expr} para no devolver una suma numérica por una forma cerrada"
+    ))
+}
+
+fn run_parse_latex_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("ParseLatex: se requiere 1 argumento (latex)".into());
+    }
+    let raw = args[0].trim().trim_matches(|c| c == '"' || c == '\'');
+    if raw.is_empty() || raw.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("ParseLatex: entrada vacía o muy larga".into());
+    }
+    let _ = document;
+    match geo_parse_latex(raw) {
+        Ok(expr) => CommandOutcome::Message(format!("ParseLatex: {expr}")),
+        Err(error) => CommandOutcome::Error(error),
+    }
+}
+
+fn run_to_latex_command(args: &[String], document: &Document) -> CommandOutcome {
+    if args.len() != 1 {
+        return CommandOutcome::Error("ToLatex: se requiere 1 argumento (expr)".into());
+    }
+    let expr = expand_all_cas(&args[0], document);
+    if expr.trim().is_empty() || expr.len() > grafito_core::validation::MAX_EXPR_LENGTH {
+        return CommandOutcome::Error("ToLatex: expresión inválida o muy larga".into());
+    }
+    match geo_to_latex(&expr) {
+        Ok(latex) => CommandOutcome::Message(format!("ToLatex: {latex}")),
+        Err(error) => CommandOutcome::Error(error),
     }
 }
 
@@ -32672,55 +33845,48 @@ mod tests {
     }
 
     #[test]
-    fn p03_improper_infinite_limit_returns_typed_error() {
+    fn p03_improper_infinite_limit_resolves() {
+        // ∫_0^∞ e^{−x} dx = 1. El motor `improper::improper_integral` lo
+        // resuelve por límite de la antiderivada; antes respondía error tipado.
         let mut doc = Document::new();
         let mut cmd = "ImproperIntegral[exp(-x), x, 0, inf]".to_string();
-        let outcome = process_input(&mut doc, &mut cmd);
-        match outcome {
-            CommandOutcome::Error(msg) => {
+        match process_input(&mut doc, &mut cmd) {
+            CommandOutcome::Message(msg) => {
+                assert!(msg.contains("ImproperIntegral:"), "got: {msg}");
                 assert!(
-                    msg.contains("Impropia no soportada, use límites"),
-                    "expected typed improper error, got: {msg}"
-                );
-                assert!(
-                    msg.to_lowercase().contains("sugerencia") || msg.contains("Limit"),
-                    "should contain suggestion, got: {msg}"
+                    !msg.contains("Impropia"),
+                    "ya no debe devolver el error tipado, got: {msg}"
                 );
             }
-            other => panic!("expected improper infinite error, got {other:?}"),
+            other => panic!("expected resolved improper integral, got {other:?}"),
         }
     }
 
     #[test]
-    fn p03_improper_oo_alias_returns_typed_error() {
+    fn p03_improper_oo_alias_resolves() {
         let mut doc = Document::new();
         let mut cmd = "ImproperIntegral[exp(-x), x, 0, oo]".to_string();
-        let outcome = process_input(&mut doc, &mut cmd);
-        match outcome {
-            CommandOutcome::Error(msg) => {
-                assert!(
-                    msg.contains("Impropia no soportada, use límites"),
-                    "expected typed error for oo, got: {msg}"
-                );
+        match process_input(&mut doc, &mut cmd) {
+            CommandOutcome::Message(msg) => {
+                assert!(msg.contains("ImproperIntegral:"), "got: {msg}")
             }
-            other => panic!("expected Error for oo, got {other:?}"),
+            other => panic!("expected resolved improper integral for `oo`, got {other:?}"),
         }
     }
 
     #[test]
-    fn p03_improper_border_singularity_returns_typed_error() {
+    fn p03_improper_border_singularity_reports_divergence() {
         let mut doc = Document::new();
-        // Singularidad en borde inferior x=0
+        // ∫_0^1 1/x dx diverge: la antiderivada ln(x) tiende a −∞ en 0.
         let mut cmd = "ImproperIntegral[1/x, x, 0, 1]".to_string();
-        let outcome = process_input(&mut doc, &mut cmd);
-        match outcome {
+        match process_input(&mut doc, &mut cmd) {
             CommandOutcome::Error(msg) => {
                 assert!(
-                    msg.contains("Impropia no soportada, use límites"),
-                    "expected typed border singularity error, got: {msg}"
+                    msg.contains("divergente"),
+                    "expected divergence report, got: {msg}"
                 );
             }
-            other => panic!("expected border singularity error, got {other:?}"),
+            other => panic!("expected Error for divergent border singularity, got {other:?}"),
         }
     }
 

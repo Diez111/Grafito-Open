@@ -160,6 +160,10 @@ impl CommandSpec {
             "graph.phase-portrait" => return count >= 2,
             "complex.complex-grid" | "graph.heat-map" => return count >= 1,
             "am2.triple-integral" => return count == 11,
+            // StepByStep[op] (forma anidada) o StepByStep[op, arg1, ...]
+            // (forma plana con los operandos de la operación envuelta; el op
+            // con más operandos es LaplaceDeriv/FrobeniusSeries: 5).
+            "cas.step-by-step" => return (1..=6).contains(&count),
             "am2.flux" | "am2.green" => return count == 8,
             "am2.gauss-ostrogradski" => return count == 11,
             "discrete.convex-hull"
@@ -169,6 +173,9 @@ impl CommandSpec {
             | "discrete.tsp" => return (1..=10000).contains(&count),
             "discrete.shortest-distance" => return count == 2,
             "statistics.anova" => return (2..=100).contains(&count),
+            // SolveLine3DParameters: director, relación, objetivo y uno o más
+            // parámetros nombrados (el handler recorre args[3..]).
+            "geometry.solve-line-3d-parameters" => return count >= 4,
             _ => {}
         }
 
@@ -566,6 +573,92 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("ImplicitCurve[f(x, y) = c]"; "ecuacion": Expression required),
             signature!("ImplicitCurve[lhs, rhs, relacion]"; "lhs": Expression required, "rhs": Expression required, "relacion": Relation required)
         ]
+    ),
+
+    // ── Frente fantasma-2: curvas paramétricas clásicas con brazo propio ──
+    command!(
+        "geometry.cardioid",
+        "Cardioid",
+        ["cardioide"],
+        "Crear",
+        "Cardioide r = a(1+cos θ) muestreada en 200 puntos: Cardioid[a].",
+        CreatesObject,
+        Low,
+        true,
+        "Cardioid",
+        [signature!("Cardioid[a]"; "a": Number required)]
+    ),
+    command!(
+        "geometry.rose",
+        "Rose",
+        ["rosa"],
+        "Crear",
+        "Rosa de k pétalos r = a·cos((n/d)·θ) muestreada en 400 puntos: Rose[a, n, d].",
+        CreatesObject,
+        Low,
+        true,
+        "Rose",
+        [signature!("Rose[a, n, d]"; "a": Number required, "n": Integer required, "d": Integer required)]
+    ),
+    command!(
+        "geometry.archimedean-spiral",
+        "ArchimedeanSpiral",
+        ["espiral_arquimedes"],
+        "Crear",
+        "Espiral de Arquímedes r = a + b·θ hasta theta_max (300 puntos).",
+        CreatesObject,
+        Low,
+        true,
+        "ArchimedeanSpiral",
+        [signature!("ArchimedeanSpiral[a, b, theta_max]"; "a": Number required, "b": Number required, "theta_max": Number required)]
+    ),
+    command!(
+        "geometry.logarithmic-spiral",
+        "LogarithmicSpiral",
+        ["espiral_logaritmica"],
+        "Crear",
+        "Espiral logarítmica r = a·e^(b·θ) hasta theta_max (300 puntos).",
+        CreatesObject,
+        Low,
+        true,
+        "LogarithmicSpiral",
+        [signature!("LogarithmicSpiral[a, b, theta_max]"; "a": Number required, "b": Number required, "theta_max": Number required)]
+    ),
+    command!(
+        "geometry.lissajous",
+        "Lissajous",
+        [],
+        "Crear",
+        "Curva de Lissajous x=a·sen(fx·t+δ), y=b·sen(fy·t) muestreada en 400 puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "Lissajous",
+        [signature!("Lissajous[a, b, freq_x, freq_y, delta]"; "a": Number required, "b": Number required, "freq_x": Number required, "freq_y": Number required, "delta": Number required)]
+    ),
+    command!(
+        "geometry.epicycloid",
+        "Epicycloid",
+        ["epicicloide"],
+        "Crear",
+        "Epicicloide de radio r y razón k muestreada en 400 puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "Epicycloid",
+        [signature!("Epicycloid[r, k]"; "r": Number required, "k": Number required)]
+    ),
+    command!(
+        "geometry.hypocycloid",
+        "Hypocycloid",
+        ["hipocicloide"],
+        "Crear",
+        "Hipocicloide de radio r y razón k muestreada en 400 puntos.",
+        CreatesObject,
+        Low,
+        true,
+        "Hypocycloid",
+        [signature!("Hypocycloid[r, k]"; "r": Number required, "k": Number required)]
     ),
     command!(
         "geometry.vector-field-2d",
@@ -1428,6 +1521,134 @@ const COMMANDS: &[CommandSpec] = &[
         "Rationalize",
         [signature!("Rationalize[expr]"; "expr": Expression required)]
     ),
+
+    // ── Frente fantasma-2: funciones especiales con brazo propio ──────────
+    command!(
+        "cas.ln-gamma",
+        "LnGamma",
+        ["lgamma"],
+        "CAS",
+        "Logaritmo natural de la función Gamma Γ(x).",
+        ReadOnly,
+        Low,
+        true,
+        "LnGamma",
+        [signature!("LnGamma[x]"; "x": Number required)]
+    ),
+    command!(
+        "cas.bessel-j",
+        "BesselJ",
+        ["bessel_j"],
+        "CAS",
+        "Función de Bessel de primera especie J_n(x); el orden admitido está acotado.",
+        ReadOnly,
+        Low,
+        true,
+        "BesselJ",
+        [signature!("BesselJ[n, x]"; "n": Integer required, "x": Number required)]
+    ),
+    command!(
+        "cas.bessel-y",
+        "BesselY",
+        ["bessel_y"],
+        "CAS",
+        "Función de Bessel de segunda especie Y_n(x); el orden admitido está acotado.",
+        ReadOnly,
+        Low,
+        true,
+        "BesselY",
+        [signature!("BesselY[n, x]"; "n": Integer required, "x": Number required)]
+    ),
+    command!(
+        "cas.bessel-i",
+        "BesselI",
+        ["bessel_i"],
+        "CAS",
+        "Función de Bessel modificada I_n(x); el orden admitido está acotado.",
+        ReadOnly,
+        Low,
+        true,
+        "BesselI",
+        [signature!("BesselI[n, x]"; "n": Integer required, "x": Number required)]
+    ),
+    command!(
+        "cas.erf",
+        "Erf",
+        ["funcion_error"],
+        "CAS",
+        "Función de error erf(x).",
+        ReadOnly,
+        Low,
+        true,
+        "Erf",
+        [signature!("Erf[x]"; "x": Number required)]
+    ),
+    command!(
+        "cas.erfc",
+        "Erfc",
+        [],
+        "CAS",
+        "Función de error complementaria erfc(x) = 1 - erf(x).",
+        ReadOnly,
+        Low,
+        true,
+        "Erfc",
+        [signature!("Erfc[x]"; "x": Number required)]
+    ),
+    command!(
+        "cas.digamma",
+        "Digamma",
+        ["psi"],
+        "CAS",
+        "Función digamma ψ(x) = Γ'(x)/Γ(x).",
+        ReadOnly,
+        Low,
+        true,
+        "Digamma",
+        [signature!("Digamma[x]"; "x": Number required)]
+    ),
+    command!(
+        "cas.poly-gcd",
+        "PolyGCD",
+        ["poly_gcd", "gcd_polinomico", "mcd_polinomico"],
+        "CAS",
+        "MCD mónico de dos polinomios de una sola variable por PRS subresultante; la variable se deduce de las expresiones o se indica como tercer argumento y una entrada no polinómica da error honesto.",
+        ReadOnly,
+        Low,
+        true,
+        "PolyGCD",
+        [
+            signature!("PolyGCD[p, q]"; "p": Expression required, "q": Expression required),
+            signature!("PolyGCD[p, q, variable]"; "p": Expression required, "q": Expression required, "variable": Variable optional)
+        ]
+    ),
+    command!(
+        "cas.resultant",
+        "Resultant",
+        ["resultante", "resultante_sylvester"],
+        "CAS",
+        "Elimina la variable x de dos polinomios bivariados por la resultante de Sylvester (m + n ≤ 8, grado resultante ≤ 32) y devuelve el polinomio en la otra variable; con más de dos variables o eliminación degenerada responde con error honesto.",
+        ReadOnly,
+        Medium,
+        true,
+        "Resultant",
+        [signature!("Resultant[f, g, x]"; "f": Expression required, "g": Expression required, "x": Variable required)]
+    ),
+    command!(
+        "cas.step-by-step",
+        "StepByStep",
+        ["step_by_step", "pasopaso", "paso_a_paso"],
+        "CAS",
+        "Muestra la traza pedagógica paso a paso (máximo 32 pasos) de una operación CAS: StepByStep[Derivative[x^2, x]] o la forma plana StepByStep[op, arg1, ...]; cubre Derivative, Integral, Limit, Taylor, Solve, SolveODEN, EulerODE, FrobeniusSeries, LaplaceDeriv, LaplaceInt, GroebnerOrdered y Eliminate.",
+        ReadOnly,
+        Low,
+        true,
+        "StepByStep",
+        [
+            signature!("StepByStep[op]"; "op": Expression required),
+            signature!("StepByStep[op, arg1, ...]"; "op": Expression required, "arg1": Expression required)
+        ]
+    ),
     command!(
         "cas.taylor",
         "Taylor",
@@ -1654,8 +1875,11 @@ const COMMANDS: &[CommandSpec] = &[
     ),
     command!(
         "complex.gauss",
+        // `residue` dejó de ser alias de Gauss: desde este frente es el
+        // canónico del comando `Residue[f, x, x0]` (residuo de Laurent), y
+        // `resolve` es case-insensitive (ver `registry_tests`).
         "Gauss",
-        ["residuos", "residue"],
+        ["residuos"],
         "Complejos",
         "Calcula una integral compleja por residuos.",
         CreatesObject,
@@ -1679,6 +1903,43 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("ComplexIntegral[expr_compleja, curva]"; "expr_compleja": ComplexExpression required, "curva": Curve required)
         ]
+    ),
+    command!(
+        "complex.residue",
+        "Residue",
+        ["residuo"],
+        "Complejos",
+        "Residuo a_-1 de la expansión de Laurent de f en x = x0: polos simples y de orden hasta 16, analítica o evitable da 0 y una singularidad esencial da error honesto.",
+        ReadOnly,
+        Medium,
+        true,
+        "Residue",
+        [signature!("Residue[f, x, x0]"; "f": Expression required, "x": Variable required, "x0": Number required)]
+    ),
+    command!(
+        "complex.principal-part",
+        "PrincipalPart",
+        ["parte_principal", "principal_part"],
+        "Complejos",
+        "Parte principal de la expansión de Laurent de f en x = x0: términos a_-k/(x - x0)^k con k = 1..orden del polo (orden hasta 16); sin polo devuelve la parte vacía.",
+        ReadOnly,
+        Medium,
+        true,
+        "PrincipalPart",
+        [signature!("PrincipalPart[f, x, x0]"; "f": Expression required, "x": Variable required, "x0": Number required)]
+    ),
+
+    command!(
+        "complex.symbol",
+        "ComplexSymbol",
+        ["simbolo_complejo"],
+        "Complejos",
+        "Cambia el símbolo base de los complejos del documento (p. ej. z por w) y migra las expresiones existentes.",
+        TransformsObject,
+        Low,
+        true,
+        "ComplexSymbol",
+        [signature!("ComplexSymbol[simbolo]"; "simbolo": Expression required)]
     ),
     command!(
         "am1.riemann-sum",
@@ -1722,6 +1983,153 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("LHopital[num, den, x, a, max_steps]"; "num": Expression required, "den": Expression required, "x": Variable required, "a": Number required, "max_steps": Integer optional)
         ]
     ),
+    // Alias sin declarar a propósito (estilo de los specs vecinos AM1/AM2/
+    // Matrices): las formas españolas siguen vivas en la tabla legacy de
+    // `cas_parse.rs` y el scoring del catálogo del asistente suma por alias,
+    // con lo que declarar "sumaserie"/"series_sum" acá pateaba el ranking de
+    // pedidos como "serie de Fourier finita" fuera de `Function[expr]`.
+    command!(
+        "am1.improper-integral",
+        "ImproperIntegral",
+        [],
+        "AM1",
+        "Integra en [a, b] con cuadratura exacta; los límites infinitos o las singularidades en el borde o el interior son una impropia real que resuelve el motor (divergencia informada, sin aproximación silenciosa).",
+        ReadOnly,
+        Medium,
+        true,
+        "ImproperIntegral",
+        [
+            signature!("ImproperIntegral[f, x, a, b]"; "f": Expression required, "x": Variable required, "a": Number required, "b": Number required)
+        ]
+    ),
+    command!(
+        "am1.mean-value-check",
+        "MeanValueCheck",
+        [],
+        "AM1",
+        "Busca c en (a, b) con f'(c) igual a la pendiente media (teorema del valor medio de Lagrange) y reporta la pendiente junto con los candidatos hallados.",
+        ReadOnly,
+        Medium,
+        true,
+        "MeanValueCheck",
+        [
+            signature!("MeanValueCheck[f, x, a, b]"; "f": Expression required, "x": Variable required, "a": Number required, "b": Number required)
+        ]
+    ),
+
+    // ── Frente fantasma-2: teoremas y series con brazo propio ─────────────
+    command!(
+        "am1.rolle-check",
+        "RolleCheck",
+        [],
+        "AM1",
+        "Verifica las hipótesis del teorema de Rolle y busca c en (a, b) con f'(c) = 0.",
+        ReadOnly,
+        Medium,
+        true,
+        "RolleCheck",
+        [signature!("RolleCheck[f, x, a, b]"; "f": Expression required, "x": Variable required, "a": Number required, "b": Number required)]
+    ),
+    command!(
+        "am1.cauchy-mean-value-check",
+        "CauchyMeanValueCheck",
+        [],
+        "AM1",
+        "Teorema del valor medio de Cauchy: busca c con (f(b)-f(a))·g'(c) = (g(b)-g(a))·f'(c) en (a, b).",
+        ReadOnly,
+        Medium,
+        true,
+        "CauchyMeanValueCheck",
+        [signature!("CauchyMeanValueCheck[f, g, x, a, b]"; "f": Expression required, "g": Expression required, "x": Variable required, "a": Number required, "b": Number required)]
+    ),
+    command!(
+        "am1.alternating-series-test",
+        "AlternatingSeriesTest",
+        [],
+        "AM1",
+        "Criterio de series alternadas muestreando |a_n| en n = 50, 100, 200 y 400: decrecimiento y tendencia a cero.",
+        ReadOnly,
+        Low,
+        true,
+        "AlternatingSeriesTest",
+        [signature!("AlternatingSeriesTest[a_n, n]"; "a_n": Expression required, "n": Variable optional)]
+    ),
+    command!(
+        "am1.integral-test",
+        "IntegralTest",
+        [],
+        "AM1",
+        "Criterio integral numérico: integra desde inicio hasta inicio+1000 y estima la cola hasta inicio+2000.",
+        ReadOnly,
+        Medium,
+        true,
+        "IntegralTest",
+        [signature!("IntegralTest[a_n, n, inicio]"; "a_n": Expression required, "n": Variable required, "inicio": Number required)]
+    ),
+    command!(
+        "am1.absolute-convergence",
+        "AbsoluteConvergence",
+        [],
+        "AM1",
+        "Convergencia absoluta vía el criterio de la razón aplicado a |a_n|.",
+        ReadOnly,
+        Low,
+        true,
+        "AbsoluteConvergence",
+        [signature!("AbsoluteConvergence[a_n, n]"; "a_n": Expression required, "n": Variable optional)]
+    ),
+    command!(
+        "am1.ratio-test",
+        "RatioTest",
+        [],
+        "AM1",
+        "Criterio de la razón (D'Alembert): estima L = |a_(n+1)/a_n| con n = 20, 40, 80 y 120 y clasifica la convergencia.",
+        ReadOnly,
+        Low,
+        true,
+        "RatioTest",
+        [signature!("RatioTest[a_n, n]"; "a_n": Expression required, "n": Variable optional)]
+    ),
+    command!(
+        "am1.root-test",
+        "RootTest",
+        [],
+        "AM1",
+        "Criterio de la raíz (Cauchy): estima L = |a_n|^(1/n) con n = 20, 40, 80 y 120 y clasifica la convergencia.",
+        ReadOnly,
+        Low,
+        true,
+        "RootTest",
+        [signature!("RootTest[a_n, n]"; "a_n": Expression required, "n": Variable optional)]
+    ),
+    command!(
+        "am1.sequence-limit",
+        "SequenceLimit",
+        [],
+        "AM1",
+        "Estima el límite de una sucesión muestreando n = 100..10000; informa el drift de las últimas muestras y si la estimación quedó estable o es solo heurística.",
+        ReadOnly,
+        Low,
+        true,
+        "SequenceLimit",
+        [
+            signature!("SequenceLimit[a_n, n]"; "a_n": Expression required, "n": Variable optional)
+        ]
+    ),
+    command!(
+        "am1.series-sum",
+        "SeriesSum",
+        [],
+        "AM1",
+        "Suma finita de términos a_n desde el índice inicial hasta el final (ambos inclusive), índices enteros de i64 y techo de 100000 términos.",
+        ReadOnly,
+        Low,
+        true,
+        "SeriesSum",
+        [
+            signature!("SeriesSum[a_n, n, inicio, fin]"; "a_n": Expression required, "n": Variable required, "inicio": Integer required, "fin": Integer required)
+        ]
+    ),
     command!(
         "am2.jacobian",
         "JacobianMatrix",
@@ -1749,6 +2157,164 @@ const COMMANDS: &[CommandSpec] = &[
         [
             signature!("Hessian[f, [x, y]]"; "f": Expression required, "variables": ParameterList required)
         ]
+    ),
+
+    // ── Frente fantasma-2: cálculo vectorial con brazo propio ─────────────
+    command!(
+        "am2.gradient",
+        "Gradient",
+        [],
+        "AM2",
+        "Gradiente simbólico de f respecto de las variables dadas (x, y por defecto).",
+        ReadOnly,
+        Medium,
+        true,
+        "Gradient",
+        [signature!("Gradient[f, variables]"; "f": Expression required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.critical-points",
+        "CriticalPoints",
+        [],
+        "AM2",
+        "Puntos críticos de f(x,y) en [xmin,xmax]×[ymin,ymax] por muestreo n×n (n = 25 por defecto, entre 3 y 80).",
+        ReadOnly,
+        Medium,
+        true,
+        "CriticalPoints",
+        [signature!("CriticalPoints[f, [x, y], xmin, xmax, ymin, ymax, n]"; "f": Expression required, "variables": ParameterList required, "xmin": Number required, "xmax": Number required, "ymin": Number required, "ymax": Number required, "n": Integer optional)]
+    ),
+    command!(
+        "am2.directional-derivative",
+        "DirectionalDerivative",
+        [],
+        "AM2",
+        "Derivada direccional de f en el punto dado respecto de las variables dadas; exige misma dimensión en punto y dirección.",
+        ReadOnly,
+        Low,
+        true,
+        "DirectionalDerivative",
+        [signature!("DirectionalDerivative[f, variables, punto, direccion]"; "f": Expression required, "variables": ParameterList required, "punto": ParameterList required, "direccion": ParameterList required)]
+    ),
+    command!(
+        "am2.tangent-plane",
+        "TangentPlane",
+        [],
+        "AM2",
+        "Plano tangente a z=f(x,y) en (x0,y0) como expresión simbólica (variables x, y por defecto).",
+        ReadOnly,
+        Low,
+        true,
+        "TangentPlane",
+        [signature!("TangentPlane[f, punto, variables]"; "f": Expression required, "punto": ParameterList required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.divergence",
+        "Divergence",
+        [],
+        "AM2",
+        "Divergencia simbólica de un campo respecto de las variables dadas (x, y por defecto).",
+        ReadOnly,
+        Low,
+        true,
+        "Divergence",
+        [signature!("Divergence[campo, variables]"; "campo": ParameterList required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.curl",
+        "Curl",
+        [],
+        "AM2",
+        "Rotacional simbólico de un campo 2D (escalar) o 3D (vector) respecto de las variables dadas.",
+        ReadOnly,
+        Low,
+        true,
+        "Curl",
+        [signature!("Curl[campo, variables]"; "campo": ParameterList required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.surface-area",
+        "SurfaceArea",
+        [],
+        "AM2",
+        "Área de la superficie z=f(x,y) sobre x ∈ [a, b] e y ∈ [y_min(x), y_max(x)] por cuadratura de punto medio n×n (n = 80 por defecto, entre 2 y 400).",
+        ReadOnly,
+        High,
+        true,
+        "SurfaceArea",
+        [signature!("SurfaceArea[f, x, a, b, y, y_min, y_max, n]"; "f": Expression required, "x": Variable required, "a": Number required, "b": Number required, "y": Variable required, "y_min": Expression required, "y_max": Expression required, "n": Integer optional)]
+    ),
+    command!(
+        "am2.line-integral-scalar",
+        "LineIntegralScalar",
+        [],
+        "AM2",
+        "Integral de línea de un escalar sobre una curva 2D o 3D parametrizada con n muestras.",
+        ReadOnly,
+        High,
+        true,
+        "LineIntegralScalar",
+        [signature!("LineIntegralScalar[f, [x(t), y(t)], t, a, b, n]"; "f": Expression required, "curva": ParameterList required, "t": Variable required, "a": Number required, "b": Number required, "n": Integer required)]
+    ),
+    command!(
+        "am2.surface-integral-scalar",
+        "SurfaceIntegralScalar",
+        [],
+        "AM2",
+        "Integral de superficie de un escalar sobre [x(u,v), y(u,v), z(u,v)] con n×n muestras.",
+        ReadOnly,
+        High,
+        true,
+        "SurfaceIntegralScalar",
+        [signature!("SurfaceIntegralScalar[f, superficie, [u, v], u0, u1, v0, v1, n]"; "f": Expression required, "superficie": ParameterList required, "dominio": Domain required, "u0": Number required, "u1": Number required, "v0": Number required, "v1": Number required, "n": Integer required)]
+    ),
+    command!(
+        "am2.is-conservative",
+        "IsConservative",
+        [],
+        "AM2",
+        "Indica si un campo 2D o 3D es conservativo por igualdad de derivadas parciales cruzadas.",
+        ReadOnly,
+        Low,
+        true,
+        "IsConservative",
+        [signature!("IsConservative[campo, variables]"; "campo": ParameterList required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.potential-function",
+        "PotentialFunction",
+        [],
+        "AM2",
+        "Potencial de un campo 2D conservativo hasta una constante aditiva; si el campo no lo es responde error honesto.",
+        ReadOnly,
+        Medium,
+        true,
+        "PotentialFunction",
+        [signature!("PotentialFunction[campo, variables]"; "campo": ParameterList required, "variables": ParameterList optional)]
+    ),
+    command!(
+        "am2.stokes-theorem",
+        "StokesTheorem",
+        [],
+        "AM2",
+        "Teorema de Stokes: rotacional del campo 3D y su flujo sobre la superficie parametrizada con n×n muestras.",
+        ReadOnly,
+        High,
+        true,
+        "StokesTheorem",
+        [signature!("StokesTheorem[campo, superficie, [u, v], u0, u1, v0, v1, n]"; "campo": ParameterList required, "superficie": ParameterList required, "dominio": Domain required, "u0": Number required, "u1": Number required, "v0": Number required, "v1": Number required, "n": Integer required)]
+    ),
+    command!(
+        "am2.change-of-variables",
+        "ChangeOfVariables",
+        [],
+        "AM2",
+        "Determinante jacobiano simbólico del cambio de variables 2D [x(u,v), y(u,v)].",
+        ReadOnly,
+        Low,
+        true,
+        "ChangeOfVariables",
+        [signature!("ChangeOfVariables[f, mapeo, variables]"; "f": Expression required, "mapeo": ParameterList required, "variables": ParameterList required)]
     ),
     command!(
         "am2.line-integral-vector",
@@ -1818,6 +2384,34 @@ const COMMANDS: &[CommandSpec] = &[
         "GaussOstrogradski",
         [
             signature!("GaussOstrogradski[[P, Q, R], x, a, b, y, c, d, z, e, f, n]"; "campo": ParameterList required, "dominio": Domain required, "n": Integer required)
+        ]
+    ),
+    command!(
+        "am2.double-integral",
+        "DoubleIntegral",
+        [],
+        "AM2",
+        "Integral doble numérica por cuadratura de punto medio n×n (n = 80 por defecto, entre 2 y 400) sobre x ∈ [a, b] e y ∈ [y_min(x), y_max(x)]; si el integrando tiene una posible singularidad en el rectángulo responde con error honesto.",
+        ReadOnly,
+        High,
+        true,
+        "DoubleIntegral",
+        [
+            signature!("DoubleIntegral[f, x, a, b, y, y_min, y_max, n]"; "f": Expression required, "x": Variable required, "a": Number required, "b": Number required, "y": Variable required, "y_min": Expression required, "y_max": Expression required, "n": Integer optional)
+        ]
+    ),
+    command!(
+        "am2.lagrange-multipliers",
+        "LagrangeMultipliers",
+        [],
+        "AM2",
+        "Busca extremos de f bajo la restricción g = 0 por multiplicadores de Lagrange (Newton 2D sembrado en la ventana [xmin, xmax]×[ymin, ymax]) y reporta punto, lambda y el valor de f.",
+        ReadOnly,
+        High,
+        true,
+        "LagrangeMultipliers",
+        [
+            signature!("LagrangeMultipliers[f, g, [x, y], xmin, xmax, ymin, ymax, n]"; "f": Expression required, "g": Expression required, "variables": ParameterList required, "xmin": Number required, "xmax": Number required, "ymin": Number required, "ymax": Number required, "n": Integer optional)
         ]
     ),
     // Matrices, probabilidad y estadistica
@@ -1909,6 +2503,262 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Diagonalization",
         [signature!("Diagonalization[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.subspace-sum",
+        "SubspaceSum",
+        [],
+        "Matrices",
+        "Suma de subespacios U + V dados por matrices de generadores por filas: informa dim(U), dim(V), dim(U + V) y la base del resultado; exige igual dimensión ambiental.",
+        ReadOnly,
+        Low,
+        true,
+        "SubspaceSum",
+        [
+            signature!("SubspaceSum[U, V]"; "U": Matrix required, "V": Matrix required)
+        ]
+    ),
+
+    // ── Frente fantasma-2: álgebra lineal con brazo propio ────────────────
+    command!(
+        "matrix.trace",
+        "Trace",
+        ["traza"],
+        "Matrices",
+        "Traza (suma de la diagonal) de una matriz cuadrada 2x2 o mayor.",
+        ReadOnly,
+        Low,
+        true,
+        "Trace",
+        [signature!("Trace[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.rank",
+        "Rank",
+        [],
+        "Matrices",
+        "Rango de una matriz por eliminación numérica.",
+        ReadOnly,
+        Low,
+        true,
+        "Rank",
+        [signature!("Rank[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.null-space",
+        "NullSpace",
+        ["espacio_nulo"],
+        "Matrices",
+        "Dimensión y base del núcleo de una matriz.",
+        ReadOnly,
+        Low,
+        true,
+        "NullSpace",
+        [signature!("NullSpace[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.lu",
+        "LU",
+        [],
+        "Matrices",
+        "Descomposición LU de una matriz cuadrada (factores L y U).",
+        ReadOnly,
+        Low,
+        true,
+        "LU",
+        [signature!("LU[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.qr",
+        "QR",
+        [],
+        "Matrices",
+        "Descomposición QR de una matriz (factores Q y R).",
+        ReadOnly,
+        Low,
+        true,
+        "QR",
+        [signature!("QR[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.cholesky",
+        "Cholesky",
+        [],
+        "Matrices",
+        "Descomposición de Cholesky; exige matriz simétrica definida positiva.",
+        ReadOnly,
+        Low,
+        true,
+        "Cholesky",
+        [signature!("Cholesky[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.condition-number",
+        "ConditionNumber",
+        ["numero_condicion"],
+        "Matrices",
+        "Número de condición de una matriz.",
+        ReadOnly,
+        Low,
+        true,
+        "ConditionNumber",
+        [signature!("ConditionNumber[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.p2-dependence",
+        "P2Dependence",
+        [],
+        "Matrices",
+        "Independencia lineal de polinomios de grado ≤ 2: informa el rango y una relación si son dependientes (variable x por defecto).",
+        ReadOnly,
+        Low,
+        true,
+        "P2Dependence",
+        [signature!("P2Dependence[{p1, p2, ...}, variable]"; "polinomios": ParameterList required, "variable": Variable optional)]
+    ),
+    command!(
+        "matrix.p2-basis",
+        "P2Basis",
+        [],
+        "Matrices",
+        "Base del subespacio de P2 generado por los polinomios dados y si alcanza para todo P2.",
+        ReadOnly,
+        Low,
+        true,
+        "P2Basis",
+        [signature!("P2Basis[{p1, p2, ...}, variable]"; "polinomios": ParameterList required, "variable": Variable optional)]
+    ),
+    command!(
+        "matrix.p2-equations",
+        "P2Equations",
+        [],
+        "Matrices",
+        "Ecuaciones que define el subespacio de P2 generado por los polinomios dados.",
+        ReadOnly,
+        Low,
+        true,
+        "P2Equations",
+        [signature!("P2Equations[{p1, p2, ...}, variable]"; "polinomios": ParameterList required, "variable": Variable optional)]
+    ),
+    command!(
+        "matrix.subspace-dimension",
+        "SubspaceDimension",
+        ["dimension_subespacio"],
+        "Matrices",
+        "Dimensión del subespacio generado por las filas de U junto con la dimensión ambiental.",
+        ReadOnly,
+        Low,
+        true,
+        "SubspaceDimension",
+        [signature!("SubspaceDimension[U]"; "U": Matrix required)]
+    ),
+    command!(
+        "matrix.subspace-basis",
+        "SubspaceBasis",
+        ["base_subespacio"],
+        "Matrices",
+        "Base del subespacio generado por las filas de una matriz de generadores.",
+        ReadOnly,
+        Low,
+        true,
+        "SubspaceBasis",
+        [signature!("SubspaceBasis[U]"; "U": Matrix required)]
+    ),
+    command!(
+        "matrix.subspace-intersection",
+        "SubspaceIntersection",
+        ["interseccion_subespacios"],
+        "Matrices",
+        "Intersección de dos subespacios dados por matrices de generadores: dimensión y base; exige igual dimensión ambiental.",
+        ReadOnly,
+        Low,
+        true,
+        "SubspaceIntersection",
+        [signature!("SubspaceIntersection[U, V]"; "U": Matrix required, "V": Matrix required)]
+    ),
+    command!(
+        "matrix.orthogonal-complement",
+        "OrthogonalComplement",
+        ["complemento_ortogonal"],
+        "Matrices",
+        "Complemento ortogonal del subespacio generado por las filas de U: dimensión y base.",
+        ReadOnly,
+        Low,
+        true,
+        "OrthogonalComplement",
+        [signature!("OrthogonalComplement[U]"; "U": Matrix required)]
+    ),
+    command!(
+        "matrix.param-solve",
+        "MatrixParamSolve",
+        ["matriz_parametro"],
+        "Matrices",
+        "Determinante simbólico de una matriz cuadrada con un parámetro (orden ≤ 8) para estudiar cuándo es singular.",
+        ReadOnly,
+        Low,
+        true,
+        "MatrixParamSolve",
+        [signature!("MatrixParamSolve[A, parametro]"; "A": Matrix required, "parametro": Variable required)]
+    ),
+    command!(
+        "matrix.gauss-jordan-solve",
+        "GaussJordanSolve",
+        ["gauss_jordan_sistema"],
+        "Matrices",
+        "Resuelve Ax=b por Gauss-Jordan: solución única, infinitas (con base del núcleo) o incompatible; informa el RREF.",
+        ReadOnly,
+        Low,
+        true,
+        "GaussJordanSolve",
+        [signature!("GaussJordanSolve[A, b]"; "A": Matrix required, "b": Vector required)]
+    ),
+    command!(
+        "matrix.cofactor",
+        "Cofactor",
+        [],
+        "Matrices",
+        "Cofactor C_i,j de una matriz cuadrada; fila y columna se numeran desde 1.",
+        ReadOnly,
+        Low,
+        true,
+        "Cofactor",
+        [signature!("Cofactor[A, i, j]"; "A": Matrix required, "i": Integer required, "j": Integer required)]
+    ),
+    command!(
+        "matrix.adjugate",
+        "Adjugate",
+        ["adjunta"],
+        "Matrices",
+        "Matriz adjunta (transpuesta de la matriz de cofactores) de una matriz cuadrada.",
+        ReadOnly,
+        Low,
+        true,
+        "Adjugate",
+        [signature!("Adjugate[A]"; "A": Matrix required)]
+    ),
+    command!(
+        "matrix.laplace-expansion",
+        "LaplaceExpansion",
+        ["expansion_laplace"],
+        "Matrices",
+        "Expansión del determinante por Laplace sobre una fila (row) o columna (col); el índice se numera desde 1.",
+        ReadOnly,
+        Low,
+        true,
+        "LaplaceExpansion",
+        [signature!("LaplaceExpansion[A, fila_o_columna, indice]"; "A": Matrix required, "fila_o_columna": Expression required, "indice": Integer required)]
+    ),
+    command!(
+        "matrix.linear-transformation-matrix",
+        "LinearTransformationMatrix",
+        ["matriz_transformacion"],
+        "Matrices",
+        "Matriz de una transformación lineal a partir de una base y las imágenes de sus vectores.",
+        ReadOnly,
+        Low,
+        true,
+        "LinearTransformationMatrix",
+        [signature!("LinearTransformationMatrix[base, imagenes]"; "base": Matrix required, "imagenes": Matrix required)]
     ),
     command!(
         "matrix.eigenvalues",
@@ -4372,6 +5222,31 @@ const COMMANDS: &[CommandSpec] = &[
         "TMeanEstimate",
         [signature!("TMeanEstimate[lista, conf]"; "lista": Data required, "conf": Number required)]
     ),
+
+    command!(
+        "statistics.ci-mean",
+        "CIMean",
+        ["ic_media"],
+        "Estadística",
+        "Intervalo de confianza de la media con t de Student; la confianza por defecto es 0.95.",
+        ReadOnly,
+        Low,
+        true,
+        "CIMean",
+        [signature!("CIMean[datos, confianza]"; "datos": Data required, "confianza": Number optional)]
+    ),
+    command!(
+        "statistics.ci-proportion",
+        "CIProportion",
+        ["ic_proporcion"],
+        "Estadística",
+        "Intervalo de confianza de una proporción por éxitos y n; la confianza por defecto es 0.95.",
+        ReadOnly,
+        Low,
+        true,
+        "CIProportion",
+        [signature!("CIProportion[exitos, n, confianza]"; "exitos": Integer required, "n": Integer required, "confianza": Number optional)]
+    ),
     command!(
         "statistics.t-mean-2-estimate",
         "TMean2Estimate",
@@ -4810,7 +5685,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "conic.is-tangent",
         "IsTangent",
-        ["EsTangente"],
+        ["EsTangente", "es_tangente", "is_tangent"],
         "Cónicas",
         "Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante).",
         ReadOnly,
@@ -4882,7 +5757,7 @@ const COMMANDS: &[CommandSpec] = &[
     command!(
         "text.table-text",
         "TableText",
-        ["TablaTexto"],
+        ["TablaTexto", "tablatext", "table"],
         "Texto",
         "Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento.",
         ReadOnly,
@@ -5294,6 +6169,44 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "Rename",
         [signature!("Rename[objeto, nuevo_nombre]"; "objeto": ObjectLabel required, "nuevo_nombre": Expression required)]
+    ),
+
+    // ── Frente fantasma-2: scripting y borrado con brazo propio ───────────
+    command!(
+        "scripting.script",
+        "Script",
+        ["guion"],
+        "Dinámica",
+        "Ejecuta los comandos separados por ';' con presupuesto de 1000 pasos y profundidad 5; sin rollback, usa Execute si lo necesitás.",
+        TransformsObject,
+        Medium,
+        true,
+        "Script",
+        [signature!("Script[guion]"; "guion": Expression required)]
+    ),
+    command!(
+        "scripting.erase",
+        "Erase",
+        [],
+        "Dinámica",
+        "Borra el objeto con la etiqueta dada (forma original de Delete[objeto]).",
+        TransformsObject,
+        Low,
+        true,
+        "Erase",
+        [signature!("Erase[etiqueta]"; "etiqueta": ObjectLabel required)]
+    ),
+    command!(
+        "scripting.erase-all",
+        "EraseAll",
+        ["borrar_todo", "eliminar_todo"],
+        "Dinámica",
+        "Borra TODOS los objetos del documento de una sola vez; irreversible salvo por el undo del documento.",
+        TransformsObject,
+        High,
+        true,
+        "EraseAll",
+        [signature!("EraseAll[]"; )]
     ),
     // ---- P0 CAS analisis geometrico: TangentAt / NormalAt / ArcLength / CurvatureAt / Volume/SurfaceOfRevolution ----
     command!(
@@ -6835,6 +7748,20 @@ const COMMANDS: &[CommandSpec] = &[
             signature!("Maximize[f, variable, a, b]"; "f": Expression required, "variable": Variable required, "a": Number required, "b": Number required)
         ]
     ),
+
+    // ── Frente fantasma-2: análisis numérico con brazo propio ─────────────
+    command!(
+        "analysis.function-inspector",
+        "FunctionInspector",
+        ["inspector_funciones"],
+        "Análisis",
+        "Inspección numérica de f en [-10, 10]: una raíz aproximada y extremos locales por muestreo (solo lectura).",
+        ReadOnly,
+        Low,
+        true,
+        "FunctionInspector",
+        [signature!("FunctionInspector[f]"; "f": Expression required)]
+    ),
     command!(
         "analysis.nsolve-ode",
         "NSolveODE",
@@ -7129,6 +8056,44 @@ const COMMANDS: &[CommandSpec] = &[
         "IntersectPath",
         [signature!("IntersectPath[recta, cónica]"; "recta": Object required, "cónica": Object required)]
     ),
+
+    // ── Frente fantasma-2: construcciones con brazo propio ────────────────
+    command!(
+        "construction.point-on-object",
+        "PointOnObject",
+        ["punto_en_objeto"],
+        "Construir",
+        "Punto nuevo ligado a un objeto en la posición de otro punto: PointOnObject[objeto, punto].",
+        CreatesObject,
+        Low,
+        true,
+        "PointOnObject",
+        [signature!("PointOnObject[objeto, punto]"; "objeto": ObjectLabel required, "punto": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.circle-by-center-radius",
+        "CircleByCenterRadius",
+        ["circulo_centro_radio"],
+        "Construir",
+        "Círculo con centro en un punto existente y radio numérico positivo.",
+        CreatesObject,
+        Low,
+        true,
+        "CircleByCenterRadius",
+        [signature!("CircleByCenterRadius[centro, radio]"; "centro": Point required, "radio": Number required)]
+    ),
+    command!(
+        "geometry.circle-by-three-points",
+        "CircleByThreePoints",
+        ["circulo_tres_puntos"],
+        "Construir",
+        "Círculo que pasa por tres puntos existentes.",
+        CreatesObject,
+        Low,
+        true,
+        "CircleByThreePoints",
+        [signature!("CircleByThreePoints[A, B, C]"; "A": Point required, "B": Point required, "C": Point required)]
+    ),
     command!(
         "construction.envelope",
         "Envelope",
@@ -7165,6 +8130,92 @@ const COMMANDS: &[CommandSpec] = &[
         true,
         "PerpendicularPlane",
         [signature!("PerpendicularPlane[A, B, P]"; "A": Point required, "B": Point required, "P": Point required)]
+    ),
+
+    // ── Frente fantasma-2: 3D con brazo propio ────────────────────────────
+    command!(
+        "geometry.equidistant-from",
+        "EquidistantFrom",
+        ["equidistante"],
+        "3D",
+        "Puntos de un eje (x-axis, y-axis o z-axis) equidistantes de dos objetos 3D (Point3D, Plane3D o Line3D); crea los puntos solución.",
+        CreatesObject,
+        Medium,
+        true,
+        "EquidistantFrom",
+        [signature!("EquidistantFrom[A, B, eje]"; "A": ObjectLabel required, "B": ObjectLabel required, "eje": Expression required)]
+    ),
+    command!(
+        "geometry.solve-3d-geometry",
+        "Solve3DGeometry",
+        [],
+        "3D",
+        "Resuelve dist(P,A)=dist(P,B) con P restringido a un eje tipo P=(0,y,0) y crea los puntos solución.",
+        CreatesObject,
+        Medium,
+        true,
+        "Solve3DGeometry",
+        [signature!("Solve3DGeometry[ecuación, variable, restricción]"; "ecuación": Expression required, "variable": Variable required, "restricción": Expression required)]
+    ),
+    command!(
+        "geometry.projection-3d",
+        "Projection3D",
+        ["proyeccion3d"],
+        "3D",
+        "Proyecta un Point3D sobre un Plane3D o Line3D y crea el punto proyectado.",
+        CreatesObject,
+        Low,
+        true,
+        "Projection3D",
+        [signature!("Projection3D[fuente, destino]"; "fuente": ObjectLabel required, "destino": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.plane-through-lines",
+        "PlaneThroughLines",
+        ["plano_por_rectas"],
+        "3D",
+        "Plano que contiene dos Line3D; si las rectas son alabeadas responde error y si son coincidentes avisa que hay infinitos planos.",
+        CreatesObject,
+        Low,
+        true,
+        "PlaneThroughLines",
+        [signature!("PlaneThroughLines[recta1, recta2]"; "recta1": ObjectLabel required, "recta2": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.plane-through-line-point",
+        "PlaneThroughLinePoint",
+        ["plano_recta_punto"],
+        "3D",
+        "Plano que contiene un Line3D y un Point3D fuera de la recta.",
+        CreatesObject,
+        Low,
+        true,
+        "PlaneThroughLinePoint",
+        [signature!("PlaneThroughLinePoint[recta, punto]"; "recta": ObjectLabel required, "punto": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.line-relation-3d",
+        "LineRelation3D",
+        ["relacion_rectas3d"],
+        "3D",
+        "Relación entre dos Line3D: se cortan, son paralelas, coincidentes o alabeadas (con puntos más cercanos y distancia).",
+        ReadOnly,
+        Low,
+        true,
+        "LineRelation3D",
+        [signature!("LineRelation3D[recta1, recta2]"; "recta1": ObjectLabel required, "recta2": ObjectLabel required)]
+    ),
+    command!(
+        "geometry.solve-line-3d-parameters",
+        "SolveLine3DParameters",
+        ["parametros_recta3d"],
+        "3D",
+        "Parámetros de una recta 3D que cumple perpendicular u parallel con un vector objetivo; acepta uno o más parámetros nombrados.",
+        ReadOnly,
+        Low,
+        true,
+        "SolveLine3DParameters",
+        [signature!("SolveLine3DParameters[director, relacion, objetivo, parametros]"; "director": ParameterList required, "relacion": Expression required, "objetivo": ParameterList required, "parametros": ParameterList required)]
     ),
     // Frente P4-A: CAS (20 visibles; motores en geometry::cas_extra; Payment/PresentValue/FutureValue SKIP: PV/FV/Pmt ya existen).
     command!(
@@ -8658,6 +9709,179 @@ const COMMANDS: &[CommandSpec] = &[
         "TurtleDown",
         [signature!("TurtleDown[]"; )]
     ),
+    // ── Frente G1 (contrato grafito-geometry): PDE, Fourier, CAS simbólico,
+    //    sumas y LaTeX. La matemática vive en `grafito_geometry::{pde, fourier,
+    //    symbolic, integral, latex}`; `commands.rs` solo la expone. Sin aliases
+    //    a propósito (estilo de los specs vecinos: declararlos patea el
+    //    scoring del catálogo del asistente).
+    command!(
+        "am2.heat-equation",
+        "HeatEquation",
+        [],
+        "AM2",
+        "Ecuación del calor 1D u_t = u_xx: resuelve para la condición inicial dada y reporta u(x, t_end) muestreada.",
+        ReadOnly,
+        Medium,
+        true,
+        "HeatEquation",
+        [signature!("HeatEquation[expr, x, t0, t_end]"; "expr": Expression required, "x": Variable required, "t0": Number required, "t_end": Number required)]
+    ),
+    command!(
+        "am2.wave-equation",
+        "WaveEquation",
+        [],
+        "AM2",
+        "Ecuación de ondas 1D u_tt = u_xx: resuelve para la condición inicial dada y reporta u(x, t_end) muestreada.",
+        ReadOnly,
+        Medium,
+        true,
+        "WaveEquation",
+        [signature!("WaveEquation[expr, x, t0, t_end]"; "expr": Expression required, "x": Variable required, "t0": Number required, "t_end": Number required)]
+    ),
+    command!(
+        "am2.laplace-2d",
+        "Laplace2D",
+        [],
+        "AM2",
+        "Laplace 2D en un rectángulo con datos de borde (superior, inferior, izquierdo, derecho) y reporta la solución muestreada.",
+        ReadOnly,
+        Medium,
+        true,
+        "Laplace2D",
+        [signature!("Laplace2D[g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax]"; "g_sup": Expression required, "g_inf": Expression required, "g_izq": Expression required, "g_der": Expression required, "xmin": Number required, "xmax": Number required, "ymin": Number required, "ymax": Number required)]
+    ),
+    command!(
+        "cas.fourier-series",
+        "FourierSeries",
+        [],
+        "CAS",
+        "Serie de Fourier finita de orden n sobre [-L, L]: construye la suma parcial como curva.",
+        CreatesObject,
+        Medium,
+        true,
+        "FourierSeries",
+        [signature!("FourierSeries[expr, var, L, n]"; "expr": Expression required, "var": Variable required, "L": Number required, "n": Integer required)]
+    ),
+    command!(
+        "cas.fourier-coeffs",
+        "FourierCoeffs",
+        [],
+        "CAS",
+        "Coeficientes a0, a_k, b_k de la serie de Fourier de orden n sobre [-L, L]; solo consulta, sin crear objetos.",
+        ReadOnly,
+        Low,
+        true,
+        "FourierCoeffs",
+        [signature!("FourierCoeffs[expr, var, L, n]"; "expr": Expression required, "var": Variable required, "L": Number required, "n": Integer required)]
+    ),
+    command!(
+        "cas.nderivative-sym",
+        "NDerivativeSym",
+        [],
+        "CAS",
+        "Derivada n-ésima simbólica de una expresión; no confundir con NDerivative, que deriva numéricamente en un punto.",
+        ReadOnly,
+        Low,
+        true,
+        "NDerivativeSym",
+        [signature!("NDerivativeSym[expr, var, n]"; "expr": Expression required, "var": Variable required, "n": Integer required)]
+    ),
+    command!(
+        "cas.partial",
+        "Partial",
+        [],
+        "CAS",
+        "Derivada parcial simbólica de una expresión respecto de la variable indicada.",
+        ReadOnly,
+        Low,
+        true,
+        "Partial",
+        [signature!("Partial[expr, var]"; "expr": Expression required, "var": Variable required)]
+    ),
+    command!(
+        "cas.substitute-int",
+        "SubstituteInt",
+        [],
+        "CAS",
+        "Integral por el cambio de variable u = u(var), reescribe el integrando y devuelve la primitiva.",
+        ReadOnly,
+        Medium,
+        true,
+        "SubstituteInt",
+        [signature!("SubstituteInt[expr, var, u]"; "expr": Expression required, "var": Variable required, "u": Expression required)]
+    ),
+    command!(
+        "cas.lambert-w",
+        "LambertW",
+        [],
+        "CAS",
+        "Rama principal W0 de la función W de Lambert: w tal que w·e^w = a, con dominio a ≥ -1/e.",
+        ReadOnly,
+        Medium,
+        true,
+        "LambertW",
+        [signature!("LambertW[a]"; "a": Number required)]
+    ),
+    command!(
+        "cas.solve-transcendental",
+        "SolveTranscendental",
+        [],
+        "CAS",
+        "Una raíz real de una ecuación trascendente en la ventana numérica por defecto, por búsqueda de raíz del motor CAS.",
+        ReadOnly,
+        Medium,
+        true,
+        "SolveTranscendental",
+        [signature!("SolveTranscendental[expr, var]"; "expr": Expression required, "var": Variable required)]
+    ),
+    command!(
+        "cas.laurent-series",
+        "LaurentSeries",
+        [],
+        "CAS",
+        "Serie de Laurent truncada en x0 hasta orden n: parte principal del polo más la parte regular de Taylor.",
+        ReadOnly,
+        Medium,
+        true,
+        "LaurentSeries",
+        [signature!("LaurentSeries[expr, var, x0, n]"; "expr": Expression required, "var": Variable required, "x0": Number required, "n": Integer required)]
+    ),
+    command!(
+        "cas.sum-closed",
+        "SumClosed",
+        [],
+        "CAS",
+        "Suma Σ de expr para var = lo..hi en forma cerrada; sin motor de sumas cerradas responde error honesto, nunca una suma numérica disfrazada.",
+        ReadOnly,
+        Medium,
+        true,
+        "SumClosed",
+        [signature!("SumClosed[expr, var, lo, hi]"; "expr": Expression required, "var": Variable required, "lo": Integer required, "hi": Integer required)]
+    ),
+    command!(
+        "text.parse-latex",
+        "ParseLatex",
+        [],
+        "Texto",
+        "Convierte una expresión LaTeX a la expresión interna de Grafito y la reporta como texto.",
+        ReadOnly,
+        Low,
+        true,
+        "ParseLatex",
+        [signature!("ParseLatex[latex]"; "latex": Expression required)]
+    ),
+    command!(
+        "text.to-latex",
+        "ToLatex",
+        [],
+        "Texto",
+        "Convierte una expresión de Grafito a su forma LaTeX y la reporta como texto.",
+        ReadOnly,
+        Low,
+        true,
+        "ToLatex",
+        [signature!("ToLatex[expr]"; "expr": Expression required)]
+    ),
     ];
 
 /// Returns every registered stable text command.
@@ -9090,6 +10314,23 @@ mod registry_tests {
             "RiemannSum",
             "BolzanoCheck",
             "LHopital",
+            // Frente fantasma+nuevos (12): 7 brazos que ya vivían en
+            // commands.rs sin spec (ImproperIntegral/SeriesSum/SequenceLimit/
+            // DoubleIntegral/LagrangeMultipliers/MeanValueCheck/SubspaceSum)
+            // + 5 comandos nuevos con brazo delegante al motor
+            // (PolyGCD/Resultant/Residue/PrincipalPart/StepByStep).
+            "ImproperIntegral",
+            "MeanValueCheck",
+            "SequenceLimit",
+            "SeriesSum",
+            "DoubleIntegral",
+            "LagrangeMultipliers",
+            "SubspaceSum",
+            "PolyGCD",
+            "Resultant",
+            "Residue",
+            "PrincipalPart",
+            "StepByStep",
             "JacobianMatrix",
             "Hessian",
             "LineIntegralVector",
@@ -9578,6 +10819,109 @@ mod registry_tests {
             "Corner",
             "ConstructionStep",
             "SetConstructionStep",
+            // ── Frente fantasma-2: brazos de commands.rs que faltaban en la
+            // lista curada (72 comandos + 4 aliases de brazo + 3 aliases de
+            // brazo compartido + 2 alias legacy de Extremum/Inflection).
+            // Sin estos nombres `orphan_detection_reports_counts` no veía los
+            // huérfanos reales (el bug de visibilidad de la segunda tanda).
+            "AbsoluteConvergence",
+            "Adjugate",
+            "AlternatingSeriesTest",
+            "Analizar",
+            "ArchimedeanSpiral",
+            "BesselI",
+            "BesselJ",
+            "BesselY",
+            "Butterfly",
+            "CIMean",
+            "CIProportion",
+            "Cardioid",
+            "CauchyMeanValueCheck",
+            "ChangeOfVariables",
+            "Cholesky",
+            "Cofactor",
+            "ComplexSymbol",
+            "ConditionNumber",
+            "CriticalPoints",
+            "Curl",
+            "Digamma",
+            "DirectionalDerivative",
+            "Divergence",
+            "Epicycloid",
+            "EquidistantFrom",
+            "Erf",
+            "Erfc",
+            "EstudioFuncion",
+            "FunctionInspector",
+            "GaussJordanSolve",
+            "Gradient",
+            "Hypocycloid",
+            "Image",
+            "Inflexion",
+            "IntegralTest",
+            "IsConservative",
+            "LU",
+            "LaplaceExpansion",
+            "LineIntegralScalar",
+            "LinearTransformationMatrix",
+            "Lissajous",
+            "LnGamma",
+            "LogarithmicSpiral",
+            "MatrixParamSolve",
+            "NullSpace",
+            "OrthogonalComplement",
+            "P2Basis",
+            "P2Dependence",
+            "P2Equations",
+            "PotentialFunction",
+            "QR",
+            "Rank",
+            "RatioTest",
+            "RolleCheck",
+            "RootTest",
+            "Rose",
+            "StokesTheorem",
+            "SubspaceBasis",
+            "SubspaceDimension",
+            "SubspaceIntersection",
+            "SurfaceArea",
+            "SurfaceIntegralScalar",
+            "TangentPlane",
+            "Trace",
+            // ── Frente G1 (contrato grafito-geometry): brazos nuevos de
+            // commands.rs con spec propio en este registro.
+            "FourierCoeffs",
+            "FourierSeries",
+            "HeatEquation",
+            "Laplace2D",
+            "LaurentSeries",
+            "LambertW",
+            "NDerivativeSym",
+            "ParseLatex",
+            "Partial",
+            "SolveTranscendental",
+            "SubstituteInt",
+            "SumClosed",
+            "ToLatex",
+            "WaveEquation",
+            // aliases de brazo en handle_aula_commands (minúsculas)
+            "centro",
+            "deslizador",
+            "directriz",
+            "ecc",
+            "ejes",
+            "es_tangente",
+            "estangente",
+            "estela",
+            "excentricidad",
+            "foco",
+            "focos",
+            "is_tangent",
+            "rastro",
+            "semiejes",
+            "tablatext",
+            "tablatexto",
+            "table",
         ];
         let mut set = HashSet::new();
         for h in static_handlers {
@@ -9895,9 +11239,292 @@ mod registry_tests {
                 spec_to_handler_missing.join("\n")
             );
         }
-        // No falla por handlers sin spec legacy, solo reporte; CI persigue reporte
-        // Si se quiere fail, descomentar:
-        // assert!(handler_without_spec.is_empty(), "handlers huérfanos: {:?}", handler_without_spec);
+        // Frente fantasma-2: el reporte pasó a ser ciego. El único brazo sin
+        // spec a propósito es `Image` (commands.rs:9587): stub que solo
+        // devuelve error honesto ("Grafito aún no tiene un modelo persistente
+        // de imagen en el documento"), o sea no es apto para usuario hasta que
+        // exista el modelo. Si aparece cualquier otro nombre acá, el bug de
+        // visibilidad se reintrodujo.
+        let mut expected = vec!["Image".to_string()];
+        let mut got = handler_without_spec.clone();
+        expected.sort();
+        got.sort();
+        assert_eq!(
+            got, expected,
+            "brazos de commands.rs sin spec en el registro (bug de visibilidad)"
+        );
+    }
+
+    /// Nombres de `static_handlers` que no son brazos de un `match` de
+    /// dispatch en `commands.rs`: se resuelven en otros módulos (ggbscript)
+    /// o vía alias-dispatch (`cas_parse`) hacia brazos existentes. Documentados
+    /// para que la lista curada no se pudra sin que falle CI.
+    const STATIC_HANDLERS_SIN_BRAZO_EN_COMMANDS_RS: &[&str] = &[
+        "Button",
+        "Checkbox",
+        "DefineTool",
+        "DivisorsList",
+        "Execute",
+        "Hide",
+        "If",
+        "InputBox",
+        "LUDecomposition",
+        "LoadTool",
+        "PlayPause",
+        "QRDecomposition",
+        "Repeat",
+        "Show",
+        "StartAnimation",
+        "StopAnimation",
+        "TextField",
+        "ZoomIn",
+        "ZoomOut",
+    ];
+
+    /// Reemplaza contenido de literales y comentarios por espacios, conservando
+    /// los saltos de línea (para que los índices de línea sigan siendo válidos).
+    fn strip_literals(text: &str) -> String {
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity(text.len());
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let c = bytes[i] as char;
+            let next = bytes.get(i + 1).map(|b| *b as char).unwrap_or('\0');
+            match (c, next) {
+                ('/', '/') => {
+                    while i < bytes.len() && bytes[i] != b'\n' {
+                        out.push(' ');
+                        i += 1;
+                    }
+                }
+                ('/', '*') => {
+                    let mut depth = 1usize;
+                    out.push_str("  ");
+                    i += 2;
+                    while i < bytes.len() && depth > 0 {
+                        if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                            depth += 1;
+                            out.push_str("  ");
+                            i += 2;
+                        } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                            depth -= 1;
+                            out.push_str("  ");
+                            i += 2;
+                        } else {
+                            out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                            i += 1;
+                        }
+                    }
+                }
+                ('"', _) => {
+                    out.push(' ');
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            out.push_str("  ");
+                            i += 2;
+                        } else {
+                            out.push(if bytes[i] == b'\n' { '\n' } else { ' ' });
+                            i += 1;
+                        }
+                    }
+                    out.push(' ');
+                    i += 1;
+                }
+                ('\'', _) => {
+                    // literal char ('\n', 'a', …) o lifetime ('a)
+                    let mut j = i + 1;
+                    if j < bytes.len() && bytes[j] == b'\\' {
+                        j += 2;
+                        while j < bytes.len() && bytes[j] != b'\'' {
+                            j += 1;
+                        }
+                        j += 1;
+                    } else if j + 1 < bytes.len() && bytes[j + 1] == b'\'' {
+                        j += 2;
+                    } else {
+                        out.push('\'');
+                        i += 1;
+                        continue;
+                    }
+                    for _ in i..j {
+                        out.push(' ');
+                    }
+                    i = j;
+                }
+                _ => {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+        out
+    }
+
+    fn balance(line: &str) -> i32 {
+        line.chars()
+            .map(|c| match c {
+                '{' | '(' | '[' => 1,
+                '}' | ')' | ']' => -1,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// ¿es un `match <sujeto>.as_str() {` sentado (sin `let`), i.e. un dispatch?
+    fn is_dispatch_head(line: &str) -> bool {
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed.strip_prefix("match ") else {
+            return false;
+        };
+        let rest = rest.trim();
+        let Some(idx) = rest.find(".as_str()") else {
+            return false;
+        };
+        let subject = rest[..idx].trim();
+        matches!(
+            subject,
+            "cmd.command" | "command.command" | "name" | "lower"
+        ) && rest[idx + ".as_str()".len()..].trim() == "{"
+    }
+
+    /// Nombres de los patrones de brazo a depth 0 de un bloque de match.
+    fn arm_names_in_block(
+        clean: &[&str],
+        original: &[&str],
+        start: usize,
+        end: usize,
+    ) -> Vec<String> {
+        let mut names = Vec::new();
+        let mut i = start + 1;
+        while i < end {
+            if clean[i].trim().is_empty() {
+                i += 1;
+                continue;
+            }
+            let mut buf_clean = String::new();
+            let mut buf_orig = String::new();
+            let mut consumed_any = false;
+            while i < end {
+                if clean[i].trim().is_empty() {
+                    i += 1;
+                    continue;
+                }
+                if !consumed_any {
+                    buf_clean.push_str(clean[i].trim());
+                    buf_orig.push_str(original[i].trim());
+                    consumed_any = true;
+                } else {
+                    buf_clean.push(' ');
+                    buf_clean.push_str(clean[i].trim());
+                    buf_orig.push(' ');
+                    buf_orig.push_str(original[i].trim());
+                }
+                if let Some(pos) = buf_clean.find("=>") {
+                    let head = &buf_orig[..buf_orig.find("=>").unwrap_or(0)];
+                    let mut chars = head.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '"' {
+                            let mut name = String::new();
+                            for inner in chars.by_ref() {
+                                if inner == '"' {
+                                    break;
+                                }
+                                if inner == '\\' {
+                                    continue;
+                                }
+                                name.push(inner);
+                            }
+                            names.push(name);
+                        }
+                    }
+                    let rest = &buf_clean[pos + 2..];
+                    let mut depth = balance(rest);
+                    i += 1;
+                    while i < end && depth > 0 {
+                        depth += balance(clean[i]);
+                        i += 1;
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        }
+        names
+    }
+
+    /// Extracción programática de los brazos de dispatch de `commands.rs`
+    /// (matches sobre `cmd.command`/`command.command`/`name`/`lower`, solo a
+    /// depth 0). Fuente de verdad para detectar drift de `static_handlers`.
+    fn dispatch_arm_names_from_commands_rs() -> HashSet<String> {
+        let source = strip_literals(include_str!("../src/commands.rs"));
+        let clean: Vec<&str> = source.split('\n').collect();
+        let original: Vec<&str> = include_str!("../src/commands.rs").split('\n').collect();
+        let mut names = HashSet::new();
+        let mut i = 0usize;
+        while i < clean.len() {
+            if is_dispatch_head(clean[i]) {
+                let mut depth = 0i32;
+                let mut end = i;
+                while end < clean.len() {
+                    depth += balance(clean[end]);
+                    if end > i && depth <= 0 {
+                        break;
+                    }
+                    end += 1;
+                }
+                for name in arm_names_in_block(&clean, &original, i, end) {
+                    names.insert(name);
+                }
+                i = end;
+            }
+            i += 1;
+        }
+        names
+    }
+
+    #[test]
+    fn static_handlers_cubren_los_brazos_de_commands_rs() {
+        // Blindaje anti-drift del frente fantasma-2: la lista curada debe
+        // cubrir TODOS los brazos de dispatch de commands.rs (si un refactor
+        // agrega un brazo y no se registra su spec, acá se corta la luz) y
+        // nada más que los despachos externos documentados.
+        let arms = dispatch_arm_names_from_commands_rs();
+        let static_set = handler_names_from_source();
+        let arms_low: HashSet<String> = arms.iter().map(|s| s.to_ascii_lowercase()).collect();
+        let static_low: HashSet<String> =
+            static_set.iter().map(|s| s.to_ascii_lowercase()).collect();
+
+        let mut faltantes: Vec<String> = arms_low
+            .iter()
+            .filter(|name| !static_low.contains(*name))
+            .cloned()
+            .collect();
+        faltantes.sort();
+        assert!(
+            faltantes.is_empty(),
+            "brazos de commands.rs ausentes de static_handlers: {faltantes:?}"
+        );
+
+        let excepciones: HashSet<String> = STATIC_HANDLERS_SIN_BRAZO_EN_COMMANDS_RS
+            .iter()
+            .map(|s| s.to_ascii_lowercase())
+            .collect();
+        let mut extras: Vec<String> = static_low
+            .iter()
+            .filter(|name| !arms_low.contains(*name) && !excepciones.contains(*name))
+            .cloned()
+            .collect();
+        extras.sort();
+        assert!(
+            extras.is_empty(),
+            "static_handlers sobra (sin brazo en commands.rs ni excepción documentada): {extras:?}"
+        );
+        println!(
+            "brazos de dispatch extraídos: {}; static_handlers: {}",
+            arms.len(),
+            static_set.len()
+        );
     }
 
     #[test]
@@ -9979,11 +11606,67 @@ mod registry_tests {
         // Harness abiertos Fase A: +7 visibles S (UnitPairs/DistinctDistances/
         // UnitGraphEdges/ChromaticCheck/HalvingEdges/EmptyTriangle/Topp39Scan,
         // TOPP 39/57/7, solo medición + corrida reproducible con hash).
-        assert_eq!(all().len(), 650, "COMMANDS registrados (docs §8)");
+        // Frente fantasma+nuevos (este cambio): +12 visibles S — 7 comandos que
+        // ya tenían handler en commands.rs sin spec (ImproperIntegral,
+        // SeriesSum, SequenceLimit, DoubleIntegral, LagrangeMultipliers,
+        // MeanValueCheck, SubspaceSum) + 5 nuevos con brazo delegante al motor
+        // de grafito-geometry (PolyGCD, Resultant, Residue, PrincipalPart,
+        // StepByStep). Además `Gauss` pierde el alias `residue`: pasa a ser el
+        // canónico de `Residue[f, x, x0]` (`residuos` sigue en Gauss).
+        // DELTA exacto para architecture.md §8/§13 (lo replica el agente de
+        // docs; acá NO se toca docs/architecture.md): COMMANDS 650 → 662,
+        // paleta 613 → 625 (+15 UI = 640), categorías 25 sin cambio.
+        // Frente fantasma-2 (este cambio): +71 visibles S — comandos que ya
+        // tenían brazo de handler en commands.rs SIN spec (el mismo bug de
+        // visibilidad que el frente fantasma+nuevos, segunda tanda). Se
+        // registran con spec + test de ejecución real; `Image` NO se registra
+        // (stub que solo devuelve error honesto, commands.rs:9587) y queda
+        // documentado en `orphan_detection_reports_counts`. Los 4 aliases de
+        // brazo sin spec (`es_tangente`, `is_tangent`, `tablatext`, `table`)
+        // pasan a ser aliases de los specs IsTangent/TableText.
+        // DELTA exacto para architecture.md §8/§13 (lo replica el agente de
+        // docs; acá NO se toca docs/architecture.md): COMMANDS 733 → 747,
+        // paleta 696 → 710 (+15 UI = 725), categorías 25 sin cambio.
+        // Frente G1 (contrato grafito-geometry, este cambio): +14 visibles S —
+        // comandos nuevos que exponen la matemática de `grafito-geometry`
+        // (PDE, Fourier, derivadas simbólicas, cambio de variable, impropia,
+        // Laurent, W de Lambert, trascendentes, sumas y LaTeX). `ImproperIntegral`
+        // NO se duplicó: se extendió su handler (antes error honesto en los
+        // casos impropios, ahora `integral::improper_integral`). `Gradient` NO
+        // se duplicó: ya existe registrado (am2.gradient) y se verificó con
+        // `command_registry::resolve()` antes de crear `Partial`.
+        // Delta por categoría (los 14, todos palette_visible):
+        //   CAS        +8: FourierSeries, FourierCoeffs, NDerivativeSym,
+        //                Partial, SubstituteInt, LambertW,
+        //                SolveTranscendental, LaurentSeries, SumClosed
+        //                (9 nombres: la cuenta de arriba se corrige abajo)
+        //   AM2        +3: HeatEquation, WaveEquation, Laplace2D
+        //   Texto      +2: ParseLatex, ToLatex
+        // Nota de cuenta: CAS +9, AM2 +3, Texto +2 = 14.
+        // Frente G1-tools (este cambio): +0 comandos (conteos intactos
+        // 747/710/25). Lo que cambió son las TOOLS del asistente/MCP: se
+        // exponen las 4 operaciones del contrato que YA están cableadas a
+        // motor real (fourier, nth_derivative, partial, lambert_w). Las otras
+        // 7 del contrato (improper_integral, substitute_int, parse_latex,
+        // to_latex, sum_closed, pde_heat, pde_wave) NO se exponen hasta que
+        // existan los motores de `grafito-geometry` (error honesto en
+        // commands.rs, sin tool fantasma).
+        // DELTA exacto para architecture.md §158/§169/§272-§273 (lo replica el
+        // agente de docs; acá NO se toca docs/architecture.md):
+        //   assistant math_tool_schemas 13 → 17 (+4: fourier, nth_derivative,
+        //     partial, lambert_w); all_safe_tool_schemas 28 → 32
+        //     (3 base + 8 pedag + 17 math + 2 harness1 + 2 harness2).
+        //   MCP proxied_tool_defs 26 → 30; tools/list 42 → 46 (8 lab +
+        //     execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab).
+        //     Pines nuevos: agent.rs (math 17 / safe 32), bridge.rs:30,
+        //     protocol.rs:447-448, tests/stdio_contract.rs:61-62.
+        //   docs/OPEN_PROBLEMS_LAB.md:4 ("42 tools") queda desactualizado:
+        //     ahora 46.
+        assert_eq!(all().len(), 747, "COMMANDS registrados (docs §8)");
         assert_eq!(
             palette_commands().count(),
-            613,
-            "comandos visibles en paleta (docs §8: 613 + 15 UI = 628)"
+            710,
+            "comandos visibles en paleta (docs §8: 710 + 15 UI = 725)"
         );
         assert_eq!(VALID_CATEGORIES.len(), 25, "categorías visibles (docs §8)");
     }

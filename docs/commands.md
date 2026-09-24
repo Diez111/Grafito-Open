@@ -51,6 +51,13 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `ParametricCurve2D[x(t), y(t), t0, t1]`: Crea una curva parametrica 2D. Mutacion: crea objetos. Riesgo: medio. Alias: `parametric_curve_2d`, `param2d`, `Curve`.
 - `PolarCurve[r(t), t0, t1]`: Crea una curva polar. Mutacion: crea objetos. Riesgo: medio. Alias: `polar_curve`, `polar`.
 - `ImplicitCurve[f(x, y) = c]`: Crea una curva implicita. Mutacion: crea objetos. Riesgo: alto. Formas alternativas: `ImplicitCurve[lhs, rhs, relacion]`. Alias: `ImplicitRegion`.
+- `Cardioid[a]`: Cardioide r = a(1+cos θ) muestreada en 200 puntos: Cardioid[a]. Mutacion: crea objetos. Riesgo: bajo. Alias: `cardioide`.
+- `Rose[a, n, d]`: Rosa de k pétalos r = a·cos((n/d)·θ) muestreada en 400 puntos: Rose[a, n, d]. Mutacion: crea objetos. Riesgo: bajo. Alias: `rosa`.
+- `ArchimedeanSpiral[a, b, theta_max]`: Espiral de Arquímedes r = a + b·θ hasta theta_max (300 puntos). Mutacion: crea objetos. Riesgo: bajo. Alias: `espiral_arquimedes`.
+- `LogarithmicSpiral[a, b, theta_max]`: Espiral logarítmica r = a·e^(b·θ) hasta theta_max (300 puntos). Mutacion: crea objetos. Riesgo: bajo. Alias: `espiral_logaritmica`.
+- `Lissajous[a, b, freq_x, freq_y, delta]`: Curva de Lissajous x=a·sen(fx·t+δ), y=b·sen(fy·t) muestreada en 400 puntos. Mutacion: crea objetos. Riesgo: bajo.
+- `Epicycloid[r, k]`: Epicicloide de radio r y razón k muestreada en 400 puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `epicicloide`.
+- `Hypocycloid[r, k]`: Hipocicloide de radio r y razón k muestreada en 400 puntos. Mutacion: crea objetos. Riesgo: bajo. Alias: `hipocicloide`.
 - `VectorField2D[u(x, y), v(x, y)]`: Crea un campo vectorial 2D. Mutacion: crea objetos. Riesgo: alto. Alias: `vector_field_2d`, `vf2d`.
 ## Construir
 
@@ -131,6 +138,16 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `TrigCombine[expr]`: Combina productos sin·sin, sin·cos y cos·cos en suma o diferencia (factor constante opcional); fuera de eso informa el límite. Mutacion: solo consulta. Riesgo: bajo. Alias: `combinarTrig`.
 - `TrigSimplify[expr]`: Simplifica con pitagóricas (sin²+cos²→1, 1+tan²→sec²) más expansión y combinación en loop acotado de 8 pasos con mejor forma; si oscila, corta por cota. Mutacion: solo consulta. Riesgo: bajo. Alias: `simplificarTrig`.
 - `Rationalize[expr]`: Quita radicales del denominador: 1/sqrt(d), a/(k·sqrt(c)) y a/(b±sqrt(c)) por conjugada; cbrt y resto exigen motor general. Mutacion: solo consulta. Riesgo: bajo. Alias: `racionalizar`.
+- `LnGamma[x]`: Logaritmo natural de la función Gamma Γ(x). Mutacion: solo consulta. Riesgo: bajo. Alias: `lgamma`.
+- `BesselJ[n, x]`: Función de Bessel de primera especie J_n(x); el orden admitido está acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `bessel_j`.
+- `BesselY[n, x]`: Función de Bessel de segunda especie Y_n(x); el orden admitido está acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `bessel_y`.
+- `BesselI[n, x]`: Función de Bessel modificada I_n(x); el orden admitido está acotado. Mutacion: solo consulta. Riesgo: bajo. Alias: `bessel_i`.
+- `Erf[x]`: Función de error erf(x). Mutacion: solo consulta. Riesgo: bajo. Alias: `funcion_error`.
+- `Erfc[x]`: Función de error complementaria erfc(x) = 1 - erf(x). Mutacion: solo consulta. Riesgo: bajo.
+- `Digamma[x]`: Función digamma ψ(x) = Γ'(x)/Γ(x). Mutacion: solo consulta. Riesgo: bajo. Alias: `psi`.
+- `PolyGCD[p, q]`: MCD mónico de dos polinomios de una sola variable por PRS subresultante; la variable se deduce de las expresiones o se indica como tercer argumento y una entrada no polinómica da error honesto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `PolyGCD[p, q, variable]`. Alias: `poly_gcd`, `gcd_polinomico`, `mcd_polinomico`.
+- `Resultant[f, g, x]`: Elimina la variable x de dos polinomios bivariados por la resultante de Sylvester (m + n ≤ 8, grado resultante ≤ 32) y devuelve el polinomio en la otra variable; con más de dos variables o eliminación degenerada responde con error honesto. Mutacion: solo consulta. Riesgo: medio. Alias: `resultante`, `resultante_sylvester`.
+- `StepByStep[op]`: Muestra la traza pedagógica paso a paso (máximo 32 pasos) de una operación CAS: StepByStep[Derivative[x^2, x]] o la forma plana StepByStep[op, arg1, ...]; cubre Derivative, Integral, Limit, Taylor, Solve, SolveODEN, EulerODE, FrobeniusSeries, LaplaceDeriv, LaplaceInt, GroebnerOrdered y Eliminate. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `StepByStep[op, arg1, ...]`. Alias: `step_by_step`, `pasopaso`, `paso_a_paso`.
 - `Taylor[expr, variable, centro, orden]`: Construye una serie de Taylor finita. Mutacion: crea objetos. Riesgo: medio.
 - `CompleteSquare[expr, variable]`: Completa cuadrado: convierte a*x^2+b*x+c a a*(x+b/2a)^2 + (c - b^2/4a). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CompleteSquare[expr]`. Alias: `complete_square`, `completarCuadrado`, `completar_cuadrado`.
 - `PrimeFactors[n]`: Factoriza un entero n (2 <= n <= 1e12) en primos por trial division. Mutacion: solo consulta. Riesgo: bajo. Alias: `prime_factors`, `factoresPrimos`, `factores_primos`.
@@ -152,22 +169,51 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 ## Complejos
 
 - `ComplexMapping[expr_compleja, target]`: Aplica un mapeo complejo a un objetivo (sin target usa el disco unidad I, creado si falta; con target, el objeto debe existir). Mutacion: crea objetos. Riesgo: alto. Alias: `complex_mapping`, `mapeocomplejo`.
-- `Gauss[expr_compleja, curva]`: Calcula una integral compleja por residuos. Mutacion: crea objetos. Riesgo: alto. Alias: `residuos`, `residue`.
+- `Gauss[expr_compleja, curva]`: Calcula una integral compleja por residuos. Mutacion: crea objetos. Riesgo: alto. Alias: `residuos`.
 - `ComplexIntegral[expr_compleja, curva]`: Calcula una integral compleja sobre una curva. Mutacion: crea objetos. Riesgo: alto. Alias: `integralcompleja`, `contourintegral`.
+- `Residue[f, x, x0]`: Residuo a_-1 de la expansión de Laurent de f en x = x0: polos simples y de orden hasta 16, analítica o evitable da 0 y una singularidad esencial da error honesto. Mutacion: solo consulta. Riesgo: medio. Alias: `residuo`.
+- `PrincipalPart[f, x, x0]`: Parte principal de la expansión de Laurent de f en x = x0: términos a_-k/(x - x0)^k con k = 1..orden del polo (orden hasta 16); sin polo devuelve la parte vacía. Mutacion: solo consulta. Riesgo: medio. Alias: `parte_principal`, `principal_part`.
+- `ComplexSymbol[simbolo]`: Cambia el símbolo base de los complejos del documento (p. ej. z por w) y migra las expresiones existentes. Mutacion: transforma objetos. Riesgo: bajo. Alias: `simbolo_complejo`.
 ## AM1
 
 - `RiemannSum[f, x, a, b, n, metodo]`: Calcula una suma de Riemann. Mutacion: solo consulta. Riesgo: medio.
 - `BolzanoCheck[f, x, a, b]`: Verifica condiciones del teorema de Bolzano. Mutacion: solo consulta. Riesgo: medio.
 - `LHopital[num, den, x, a, max_steps]`: Aplica pasos de la regla de L'Hopital. Mutacion: solo consulta. Riesgo: medio.
+- `ImproperIntegral[f, x, a, b]`: Integra en [a, b] con cuadratura exacta; los límites infinitos o las singularidades en el borde o el interior son una impropia real que resuelve el motor (divergencia informada, sin aproximación silenciosa). Mutacion: solo consulta. Riesgo: medio.
+- `MeanValueCheck[f, x, a, b]`: Busca c en (a, b) con f'(c) igual a la pendiente media (teorema del valor medio de Lagrange) y reporta la pendiente junto con los candidatos hallados. Mutacion: solo consulta. Riesgo: medio.
+- `RolleCheck[f, x, a, b]`: Verifica las hipótesis del teorema de Rolle y busca c en (a, b) con f'(c) = 0. Mutacion: solo consulta. Riesgo: medio.
+- `CauchyMeanValueCheck[f, g, x, a, b]`: Teorema del valor medio de Cauchy: busca c con (f(b)-f(a))·g'(c) = (g(b)-g(a))·f'(c) en (a, b). Mutacion: solo consulta. Riesgo: medio.
+- `AlternatingSeriesTest[a_n, n]`: Criterio de series alternadas muestreando |a_n| en n = 50, 100, 200 y 400: decrecimiento y tendencia a cero. Mutacion: solo consulta. Riesgo: bajo.
+- `IntegralTest[a_n, n, inicio]`: Criterio integral numérico: integra desde inicio hasta inicio+1000 y estima la cola hasta inicio+2000. Mutacion: solo consulta. Riesgo: medio.
+- `AbsoluteConvergence[a_n, n]`: Convergencia absoluta vía el criterio de la razón aplicado a |a_n|. Mutacion: solo consulta. Riesgo: bajo.
+- `RatioTest[a_n, n]`: Criterio de la razón (D'Alembert): estima L = |a_(n+1)/a_n| con n = 20, 40, 80 y 120 y clasifica la convergencia. Mutacion: solo consulta. Riesgo: bajo.
+- `RootTest[a_n, n]`: Criterio de la raíz (Cauchy): estima L = |a_n|^(1/n) con n = 20, 40, 80 y 120 y clasifica la convergencia. Mutacion: solo consulta. Riesgo: bajo.
+- `SequenceLimit[a_n, n]`: Estima el límite de una sucesión muestreando n = 100..10000; informa el drift de las últimas muestras y si la estimación quedó estable o es solo heurística. Mutacion: solo consulta. Riesgo: bajo.
+- `SeriesSum[a_n, n, inicio, fin]`: Suma finita de términos a_n desde el índice inicial hasta el final (ambos inclusive), índices enteros de i64 y techo de 100000 términos. Mutacion: solo consulta. Riesgo: bajo.
 ## AM2
 
 - `JacobianMatrix[[f1, f2], [x, y]]`: Calcula una matriz Jacobiana. Mutacion: solo consulta. Riesgo: medio.
 - `Hessian[f, [x, y]]`: Calcula una matriz Hessiana. Mutacion: solo consulta. Riesgo: medio.
+- `Gradient[f, variables]`: Gradiente simbólico de f respecto de las variables dadas (x, y por defecto). Mutacion: solo consulta. Riesgo: medio.
+- `CriticalPoints[f, [x, y], xmin, xmax, ymin, ymax, n]`: Puntos críticos de f(x,y) en [xmin,xmax]×[ymin,ymax] por muestreo n×n (n = 25 por defecto, entre 3 y 80). Mutacion: solo consulta. Riesgo: medio.
+- `DirectionalDerivative[f, variables, punto, direccion]`: Derivada direccional de f en el punto dado respecto de las variables dadas; exige misma dimensión en punto y dirección. Mutacion: solo consulta. Riesgo: bajo.
+- `TangentPlane[f, punto, variables]`: Plano tangente a z=f(x,y) en (x0,y0) como expresión simbólica (variables x, y por defecto). Mutacion: solo consulta. Riesgo: bajo.
+- `Divergence[campo, variables]`: Divergencia simbólica de un campo respecto de las variables dadas (x, y por defecto). Mutacion: solo consulta. Riesgo: bajo.
+- `Curl[campo, variables]`: Rotacional simbólico de un campo 2D (escalar) o 3D (vector) respecto de las variables dadas. Mutacion: solo consulta. Riesgo: bajo.
+- `SurfaceArea[f, x, a, b, y, y_min, y_max, n]`: Área de la superficie z=f(x,y) sobre x ∈ [a, b] e y ∈ [y_min(x), y_max(x)] por cuadratura de punto medio n×n (n = 80 por defecto, entre 2 y 400). Mutacion: solo consulta. Riesgo: alto.
+- `LineIntegralScalar[f, [x(t), y(t)], t, a, b, n]`: Integral de línea de un escalar sobre una curva 2D o 3D parametrizada con n muestras. Mutacion: solo consulta. Riesgo: alto.
+- `SurfaceIntegralScalar[f, superficie, [u, v], u0, u1, v0, v1, n]`: Integral de superficie de un escalar sobre [x(u,v), y(u,v), z(u,v)] con n×n muestras. Mutacion: solo consulta. Riesgo: alto.
+- `IsConservative[campo, variables]`: Indica si un campo 2D o 3D es conservativo por igualdad de derivadas parciales cruzadas. Mutacion: solo consulta. Riesgo: bajo.
+- `PotentialFunction[campo, variables]`: Potencial de un campo 2D conservativo hasta una constante aditiva; si el campo no lo es responde error honesto. Mutacion: solo consulta. Riesgo: medio.
+- `StokesTheorem[campo, superficie, [u, v], u0, u1, v0, v1, n]`: Teorema de Stokes: rotacional del campo 3D y su flujo sobre la superficie parametrizada con n×n muestras. Mutacion: solo consulta. Riesgo: alto.
+- `ChangeOfVariables[f, mapeo, variables]`: Determinante jacobiano simbólico del cambio de variables 2D [x(u,v), y(u,v)]. Mutacion: solo consulta. Riesgo: bajo.
 - `LineIntegralVector[[P, Q], [x(t), y(t)], t, a, b, n]`: Calcula una integral de linea vectorial. Mutacion: solo consulta. Riesgo: alto.
 - `TripleIntegral[f, x, a, b, y, c, d, z, e, f, n]`: Calcula una integral triple numerica. Mutacion: solo consulta. Riesgo: alto.
 - `Flux[[P, Q, R], superficie, [u, v], u0, u1, v0, v1, n]`: Calcula el flujo de un campo vectorial. Mutacion: solo consulta. Riesgo: alto.
 - `GreenTheorem[[P, Q], x, a, b, y, c, d, n]`: Calcula una verificacion del teorema de Green. Mutacion: solo consulta. Riesgo: alto.
 - `GaussOstrogradski[[P, Q, R], x, a, b, y, c, d, z, e, f, n]`: Calcula una verificacion de Gauss-Ostrogradski. Mutacion: solo consulta. Riesgo: alto.
+- `DoubleIntegral[f, x, a, b, y, y_min, y_max, n]`: Integral doble numérica por cuadratura de punto medio n×n (n = 80 por defecto, entre 2 y 400) sobre x ∈ [a, b] e y ∈ [y_min(x), y_max(x)]; si el integrando tiene una posible singularidad en el rectángulo responde con error honesto. Mutacion: solo consulta. Riesgo: alto.
+- `LagrangeMultipliers[f, g, [x, y], xmin, xmax, ymin, ymax, n]`: Busca extremos de f bajo la restricción g = 0 por multiplicadores de Lagrange (Newton 2D sembrado en la ventana [xmin, xmax]×[ymin, ymax]) y reporta punto, lambda y el valor de f. Mutacion: solo consulta. Riesgo: alto.
 ## Matrices
 
 - `Determinant[[a, b], [c, d]]`: Calcula el determinante; con entradas decimales exactas y hasta 32×32 usa aritmética racional exacta. Mutacion: solo consulta. Riesgo: medio. Alias: `det`.
@@ -177,6 +223,27 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Cramer[A, b]`: Resuelve un sistema por Cramer. Mutacion: solo consulta. Riesgo: medio.
 - `ChangeOfBasis[v, B_from, B_to]`: Cambia coordenadas entre bases. Mutacion: solo consulta. Riesgo: medio.
 - `Diagonalization[A]`: Intenta diagonalizar una matriz. Mutacion: solo consulta. Riesgo: alto.
+- `SubspaceSum[U, V]`: Suma de subespacios U + V dados por matrices de generadores por filas: informa dim(U), dim(V), dim(U + V) y la base del resultado; exige igual dimensión ambiental. Mutacion: solo consulta. Riesgo: bajo.
+- `Trace[A]`: Traza (suma de la diagonal) de una matriz cuadrada 2x2 o mayor. Mutacion: solo consulta. Riesgo: bajo. Alias: `traza`.
+- `Rank[A]`: Rango de una matriz por eliminación numérica. Mutacion: solo consulta. Riesgo: bajo.
+- `NullSpace[A]`: Dimensión y base del núcleo de una matriz. Mutacion: solo consulta. Riesgo: bajo. Alias: `espacio_nulo`.
+- `LU[A]`: Descomposición LU de una matriz cuadrada (factores L y U). Mutacion: solo consulta. Riesgo: bajo.
+- `QR[A]`: Descomposición QR de una matriz (factores Q y R). Mutacion: solo consulta. Riesgo: bajo.
+- `Cholesky[A]`: Descomposición de Cholesky; exige matriz simétrica definida positiva. Mutacion: solo consulta. Riesgo: bajo.
+- `ConditionNumber[A]`: Número de condición de una matriz. Mutacion: solo consulta. Riesgo: bajo. Alias: `numero_condicion`.
+- `P2Dependence[{p1, p2, ...}, variable]`: Independencia lineal de polinomios de grado ≤ 2: informa el rango y una relación si son dependientes (variable x por defecto). Mutacion: solo consulta. Riesgo: bajo.
+- `P2Basis[{p1, p2, ...}, variable]`: Base del subespacio de P2 generado por los polinomios dados y si alcanza para todo P2. Mutacion: solo consulta. Riesgo: bajo.
+- `P2Equations[{p1, p2, ...}, variable]`: Ecuaciones que define el subespacio de P2 generado por los polinomios dados. Mutacion: solo consulta. Riesgo: bajo.
+- `SubspaceDimension[U]`: Dimensión del subespacio generado por las filas de U junto con la dimensión ambiental. Mutacion: solo consulta. Riesgo: bajo. Alias: `dimension_subespacio`.
+- `SubspaceBasis[U]`: Base del subespacio generado por las filas de una matriz de generadores. Mutacion: solo consulta. Riesgo: bajo. Alias: `base_subespacio`.
+- `SubspaceIntersection[U, V]`: Intersección de dos subespacios dados por matrices de generadores: dimensión y base; exige igual dimensión ambiental. Mutacion: solo consulta. Riesgo: bajo. Alias: `interseccion_subespacios`.
+- `OrthogonalComplement[U]`: Complemento ortogonal del subespacio generado por las filas de U: dimensión y base. Mutacion: solo consulta. Riesgo: bajo. Alias: `complemento_ortogonal`.
+- `MatrixParamSolve[A, parametro]`: Determinante simbólico de una matriz cuadrada con un parámetro (orden ≤ 8) para estudiar cuándo es singular. Mutacion: solo consulta. Riesgo: bajo. Alias: `matriz_parametro`.
+- `GaussJordanSolve[A, b]`: Resuelve Ax=b por Gauss-Jordan: solución única, infinitas (con base del núcleo) o incompatible; informa el RREF. Mutacion: solo consulta. Riesgo: bajo. Alias: `gauss_jordan_sistema`.
+- `Cofactor[A, i, j]`: Cofactor C_i,j de una matriz cuadrada; fila y columna se numeran desde 1. Mutacion: solo consulta. Riesgo: bajo.
+- `Adjugate[A]`: Matriz adjunta (transpuesta de la matriz de cofactores) de una matriz cuadrada. Mutacion: solo consulta. Riesgo: bajo. Alias: `adjunta`.
+- `LaplaceExpansion[A, fila_o_columna, indice]`: Expansión del determinante por Laplace sobre una fila (row) o columna (col); el índice se numera desde 1. Mutacion: solo consulta. Riesgo: bajo. Alias: `expansion_laplace`.
+- `LinearTransformationMatrix[base, imagenes]`: Matriz de una transformación lineal a partir de una base y las imágenes de sus vectores. Mutacion: solo consulta. Riesgo: bajo. Alias: `matriz_transformacion`.
 - `Eigenvalues[A]`: Autovalores (reales y complejos) vía SymmetricEigen/complex_eigenvalues; matriz cuadrada. Mutacion: solo consulta. Riesgo: bajo. Alias: `autovalores`, `eigen_valores`.
 - `Eigenvectors[A]`: Autovectores reales (simétrica) u honestos si el par complejo no admite vector real; matriz cuadrada. Mutacion: solo consulta. Riesgo: bajo. Alias: `autovectores`, `eigen_vectores`.
 ## Probabilidad
@@ -396,6 +463,8 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `ZProportionTest[exitos, n, p0]`: Prueba Z bilateral de una proporción contra p0. Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop_test`.
 - `ZProportion2Test[x1, n1, x2, n2]`: Prueba Z bilateral de p₁−p₂ (agrupada). Mutacion: solo consulta. Riesgo: bajo. Alias: `z_prop2_test`.
 - `TMeanEstimate[lista, conf]`: Intervalo t de la media (sigma desconocida). Mutacion: solo consulta. Riesgo: bajo. Alias: `t_media_estim`.
+- `CIMean[datos, confianza]`: Intervalo de confianza de la media con t de Student; la confianza por defecto es 0.95. Mutacion: solo consulta. Riesgo: bajo. Alias: `ic_media`.
+- `CIProportion[exitos, n, confianza]`: Intervalo de confianza de una proporción por éxitos y n; la confianza por defecto es 0.95. Mutacion: solo consulta. Riesgo: bajo. Alias: `ic_proporcion`.
 - `TMean2Estimate[l1, l2, conf]`: Intervalo t de Welch de μ₁−μ₂. Mutacion: solo consulta. Riesgo: bajo. Alias: `t_media2_estim`.
 - `ContingencyTable[obs, ncols]`: Chi² de independencia de una tabla plana filas×ncols. Mutacion: solo consulta. Riesgo: bajo. Alias: `contingencia`.
 - `Class[lista, k, i]`: i-ésima clase de k clases de igual ancho. Mutacion: solo consulta. Riesgo: bajo. Alias: `clase`.
@@ -435,7 +504,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `Center[conica]`: Devuelve el centro (elipse/hipérbola/círculo) o vértice (parábola) usando exact::center. Mutacion: solo consulta. Riesgo: bajo. Alias: `Centro`.
 - `Eccentricity[conica]`: Devuelve la excentricidad e de una cónica (0 círculo, 0<e<1 elipse, e=1 parábola, e>1 hipérbola). Mutacion: solo consulta. Riesgo: bajo. Alias: `Excentricidad`, `ecc`.
 - `Axes[conica]`: Devuelve los semiejes (a,b) de elipse/hipérbola o parámetro p de parábola usando exact::axes. Mutacion: solo consulta. Riesgo: bajo. Alias: `Ejes`, `semiejes`.
-- `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`.
+- `IsTangent[recta, conica]`: Predicado exacto IsTangent[recta, elipse] usando exact::is_tangent_to_ellipse (discriminante). Mutacion: solo consulta. Riesgo: bajo. Alias: `EsTangente`, `es_tangente`, `is_tangent`.
 ## Construir
 
 - `AreCollinear[A, B, C]`: Predicado numérico AreCollinear[A,B,C]: |AB×AC| ≤ 1e-9·(1+|AB|+|AC|). Mutacion: solo consulta. Riesgo: bajo. Alias: `son_colineales`, `colineales`.
@@ -445,7 +514,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `ArePerpendicular[l, m]`: Predicado numérico ArePerpendicular[l,m]: |dir_l·dir_m| ≤ 1e-9·|l|·|m|. Mutacion: solo consulta. Riesgo: bajo. Alias: `son_perpendiculares`, `perpendiculares`.
 ## Texto
 
-- `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`.
+- `TableText[funcion, min, max, paso]`: Genera tabla LaTeX-like texto desde función+rango+step; salida string pura sin mutar documento. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `TableText[expr, min, max, paso]`. Alias: `TablaTexto`, `tablatext`, `table`.
 ## Dinámica
 
 - `Slider[variable, min, max, paso, modo]`: Crea VariableMeta Slider[a, min, max, step, mode] con modo PingPong/Loop y velocity (animation_speed). Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Slider[variable, min, max, paso]`. Alias: `Deslizador`.
@@ -479,6 +548,9 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `StopAnimation[]`: Pausa la animación de una variable o de todas si no se indica (idempotente: pausar lo pausado es no-op honesto). Mutacion: transforma objetos. Riesgo: bajo. Formas alternativas: `StopAnimation[variable]`. Alias: `DetenerAnimacion`.
 - `Delete[objeto]`: Borra el objeto con la etiqueta dada (nombre GeoGebra de Erase[etiqueta]). Mutacion: transforma objetos. Riesgo: bajo. Alias: `Eliminar`, `Borrar`.
 - `Rename[objeto, nuevo_nombre]`: Renombra la etiqueta de un objeto: Rename[objeto, nuevo_nombre] valida (no vacío, ≤64, sin saltos, sin colisión) y aplica con undo transaccional. Mutacion: transforma objetos. Riesgo: bajo. Alias: `Renombrar`.
+- `Script[guion]`: Ejecuta los comandos separados por ';' con presupuesto de 1000 pasos y profundidad 5; sin rollback, usa Execute si lo necesitás. Mutacion: transforma objetos. Riesgo: medio. Alias: `guion`.
+- `Erase[etiqueta]`: Borra el objeto con la etiqueta dada (forma original de Delete[objeto]). Mutacion: transforma objetos. Riesgo: bajo.
+- `EraseAll[]`: Borra TODOS los objetos del documento de una sola vez; irreversible salvo por el undo del documento. Mutacion: transforma objetos. Riesgo: alto. Alias: `borrar_todo`, `eliminar_todo`.
 ## Análisis
 
 - `TangentAt[expr, x0]`: Recta tangente a y=f(x) en x0: TangentAt[expr, x0] crea una recta por (x0,f(x0)) con pendiente f'(x0). Mutacion: crea objetos. Riesgo: bajo. Alias: `TangenteEn`.
@@ -635,6 +707,7 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `CurvatureVector[expr, x0]`: Calcula el vector curvatura con signo de y=f(x) en x0 (numérico). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `CurvatureVector[expr, variable, x0]`. Alias: `curvature_vector`, `vector_curvatura`.
 - `Minimize[f, variable]`: Mínimo en [a,b] por grilla densa + sección áurea: Minimize[f, variable] o Minimize[f, variable, a, b]. Global no garantizado (se declara). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Minimize[f, variable, a, b]`. Alias: `minimizar`, `minimo`.
 - `Maximize[f, variable]`: Máximo en [a,b] por grilla densa + sección áurea: Maximize[f, variable] o Maximize[f, variable, a, b]. Global no garantizado (se declara). Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `Maximize[f, variable, a, b]`. Alias: `maximizar`, `maximo`.
+- `FunctionInspector[f]`: Inspección numérica de f en [-10, 10]: una raíz aproximada y extremos locales por muestreo (solo lectura). Mutacion: solo consulta. Riesgo: bajo. Alias: `inspector_funciones`.
 - `NSolveODE[campo, x0, y0, x1]`: Integra y'=f(x,y) por RK45 Dormand–Prince con paso adaptativo: NSolveODE[campo, x0, y0, x1] o NSolveODE[campo, x0, y0, x1, n]. Crea tabla + gráfico enlazados. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `NSolveODE[campo, x0, y0, x1, n]`. Alias: `edo_numerica`, `rk45`.
 - `SlopeField[expr]`: Campo de pendientes de y'=f(x,y) como campo vectorial (1, f): SlopeField[expr]. Mutacion: crea objetos. Riesgo: bajo. Alias: `campo_pendientes`, `campo_direcciones`.
 - `Area[objeto]`: Área de polígono, círculo o elipse: Area[objeto]. Mutacion: solo consulta. Riesgo: bajo. Alias: `superficie`.
@@ -665,11 +738,21 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `PointIn[punto, polígono]`: Pertenece el punto al polígono (borde cuenta adentro): PointIn[punto, polígono]. Mutacion: solo consulta. Riesgo: bajo. Alias: `punto_en`, `dentro`.
 - `RandomPointIn[polígono]`: Punto aleatorio determinista dentro del polígono (misma semilla → mismo punto): RandomPointIn[polígono]. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_aleatorio`.
 - `IntersectPath[recta, cónica]`: Intersección analítica recta × círculo/elipse (sin recorte de vista, a diferencia de Intersect): IntersectPath[recta, cónica]. Mutacion: crea objetos. Riesgo: bajo. Alias: `interseccion_trayectoria`.
+- `PointOnObject[objeto, punto]`: Punto nuevo ligado a un objeto en la posición de otro punto: PointOnObject[objeto, punto]. Mutacion: crea objetos. Riesgo: bajo. Alias: `punto_en_objeto`.
+- `CircleByCenterRadius[centro, radio]`: Círculo con centro en un punto existente y radio numérico positivo. Mutacion: crea objetos. Riesgo: bajo. Alias: `circulo_centro_radio`.
+- `CircleByThreePoints[A, B, C]`: Círculo que pasa por tres puntos existentes. Mutacion: crea objetos. Riesgo: bajo. Alias: `circulo_tres_puntos`.
 - `Envelope[a, b, c]`: Envolvente numérica de familia a(t)x+b(t)y+c(t)=0 (200 muestras, derivadas centrales): Envelope[a, b, c] o Envelope[a, b, c, t0, t1]. Mutacion: crea objetos. Riesgo: bajo. Formas alternativas: `Envelope[a, b, c, t0, t1]`. Alias: `curva_envolvente`.
 ## 3D
 
 - `PlaneBisector[A, B]`: Plano mediatriz de dos puntos 3D: PlaneBisector[A, B]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_mediatriz`, `bisector`.
 - `PerpendicularPlane[A, B, P]`: Plano por P con normal AB: PerpendicularPlane[A, B, P]. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_perpendicular`.
+- `EquidistantFrom[A, B, eje]`: Puntos de un eje (x-axis, y-axis o z-axis) equidistantes de dos objetos 3D (Point3D, Plane3D o Line3D); crea los puntos solución. Mutacion: crea objetos. Riesgo: medio. Alias: `equidistante`.
+- `Solve3DGeometry[ecuación, variable, restricción]`: Resuelve dist(P,A)=dist(P,B) con P restringido a un eje tipo P=(0,y,0) y crea los puntos solución. Mutacion: crea objetos. Riesgo: medio.
+- `Projection3D[fuente, destino]`: Proyecta un Point3D sobre un Plane3D o Line3D y crea el punto proyectado. Mutacion: crea objetos. Riesgo: bajo. Alias: `proyeccion3d`.
+- `PlaneThroughLines[recta1, recta2]`: Plano que contiene dos Line3D; si las rectas son alabeadas responde error y si son coincidentes avisa que hay infinitos planos. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_por_rectas`.
+- `PlaneThroughLinePoint[recta, punto]`: Plano que contiene un Line3D y un Point3D fuera de la recta. Mutacion: crea objetos. Riesgo: bajo. Alias: `plano_recta_punto`.
+- `LineRelation3D[recta1, recta2]`: Relación entre dos Line3D: se cortan, son paralelas, coincidentes o alabeadas (con puntos más cercanos y distancia). Mutacion: solo consulta. Riesgo: bajo. Alias: `relacion_rectas3d`.
+- `SolveLine3DParameters[director, relacion, objetivo, parametros]`: Parámetros de una recta 3D que cumple perpendicular u parallel con un vector objetivo; acepta uno o más parámetros nombrados. Mutacion: solo consulta. Riesgo: bajo. Alias: `parametros_recta3d`.
 ## CAS
 
 - `ImplicitDerivative[f, x]`: Derivada implícita dy/dx de F(x,y)=0 o evaluada en un punto. Mutacion: solo consulta. Riesgo: bajo. Formas alternativas: `ImplicitDerivative[f, x, y]`, `ImplicitDerivative[f, x, y, x0, y0]`.
@@ -844,6 +927,26 @@ Esta referencia se genera desde el registro de comandos estable. El parser y sus
 - `TurtleRight[grados]`: Tortuga Logo: gira a la derecha (horario) los grados dados. Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_derecha`.
 - `TurtleUp[]`: Tortuga Logo: levanta el lápiz (deja de dibujar). Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_arriba`.
 - `TurtleDown[]`: Tortuga Logo: baja el lápiz (vuelve a dibujar). Mutacion: transforma objetos. Riesgo: bajo. Alias: `tortuga_abajo`.
+## AM2
+
+- `HeatEquation[expr, x, t0, t_end]`: Ecuación del calor 1D u_t = u_xx: resuelve para la condición inicial dada y reporta u(x, t_end) muestreada. Mutacion: solo consulta. Riesgo: medio.
+- `WaveEquation[expr, x, t0, t_end]`: Ecuación de ondas 1D u_tt = u_xx: resuelve para la condición inicial dada y reporta u(x, t_end) muestreada. Mutacion: solo consulta. Riesgo: medio.
+- `Laplace2D[g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax]`: Laplace 2D en un rectángulo con datos de borde (superior, inferior, izquierdo, derecho) y reporta la solución muestreada. Mutacion: solo consulta. Riesgo: medio.
+## CAS
+
+- `FourierSeries[expr, var, L, n]`: Serie de Fourier finita de orden n sobre [-L, L]: construye la suma parcial como curva. Mutacion: crea objetos. Riesgo: medio.
+- `FourierCoeffs[expr, var, L, n]`: Coeficientes a0, a_k, b_k de la serie de Fourier de orden n sobre [-L, L]; solo consulta, sin crear objetos. Mutacion: solo consulta. Riesgo: bajo.
+- `NDerivativeSym[expr, var, n]`: Derivada n-ésima simbólica de una expresión; no confundir con NDerivative, que deriva numéricamente en un punto. Mutacion: solo consulta. Riesgo: bajo.
+- `Partial[expr, var]`: Derivada parcial simbólica de una expresión respecto de la variable indicada. Mutacion: solo consulta. Riesgo: bajo.
+- `SubstituteInt[expr, var, u]`: Integral por el cambio de variable u = u(var), reescribe el integrando y devuelve la primitiva. Mutacion: solo consulta. Riesgo: medio.
+- `LambertW[a]`: Rama principal W0 de la función W de Lambert: w tal que w·e^w = a, con dominio a ≥ -1/e. Mutacion: solo consulta. Riesgo: medio.
+- `SolveTranscendental[expr, var]`: Una raíz real de una ecuación trascendente en la ventana numérica por defecto, por búsqueda de raíz del motor CAS. Mutacion: solo consulta. Riesgo: medio.
+- `LaurentSeries[expr, var, x0, n]`: Serie de Laurent truncada en x0 hasta orden n: parte principal del polo más la parte regular de Taylor. Mutacion: solo consulta. Riesgo: medio.
+- `SumClosed[expr, var, lo, hi]`: Suma Σ de expr para var = lo..hi en forma cerrada; sin motor de sumas cerradas responde error honesto, nunca una suma numérica disfrazada. Mutacion: solo consulta. Riesgo: medio.
+## Texto
+
+- `ParseLatex[latex]`: Convierte una expresión LaTeX a la expresión interna de Grafito y la reporta como texto. Mutacion: solo consulta. Riesgo: bajo.
+- `ToLatex[expr]`: Convierte una expresión de Grafito a su forma LaTeX y la reporta como texto. Mutacion: solo consulta. Riesgo: bajo.
 ## Valores validos
 Los comandos de grafica rechazan dominios degenerados, invertidos o no finitos para evitar objetos sin geometria visible.
 

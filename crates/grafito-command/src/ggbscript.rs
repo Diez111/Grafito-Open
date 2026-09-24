@@ -669,7 +669,7 @@ pub fn toggle_checkbox(document: &mut Document, label: &str) -> Result<bool, Str
     let next = current == 0.0;
     document.try_set_variable(var.clone(), if next { 1.0 } else { 0.0 })?;
     let content = action_content(ActionKind::Checkbox, &action.caption, next, Some(&var));
-    if let Some(GeoObject::Text(text)) = document.get_object_mut(id) {
+    if let Some(GeoObject::Text(text)) = document.get_object_mut_touch(id) {
         text.content = content;
     }
     Ok(next)
@@ -970,7 +970,7 @@ fn run_visibility(
         ));
     }
     for (_, id) in &ids {
-        if let Some(obj) = document.get_object_mut(*id) {
+        if let Some(obj) = document.get_object_mut_touch(*id) {
             obj.set_visible(visible);
         }
     }
@@ -2699,7 +2699,7 @@ pub fn apply_line_opacity(document: &mut Document, label: &str, raw: &str) -> Re
     let id = find_object_by_label(document, &clean)
         .ok_or_else(|| format!("no existe el objeto '{clean}'"))?;
     let object = document
-        .get_object_mut(id)
+        .get_object_mut_touch(id)
         .ok_or_else(|| format!("objeto '{clean}' inválido"))?;
     let mut color = object.color();
     color.a = value as f32;

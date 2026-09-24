@@ -1,4 +1,4 @@
-//! Barrido de despacho: cada comando registrado (621) debe responder algo
+//! Barrido de despacho: cada comando registrado (733) debe responder algo
 //! honesto al invocarse con `Canonical[]` — jamás "Comando no reconocido".
 //!
 //! Es el blindaje de visibilidad de P4: un comando puede fallar por aridad

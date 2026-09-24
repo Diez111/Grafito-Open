@@ -244,8 +244,11 @@ fn script_limits_total_nesting_and_rejects_multiple_arguments() {
 
     let mut multiple_arguments = "Script[(0,0),(1,1)]".to_string();
     let outcome = process_input(&mut document, &mut multiple_arguments);
+    // Fantasma-2: con `Script` registrado, la aridad la valida el registro
+    // (mensaje "cantidad de argumentos inválida; usa Script[guion]") antes de
+    // llegar al brazo; se aceptan ambos mensajes honestos de rechazo.
     assert!(
-        matches!(outcome, CommandOutcome::Error(ref message) if message.contains("exactly one argument")),
+        matches!(outcome, CommandOutcome::Error(ref message) if message.contains("exactly one argument") || message.contains("cantidad de argumentos inválida")),
         "unexpected outcome: {outcome:?}"
     );
     assert_eq!(document_snapshot(&document), before);

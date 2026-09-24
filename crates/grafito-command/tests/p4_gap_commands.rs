@@ -195,8 +195,10 @@ fn p4_todos_visibles_en_paleta() {
     // Ola 0.3 (StartAnimation/StopAnimation/Delete visibles: +3): 601 → 604.
     // Ola 2.3 (ZTest2/FTest visibles): 604 → 606, 641 → 643.
     // Harness Fase A (+7 visibles S): 606 → 613, 643 → 650.
-    assert_eq!(command_registry::all().len(), 650);
-    assert_eq!(command_registry::palette_commands().count(), 613);
+    // Frente fantasma+nuevos (+12 visibles S): 650 → 662, 613 → 625.
+    // Frente fantasma-2 (+71 visibles S): 662 → 733, 625 → 696.
+    assert_eq!(command_registry::all().len(), 733);
+    assert_eq!(command_registry::palette_commands().count(), 696);
 }
 
 #[test]

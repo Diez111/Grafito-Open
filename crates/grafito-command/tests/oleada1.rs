@@ -152,7 +152,12 @@ fn oleada1_todos_visibles_en_paleta() {
     // Ola 0.3 (StartAnimation/StopAnimation/Delete dejan stub oculto: +3): 601 → 604.
     // Ola 2.3 (ZTest2/FTest visibles): 604 → 606.
     // Harness Fase A (medición TOPP 39/57/7: +7 visibles S): 606 → 613.
-    assert_eq!(command_registry::palette_commands().count(), 613);
+    // Frente fantasma+nuevos (7 con handler sin spec + 5 nuevos CAS/Complejos):
+    // 613 → 625 (ver registry_counts_match_documented_architecture).
+    // Frente fantasma-2 (71 con handler en commands.rs sin spec; Image queda
+    // fuera por ser stub honesto): 625 → 696 (delta por categoría en
+    // registry_counts_match_documented_architecture).
+    assert_eq!(command_registry::palette_commands().count(), 696);
 }
 
 #[test]
