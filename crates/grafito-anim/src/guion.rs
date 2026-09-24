@@ -52,8 +52,13 @@ pub const GUION_MAX_MEMORIA_BYTES: usize = 64 * 1024 * 1024;
 pub const TITULO_MAX_CHARS: usize = 80;
 /// Concepto del guion y texto del paso: `<= 500` chars.
 pub const CONCEPTO_MAX_CHARS: usize = 500;
-/// `math_expr`: corta, `<= 200` chars (forma local; el CAS decide después).
-pub const MATH_EXPR_MAX_CHARS: usize = 200;
+/// `math_expr`: corta, `<= 200` bytes (forma local; el CAS decide después).
+///
+/// Cuenta BYTES para unificar la unidad con el gate real
+/// (`grafito-pedagogy::verify_math_expr`, `teaching.rs:284-294`, también
+/// bytes): antes acá se contaban chars y una expresión multibyte (p. ej.
+/// `α*x²…`) podía pasar el pre-gate y caer en el gate real.
+pub const MATH_EXPR_MAX_BYTES: usize = 200;
 /// Pista de pizarra: `<= 200` chars.
 pub const WHITEBOARD_MAX_CHARS: usize = 200;
 /// Entradas máximas en `params` (anti-OOM de wire).
@@ -209,12 +214,14 @@ impl EscenaBase {
 
 /// Hook de forma para `math_expr`: valida sintaxis local barata.
 ///
-/// Hoy es SOLO forma (no corre el CAS): no vacía, `<= 200` chars, sin
-/// `=∫Σ→`, sin controles, paréntesis balanceados y al menos un
-/// alfanumérico. El CAS-gate real lo hace pedagogía después.
+/// Hoy es SOLO forma (no corre el CAS): no vacía, `<= 200` BYTES (misma
+/// unidad que `grafito-pedagogy::verify_math_expr`, para que una expresión
+/// que pasa acá no caiga allá por el contador), sin `=∫Σ→`, sin controles,
+/// paréntesis balanceados y al menos un alfanumérico. El CAS-gate real lo
+/// hace pedagogía después.
 pub fn math_expr_valida_para_cas(expr: &str) -> bool {
     let t = expr.trim();
-    if t.is_empty() || t.chars().count() > MATH_EXPR_MAX_CHARS {
+    if t.is_empty() || t.len() > MATH_EXPR_MAX_BYTES {
         return false;
     }
     if t.contains(['=', '∫', 'Σ', '→']) {
@@ -223,7 +230,7 @@ pub fn math_expr_valida_para_cas(expr: &str) -> bool {
     if t.chars().any(|c| c.is_control()) {
         return false;
     }
-    // Balanceo exacto (sin pánicos: `t` está acotado a 200 chars, el
+    // Balanceo exacto (sin pánicos: `t` está acotado a 200 bytes, el
     // `i32` no puede desbordar con ese largo).
     let mut n: i32 = 0;
     for c in t.chars() {
@@ -918,78 +925,256 @@ impl Guion {
     }
 }
 
+/// Copy del guion corto por familia de concepto: los 6 beats (hook, intriga,
+/// clímax 1..3, payoff) con `(texto, voz)` propios y una pista de pizarra
+/// común. La ESTRUCTURA no cambia entre familias (4 actos / 6 pasos /
+/// 48 frames / 25.7 s): cambia el copy, para que el guion no sea genérico
+/// para todo concepto.
+struct BeatsCorto {
+    /// Pista de pizarra de los 6 pasos (`<= 200` chars).
+    pizarra: &'static str,
+    /// `(texto, voz)` por beat: hook, intriga, clímax 1..3, payoff.
+    beats: [(&'static str, &'static str); 6],
+}
+
+/// Copy de cálculo (derivada / integral / Taylor): "una idea simple atrás de
+/// una cuenta que parece magia".
+static BEATS_CALCULO: BeatsCorto = BeatsCorto {
+    pizarra: "ejes y curva",
+    beats: [
+        (
+            "Hook: la idea antes que la cuenta",
+            "Che, mirá esto con atención: una idea simple se esconde atrás de una cuenta que parece magia y ya vas a verla.",
+        ),
+        (
+            "Intriga: el patrón que se repite",
+            "Fijate bien: el mismo truco se repite en cada caso, siempre igual. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá el punto de partida: todo arranca quieto, ordenado, con un solo dato firme y ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada paso, del más fácil al más retorcido.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy de análisis complejo (conforme / Möbius): "el plano que se deforma
+/// sin romper ángulos".
+static BEATS_COMPLEJO: BeatsCorto = BeatsCorto {
+    pizarra: "plano complejo y grilla",
+    beats: [
+        (
+            "Hook: el plano que se deforma",
+            "Che, mirá esto con atención: un plano entero se dobla y estira como si fuera de goma, y no se rompe nada.",
+        ),
+        (
+            "Intriga: lo que no cambia",
+            "Fijate bien: las curvas se deforman pero los ángulos quedan igualitos. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá el punto de partida: una grilla tranquila, cuadrada, ordenadita, y ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola fórmula y toda la grilla se acomoda solita detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada curva, de la más simple a la más retorcida.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si entendiste el gesto, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy de dinámica (logística / campo gradiente): "una regla chiquita que
+/// mueve un sistema entero".
+static BEATS_DINAMICA: BeatsCorto = BeatsCorto {
+    pizarra: "campo de flechas y curva",
+    beats: [
+        (
+            "Hook: un sistema que se desboca",
+            "Che, mirá esto con atención: una regla re chiquita mueve un sistema entero y se arma un lío bárbaro a la vista.",
+        ),
+        (
+            "Intriga: el patrón que se repite",
+            "Fijate bien: hay un patrón que se repite en cada rincón del sistema. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá el punto de partida: todo arranca quieto, ordenado, con una sola flechita y ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada resultado, del más manso al más caótico.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy de series (Fourier / Euler): "una suma de piezas simples que arma una
+/// figura".
+static BEATS_SERIES: BeatsCorto = BeatsCorto {
+    pizarra: "piezas de la suma y su forma",
+    beats: [
+        (
+            "Hook: una suma que dibuja",
+            "Che, mirá esto con atención: una suma larguita de piezas re simples arma una figura que parece magia.",
+        ),
+        (
+            "Intriga: el patrón que se repite",
+            "Fijate bien: las mismas piezas se repiten siempre, ordenadas por peso. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá el punto de partida: arranca quieto, ordenado, con una sola pieza puesta y ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: sumamos una sola pieza y todo lo demás se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada pieza, de la más gruesa a la más finita.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Mirá la suma otra vez y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy de forma y estructura (Pitágoras / subespacio / fractal): "una regla
+/// que se repite en cada escala".
+static BEATS_FORMA: BeatsCorto = BeatsCorto {
+    pizarra: "figura y sus copias",
+    beats: [
+        (
+            "Hook: una forma que se repite",
+            "Che, mirá esto con atención: una figura se repite en cada escala y se arma un dibujo que parece magia.",
+        ),
+        (
+            "Intriga: el patrón que se repite",
+            "Fijate bien: la misma regla aparece en chico y en grande, siempre igual. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá el punto de partida: una forma simple, ordenada, con una sola regla clara y ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada trozo, del más grande al más chiquito.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy universal (placeholder honesto): el histórico "parece magia, pero
+/// tiene un truco cortito".
+static BEATS_UNIVERSAL: BeatsCorto = BeatsCorto {
+    pizarra: "ejes y curva",
+    beats: [
+        (
+            "Hook: mirá el truco de cerca",
+            "Che, mirá esto con atención: parece magia, pero tiene un truco cortito que ya mismo vas a ver.",
+        ),
+        (
+            "Intriga: el patrón que se repite",
+            "Fijate bien: hay un patrón que se repite siempre igual. Bancame un toque que te lo muestro paso a paso.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá bien el punto de partida: todo arranca quieto, ordenado, sin ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: movemos una sola cosa",
+            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 3: un mismo gesto",
+            "¿Ves? Esa es la idea entera: un mismo gesto explica cada caso, del más fácil al más retorcido.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Familia de copy de una plantilla canónica (13 → 6 familias).
+fn familia_corto(template: &str) -> &'static BeatsCorto {
+    match template {
+        "derivative-slope" | "integral-area" | "taylor-series" => &BEATS_CALCULO,
+        "conformal-map" | "mobius-transform" => &BEATS_COMPLEJO,
+        "logistic-bifurcation" | "gradient-field" => &BEATS_DINAMICA,
+        "euler" | "fourier" => &BEATS_SERIES,
+        "pitagoras" | "subspace" | "fractal" => &BEATS_FORMA,
+        _ => &BEATS_UNIVERSAL,
+    }
+}
+
 /// Arma un guion corto de 4 beats para `concepto` (P1-core voiceover).
 ///
 /// Beats: hook 0-3 s (1 paso de 2500 ms) → intriga (1 paso) → clímax
 /// (3 micro-pasos) → payoff+loop (1 paso). Textos en español rioplatense
-/// con voz en off de 111 palabras totales (rango corto 110-130); la
-/// plantilla es la de [`crate::protocol::template_for_concept`] acotada a
-/// `taylor-series`/`integral-area`/`derivative-slope`/`conformal-map`/
-/// `pitagoras` (otro resultado → fallback `universal` honesto).
+/// con voz en off de 111-121 palabras totales (rango corto 110-130); la
+/// plantilla es la de [`crate::protocol::template_for_concept`] y pasa
+/// literal cualquiera de las 13 [`CANONICAL_TEMPLATES`] (antes solo 5 y el
+/// resto se degradaba a `universal`). El copy (texto + voz + pizarra) es el
+/// de la familia del concepto ([`familia_corto`]): 6 familias, mismo esqueleto.
 ///
 /// Presupuestos intactos: 4 actos (`<= 5`), 6 pasos (`<= 8`), 48 frames
 /// (`<= 96`), 640×480×4×48 ≈ 56 MiB (`<= 64 MiB`), 25.7 s (`0.1..=60 s`).
-/// Pura, sin I/O, sin pánicos.
+/// Pura, sin I/O, sin pánicos (y byte-idéntica por construcción: el output
+/// serializado va pineado por hash en `tests::short_script_golden_hash`).
 pub fn short_script(concepto: &str) -> Result<GuionTexto, GuionError> {
     let norm = crate::protocol::normalize_concept(concepto);
     let resuelta = crate::protocol::template_for_concept(&norm);
-    let template = match resuelta {
-        "taylor-series" | "integral-area" | "derivative-slope" | "conformal-map" | "pitagoras" => {
-            resuelta.to_string()
-        }
-        _ => "universal".to_string(),
+    // Las 13 canónicas pasan literales; fuera de la lista (imposible hoy:
+    // `template_for_concept` solo devuelve canónicas) → fallback honesto.
+    let template = if CANONICAL_TEMPLATES.contains(&resuelta) {
+        resuelta.to_string()
+    } else {
+        "universal".to_string()
     };
-    // (título acto | texto | voiceover | efecto | frames | run_ms). El
-    // `wait_after` es 200 ms fijo y la plantilla la resuelta de arriba.
-    let beats: &[(&str, &str, &str, &str, usize, u64)] = &[
-        (
-            "Hook",
-            "Hook: mirá el truco de cerca",
-            "Che, mirá esto con atención: parece magia, pero tiene un truco cortito que ya mismo vas a ver.",
-            "write",
-            8,
-            2500,
-        ),
-        (
-            "Intriga",
-            "Intriga: el patrón que se repite",
-            "Fijate bien: hay un patrón que se repite siempre igual. Bancame un toque que te lo muestro paso a paso.",
-            "fade",
-            8,
-            5000,
-        ),
-        (
-            "Clímax",
-            "Clímax 1: el punto de partida",
-            "Primero mirá bien el punto de partida: todo arranca quieto, ordenado, sin ningún misterio a la vista.",
-            "create",
-            8,
-            4000,
-        ),
-        (
-            "Clímax",
-            "Clímax 2: movemos una sola cosa",
-            "Ahora prestá atención al cambio: movemos una sola cosa y todo lo demás se acomoda solito detrás.",
-            "tracker",
-            8,
-            4000,
-        ),
-        (
-            "Clímax",
-            "Clímax 3: un mismo gesto",
-            "¿Ves? Esa es la idea entera: un mismo gesto explica cada caso, del más fácil al más retorcido.",
-            "indicate",
-            8,
-            4000,
-        ),
-        (
-            "Payoff",
-            "Payoff: miralo de nuevo y comprobalo",
-            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
-            "grow",
-            8,
-            5000,
-        ),
+    let copy = familia_corto(&template);
+    // Estructura fija por beat (efecto | frames | run_ms); el `wait_after`
+    // es 200 ms fijo. El copy sale de `copy.beats` según la familia.
+    const ESTRUCTURA: [(&str, usize, u64); 6] = [
+        ("write", 8, 2500),
+        ("fade", 8, 5000),
+        ("create", 8, 4000),
+        ("tracker", 8, 4000),
+        ("indicate", 8, 4000),
+        ("grow", 8, 5000),
     ];
     let mut actos: Vec<ActoTexto> = Vec::with_capacity(4);
     let mut indice = 0usize;
@@ -1002,11 +1187,12 @@ pub fn short_script(concepto: &str) -> Result<GuionTexto, GuionError> {
     ] {
         let mut pasos = Vec::with_capacity(cantidad);
         for _ in 0..cantidad {
-            let (_, texto, voiceover, efecto, frames, run_ms) = beats[indice];
+            let (texto, voiceover) = copy.beats[indice];
+            let (efecto, frames, run_ms) = ESTRUCTURA[indice];
             pasos.push(PasoTexto {
                 texto: texto.to_string(),
                 math_expr: None,
-                whiteboard_hint: "ejes y curva".to_string(),
+                whiteboard_hint: copy.pizarra.to_string(),
                 template_hint: template.clone(),
                 params: BTreeMap::new(),
                 efecto: efecto.to_string(),
@@ -1382,6 +1568,27 @@ mod tests {
         assert!(!math_expr_valida_para_cas(""));
     }
 
+    /// Regresión del contador desunificado: `math_expr` se mide en BYTES,
+    /// la misma unidad que el gate real (`grafito-pedagogy::verify_math_expr`,
+    /// `teaching.rs:284-294`). Antes acá se contaban chars y una expresión
+    /// multibyte de 200 chars (400 bytes) pasaba el pre-gate para caer
+    /// después en el gate real.
+    #[test]
+    fn math_expr_se_mide_en_bytes_como_el_gate_de_pedagogia() {
+        let multibyte = "α*x²".repeat(50); // 200 chars, 350 bytes
+        assert_eq!(multibyte.chars().count(), 200);
+        assert!(multibyte.len() > MATH_EXPR_MAX_BYTES);
+        assert!(
+            !math_expr_valida_para_cas(&multibyte),
+            "200 chars multibyte exceden los 200 bytes del gate real"
+        );
+        // Frontera exacta en bytes: 200 pasa, 201 no.
+        assert!(math_expr_valida_para_cas(&"x".repeat(MATH_EXPR_MAX_BYTES)));
+        assert!(!math_expr_valida_para_cas(
+            &"x".repeat(MATH_EXPR_MAX_BYTES + 1)
+        ));
+    }
+
     #[test]
     fn a_playlist_aplana_con_n_distinto_y_presupuesta() {
         // 2 actos × 2 pasos = 4 steps, N distinto (8 vs 12) → remuestreo.
@@ -1493,7 +1700,7 @@ mod tests {
             assert_eq!(g.duracion_total_ms(), 25_700);
             assert!(g.validate_short_len());
             assert!((SHORT_MIN_PALABRAS..=SHORT_MAX_PALABRAS).contains(&g.total_voiceover_words()));
-            // Plantilla coherente al concepto (5 + fallback universal).
+            // Plantilla coherente al concepto (las 13 canónicas).
             let primera = g.actos[0].pasos[0].template.clone();
             assert!(
                 [
@@ -1520,6 +1727,119 @@ mod tests {
         assert_eq!(integral.actos[0].pasos[0].template_hint, "integral-area");
         let libre = short_script("tarea sin matemática").unwrap();
         assert_eq!(libre.actos[0].pasos[0].template_hint, "universal");
+    }
+
+    /// Regresión del degradado a `universal`: el corto usa la plantilla
+    /// canónica de las 13 (`CANONICAL_TEMPLATES`), no solo 5 de ellas.
+    /// Antes `fourier`, `euler`, `subspace`, `fractal`, `gradient-field`,
+    /// `mobius-transform` y `logistic-bifurcation` caían a `universal`.
+    #[test]
+    fn short_script_usa_las_13_canonicas() {
+        let casos: [(&str, &str); 13] = [
+            ("derivada como pendiente", "derivative-slope"),
+            ("integral del área", "integral-area"),
+            ("serie de taylor del seno", "taylor-series"),
+            ("mapeo conforme complejo", "conformal-map"),
+            ("teorema de pitágoras", "pitagoras"),
+            ("crecimiento exponencial exp(x)", "euler"),
+            ("series de fourier", "fourier"),
+            ("logística y bifurcación", "logistic-bifurcation"),
+            ("campo gradiente", "gradient-field"),
+            ("transformación de möbius", "mobius-transform"),
+            ("tarea sin matemática", "universal"),
+            ("combinación lineal y subespacio", "subspace"),
+            ("fractal de koch", "fractal"),
+        ];
+        for (concepto, esperado) in casos {
+            let g = short_script(concepto).expect("corto válido");
+            assert_eq!(
+                g.actos[0].pasos[0].template_hint, esperado,
+                "{concepto} debe resolver a {esperado}"
+            );
+            assert!(
+                CANONICAL_TEMPLATES.contains(&g.actos[0].pasos[0].template_hint.as_str()),
+                "{esperado} es canónica"
+            );
+        }
+    }
+
+    /// Regresión del copy genérico: los beats (texto + voz) varían por
+    /// familia de concepto; antes los 6 beats eran idénticos para cualquier
+    /// concepto ("Che, mirá esto con atención: parece magia…").
+    #[test]
+    fn short_script_varia_los_beats_por_familia() {
+        let familias = [
+            "derivada como pendiente",
+            "mapeo conforme complejo",
+            "logística y bifurcación",
+            "series de fourier",
+            "fractal de koch",
+            "tarea sin matemática",
+        ];
+        let mut hooks: Vec<(String, String)> = Vec::new();
+        for concepto in familias {
+            let g = short_script(concepto).expect("corto válido");
+            let hook = &g.actos[0].pasos[0];
+            assert!(!hook.texto.is_empty(), "{concepto}");
+            assert!(hook.voiceover.as_deref().is_some_and(|v| !v.is_empty()));
+            hooks.push((
+                hook.texto.clone(),
+                hook.voiceover.clone().unwrap_or_default(),
+            ));
+        }
+        // 6 familias → 6 hooks distintos entre sí (texto y voz).
+        for i in 0..hooks.len() {
+            for j in (i + 1)..hooks.len() {
+                assert_ne!(
+                    hooks[i], hooks[j],
+                    "el hook de la familia {i} debe diferir del de la {j}"
+                );
+            }
+        }
+    }
+
+    /// Golden byte-a-byte del corto: `short_script` es puro y determinista
+    /// (`BTreeMap` en params, copy fijo por familia), así que el
+    /// `GuionTexto` serializado va pineado por hash FNV-1a 64 (uno por cada
+    /// una de las 13 canónicas). Cualquier cambio de copy/tiempos/plantilla
+    /// rompe el pin a propósito: si el cambio es querido, se re-pinea con
+    /// justificación.
+    #[test]
+    fn short_script_golden_hash() {
+        let casos: [(&str, u64); 13] = [
+            ("derivada como pendiente", 0x279683f1d18c1d25),
+            ("integral del área", 0xbad1cf0267c6fe76),
+            ("serie de taylor del seno", 0x126fa8cb2b0de96f),
+            ("mapeo conforme complejo", 0xa5cf3f264725d64b),
+            ("teorema de pitágoras", 0x3e1be9ec53499091),
+            ("crecimiento exponencial exp(x)", 0x884e009bace7042f),
+            ("series de fourier", 0x2921ef2ff6bb195f),
+            ("logística y bifurcación", 0x576a4b8be1f7a1c7),
+            ("campo gradiente", 0x3dd994c7622e089d),
+            ("transformación de möbius", 0x6e5d47da1f50374e),
+            ("tarea sin matemática", 0xf5fcc3afcb60cf79),
+            ("combinación lineal y subespacio", 0x502044c6213ea445),
+            ("fractal de koch", 0xada5cdc950a0dffb),
+        ];
+        for (concepto, esperado) in casos {
+            let g = short_script(concepto).expect("corto válido");
+            let json = serde_json::to_string(&g).expect("serializa");
+            assert_eq!(
+                fnv1a64(json.as_bytes()),
+                esperado,
+                "golden roto para {concepto}: si el cambio es querido, re-pineá con justificación"
+            );
+        }
+    }
+
+    /// FNV-1a 64 puro (sin deps): el hash del JSON serializado del corto.
+    fn fnv1a64(bytes: &[u8]) -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        for b in bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        h
     }
 
     #[test]

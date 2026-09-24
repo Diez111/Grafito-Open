@@ -31,8 +31,14 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Versión del protocolo que este puente habla.
+/// Versión del protocolo que este puente habla (la que emite en `hello`).
 pub const ANIM_PROTOCOL_VERSION: u32 = 1;
+/// Versión mínima aceptada en recepción (rango real de negociación).
+pub const ANIM_PROTOCOL_VERSION_MIN: u32 = 1;
+/// Versión máxima aceptada en recepción: un worker v2 se tolera degradando
+/// a v1 (los campos nuevos se ignoran — el parseo es por campos, sin
+/// `deny_unknown_fields`), en vez de rechazar el handshake entero.
+pub const ANIM_PROTOCOL_VERSION_MAX: u32 = 2;
 
 /// Identificador opaco de un job.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1198,14 +1204,18 @@ pub fn try_downcast(value: &serde_json::Value) -> ProtocolResult<WireMessage> {
             let protocol_version =
                 u32::try_from(protocol_version).map_err(|_| ProtocolError::UnsupportedVersion {
                     got: protocol_version as u32,
-                    min: 1,
-                    max: 1,
+                    min: ANIM_PROTOCOL_VERSION_MIN,
+                    max: ANIM_PROTOCOL_VERSION_MAX,
                 })?;
-            if protocol_version != ANIM_PROTOCOL_VERSION {
+            // Rango real de negociación (antes `== 1` duro: un worker v2 no
+            // negociaba ni degradaba). v2 se tolera con campos nuevos
+            // ignorados; fuera del rango → rechazo tipado.
+            if !(ANIM_PROTOCOL_VERSION_MIN..=ANIM_PROTOCOL_VERSION_MAX).contains(&protocol_version)
+            {
                 return Err(ProtocolError::UnsupportedVersion {
                     got: protocol_version,
-                    min: 1,
-                    max: 1,
+                    min: ANIM_PROTOCOL_VERSION_MIN,
+                    max: ANIM_PROTOCOL_VERSION_MAX,
                 });
             }
             let capabilities = value
@@ -2066,14 +2076,35 @@ mod universal_tests {
             try_downcast(&error),
             Ok(WireMessage::Error { .. })
         ));
-        // Versión ajena se rechaza tipado (compat v1 solo para tests).
+        // v2 tolerado (rango real 1..=2): campos nuevos se ignoran y el
+        // handshake no se rechaza entero.
         let v2 = serde_json::json!({
             "type": "hello", "protocol_version": 2, "capabilities": [],
+            "campo_nuevo_v2": {"x": 1},
         });
         assert!(matches!(
             try_downcast(&v2),
-            Err(ProtocolError::UnsupportedVersion { got: 2, .. })
+            Ok(WireMessage::Hello {
+                protocol_version: 2,
+                ..
+            })
         ));
+        // Fuera del rango → rechazo tipado con el rango real.
+        for v in [0u64, 3, 99] {
+            let vn = serde_json::json!({
+                "type": "hello", "protocol_version": v, "capabilities": [],
+            });
+            match try_downcast(&vn) {
+                Err(ProtocolError::UnsupportedVersion { got, min, max }) => {
+                    assert_eq!(got, v as u32);
+                    assert_eq!(
+                        (min, max),
+                        (ANIM_PROTOCOL_VERSION_MIN, ANIM_PROTOCOL_VERSION_MAX)
+                    );
+                }
+                otro => panic!("esperaba UnsupportedVersion para v{v}, got {otro:?}"),
+            }
+        }
     }
 
     #[test]

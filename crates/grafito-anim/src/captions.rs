@@ -10,7 +10,8 @@
 //!
 //! Presupuestos: texto `1..=200` chars, segmento dentro de 60 s
 //! (`end_ms <= 60_000`), pista `0..=2000` segmentos, salida
-//! `<= 256 KiB` en ambos formatos.
+//! `<= 256 KiB` en ambos formatos (cota PREVENTIVA: se chequea durante el
+//! armado y aborta al cruzarla, sin materializar la salida entera).
 //!
 //! Cerebro puro: sin egui, sin wgpu, sin I/O, sin red. Todo `Err` en
 //! español, sin pánicos (sin `unwrap` en prod).
@@ -274,25 +275,26 @@ impl CaptionTrack {
     }
 
     /// Baja la pista a SRT (RFC: numeración 1-based, `HH:MM:SS,mmm`,
-    /// ≤2 renglones, tags escapados). Cota `<= 256 KiB`.
+    /// ≤2 renglones, tags escapados). Cota `<= 256 KiB` PREVENTIVA: el
+    /// chequeo corre dentro del armado ([`empuja_acotado`]) y aborta al
+    /// cruzar el tope, sin materializar la salida entera.
     pub fn to_srt(&self) -> Result<String, CaptionError> {
         self.validate()?;
         let mut out = String::new();
         for (i, seg) in self.segments.iter().enumerate() {
-            out.push_str(&(i + 1).to_string());
-            out.push('\n');
-            out.push_str(&formatea_srt_ts(seg.start_ms));
-            out.push_str(" --> ");
-            out.push_str(&formatea_srt_ts(seg.end_ms));
-            out.push('\n');
+            let mut bloque = String::new();
+            bloque.push_str(&(i + 1).to_string());
+            bloque.push('\n');
+            bloque.push_str(&formatea_srt_ts(seg.start_ms));
+            bloque.push_str(" --> ");
+            bloque.push_str(&formatea_srt_ts(seg.end_ms));
+            bloque.push('\n');
             for linea in envuelve_dos_lineas(&seg.texto) {
-                out.push_str(&escapa_srt(&linea));
-                out.push('\n');
+                bloque.push_str(&escapa_srt(&linea));
+                bloque.push('\n');
             }
-            out.push('\n');
-        }
-        if out.len() > CAPTION_MAX_OUTPUT_BYTES {
-            return Err(CaptionError::SalidaMuyGrande { bytes: out.len() });
+            bloque.push('\n');
+            empuja_acotado(&mut out, &bloque)?;
         }
         Ok(out)
     }
@@ -300,35 +302,75 @@ impl CaptionTrack {
     /// Baja la pista a ASS v4+ (estilo `Caption`: blanco `#FFFFFF`,
     /// highlight amarillo `#FFD700` por palabra vía karaoke `{\k}`,
     /// outline 3, MarginV 80, fontsize relativo). Sin `palabras` la
-    /// frase va entera. Cota `<= 256 KiB`.
+    /// frase va entera. Cota `<= 256 KiB` PREVENTIVA: el chequeo corre
+    /// dentro del armado ([`empuja_acotado`]/[`empuja_karaoke`]) y aborta
+    /// al cruzar el tope, sin materializar la salida entera.
     pub fn to_ass(&self) -> Result<String, CaptionError> {
         self.validate()?;
-        let mut out = String::from(
+        let mut out = String::new();
+        empuja_acotado(
+            &mut out,
             "[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\nYCbCr Matrix: TV.709\n\n\
              [V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n",
-        );
-        out.push_str(&format!(
-            "Style: Caption,Arial,{ASS_FONTSIZE},&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{ASS_OUTLINE},0,2,20,20,{ASS_MARGIN_V},1\n\n\
+        )?;
+        empuja_acotado(
+            &mut out,
+            &format!(
+                "Style: Caption,Arial,{ASS_FONTSIZE},&H00FFFFFF,&H0000D7FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,{ASS_OUTLINE},0,2,20,20,{ASS_MARGIN_V},1\n\n\
              [Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
-        ));
+            ),
+        )?;
         for seg in &self.segments {
-            let texto = if seg.palabras.is_empty() {
-                escapa_ass(&normaliza_texto(&seg.texto))
+            empuja_acotado(
+                &mut out,
+                &format!(
+                    "Dialogue: 0,{}, {},Caption,,0,0,0,,",
+                    formatea_ass_ts(seg.start_ms),
+                    formatea_ass_ts(seg.end_ms)
+                ),
+            )?;
+            if seg.palabras.is_empty() {
+                empuja_acotado(&mut out, &escapa_ass(&normaliza_texto(&seg.texto)))?;
             } else {
-                karaoke_ass(&seg.palabras)
-            };
-            out.push_str(&format!(
-                "Dialogue: 0,{}, {},Caption,,0,0,0,,{}\n",
-                formatea_ass_ts(seg.start_ms),
-                formatea_ass_ts(seg.end_ms),
-                texto
-            ));
-        }
-        if out.len() > CAPTION_MAX_OUTPUT_BYTES {
-            return Err(CaptionError::SalidaMuyGrande { bytes: out.len() });
+                empuja_karaoke(&mut out, &seg.palabras)?;
+            }
+            empuja_acotado(&mut out, "\n")?;
         }
         Ok(out)
     }
+}
+
+/// Empuja `frag` a `out` respetando [`CAPTION_MAX_OUTPUT_BYTES`] de forma
+/// PREVENTIVA: si `out + frag` supera el tope, `Err` con el total proyectado
+/// sin llegar a materializarlo. Es la única vía de crecimiento de la salida
+/// de `to_srt`/`to_ass`: el acumulado jamás supera el tope (a lo sumo se
+/// construye el fragmento que dispara el error). Anti-OOM de wire: el peor
+/// caso alcanzable vía `Deserialize` (2000 segmentos × 500 palabras ×
+/// 200 chars ≈ 200 MB de salida) aborta con el acumulado en el tope.
+fn empuja_acotado(out: &mut String, frag: &str) -> Result<(), CaptionError> {
+    let proyectado = out.len().saturating_add(frag.len());
+    if proyectado > CAPTION_MAX_OUTPUT_BYTES {
+        return Err(CaptionError::SalidaMuyGrande { bytes: proyectado });
+    }
+    out.push_str(frag);
+    Ok(())
+}
+
+/// Escribe el karaoke ASS por palabra sobre `out` (`{\k<cs>}palabra `,
+/// `cs` por piso con mínimo 1) pasando por [`empuja_acotado`]: un fragmento
+/// por palabra, jamás el segmento entero. Las palabras ya vienen validadas
+/// en orden. Equivale byte a byte al viejo `karaoke_ass` (sin espacio
+/// colgante final).
+fn empuja_karaoke(out: &mut String, palabras: &[(String, u32, u32)]) -> Result<(), CaptionError> {
+    for (indice, (palabra, inicio, fin)) in palabras.iter().enumerate() {
+        if indice > 0 {
+            empuja_acotado(out, " ")?;
+        }
+        let cs = fin.saturating_sub(*inicio) / 10;
+        let cs = cs.max(1);
+        empuja_acotado(out, &format!("{{\\k{cs}}}{}", escapa_ass(palabra.trim())))?;
+    }
+    Ok(())
 }
 
 /// Formatea ms a `HH:MM:SS,mmm` (SRT). Pura.
@@ -394,20 +436,6 @@ pub fn envuelve_dos_lineas(texto: &str) -> Vec<String> {
         }
     }
     vec![palabras[..mejor].join(" "), palabras[mejor..].join(" ")]
-}
-
-/// Arma el karaoke ASS por palabra (`{\k<cs>}palabra `, `cs` por piso
-/// con mínimo 1). Las palabras ya vienen validadas en orden. Pura.
-fn karaoke_ass(palabras: &[(String, u32, u32)]) -> String {
-    let mut out = String::new();
-    for (palabra, inicio, fin) in palabras {
-        let cs = fin.saturating_sub(*inicio) / 10;
-        let cs = cs.max(1);
-        out.push_str(&format!("{{\\k{cs}}}{} ", escapa_ass(palabra.trim())));
-    }
-    // El último espacio separa del fin de línea; si quedó colgando se
-    // recorta sin tocar el karaoke.
-    out.trim_end().to_string()
 }
 
 /// Baja el voiceover de los pasos a pista de subtítulos.
@@ -614,6 +642,92 @@ mod tests {
         let pista = CaptionTrack::try_new(muchos).unwrap();
         assert!(pista.to_srt().is_err());
         assert!(pista.to_ass().is_err());
+    }
+
+    /// Regresión del chequeo tardío: la cota de 256 KiB es PREVENTIVA — el
+    /// `Err` llega con el acumulado justo al cruzar el tope, sin
+    /// materializar la salida entera (antes se construía TODO y se medía
+    /// después: ~440 KiB de transitorio acá).
+    #[test]
+    fn srt_frena_al_cruzar_el_tope_sin_materializar_la_salida_entera() {
+        let muchos: Vec<CaptionSegment> = (0..2000)
+            .map(|i| segmento("a".repeat(200).as_str(), i * 30, i * 30 + 25))
+            .collect();
+        let pista = CaptionTrack::try_new(muchos).unwrap();
+        let bytes = match pista.to_srt() {
+            Err(CaptionError::SalidaMuyGrande { bytes }) => bytes,
+            otro => panic!("esperaba SalidaMuyGrande, got {otro:?}"),
+        };
+        assert!(
+            bytes <= CAPTION_MAX_OUTPUT_BYTES + 1024,
+            "debe frenar al cruzar el tope: acumulado proyectado {bytes} bytes \
+             (antes se materializaban los ~440 KiB completos)"
+        );
+    }
+
+    /// Peor caso de wire por karaoke (2000 × 500 × 200 chars ≈ 200 MB de
+    /// salida en total): acá va la versión chiquita (3 × 500 × 200) y el
+    /// `Err` igual debe llegar con el acumulado en el tope, no con toda la
+    /// salida construida.
+    #[test]
+    fn ass_frena_al_cruzar_el_tope_con_karaoke_maximo() {
+        let word = "b".repeat(200);
+        let con_karaoke: Vec<CaptionSegment> = (0..3)
+            .map(|i| {
+                let s = i as u32 * 1200;
+                CaptionSegment {
+                    texto: "hola mundo".to_string(),
+                    start_ms: s,
+                    end_ms: s + 600,
+                    palabras: (0..500)
+                        .map(|k| {
+                            let k = k as u32;
+                            (word.clone(), s + k, s + k + 1)
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        let pista = CaptionTrack::try_new(con_karaoke).unwrap();
+        let bytes = match pista.to_ass() {
+            Err(CaptionError::SalidaMuyGrande { bytes }) => bytes,
+            otro => panic!("esperaba SalidaMuyGrande, got {otro:?}"),
+        };
+        assert!(
+            bytes <= CAPTION_MAX_OUTPUT_BYTES + 1024,
+            "karaoke palabra a palabra: acumulado proyectado {bytes} bytes \
+             (antes se materializaba el segmento entero, ~310 KiB acá y \
+             ~200 MB en el peor caso de wire)"
+        );
+    }
+
+    /// Contador de bytes acumulados del empujador: por muchos fragmentos que
+    /// lleguen, el acumulado NUNCA supera el tope (la cota es preventiva, no
+    /// a posteriori) y el `Err` trae el total proyectado acotado.
+    #[test]
+    fn empuja_acotado_nunca_supera_el_tope() {
+        let mut out = String::new();
+        let frag = "x".repeat(1024);
+        let mut empujados = 0usize;
+        loop {
+            match empuja_acotado(&mut out, &frag) {
+                Ok(()) => empujados += 1,
+                Err(CaptionError::SalidaMuyGrande { bytes }) => {
+                    assert!(
+                        out.len() <= CAPTION_MAX_OUTPUT_BYTES,
+                        "acumulado {} por encima del tope",
+                        out.len()
+                    );
+                    assert!(bytes <= CAPTION_MAX_OUTPUT_BYTES + frag.len());
+                    break;
+                }
+                Err(otro) => panic!("error inesperado: {otro}"),
+            }
+            assert!(
+                empujados < 10_000,
+                "debe abortar mucho antes de acumular 10 MiB"
+            );
+        }
     }
 
     #[test]

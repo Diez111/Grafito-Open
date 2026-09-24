@@ -32,6 +32,24 @@
 //! alimentan al player), capas 32, `Resolution` 64..=4096,
 //! `AnimDuration` 0.1..=60 s (`run_ms` 100..=60000).
 //!
+//! Presupuesto propio del set jugado (2026-09): [`PLAYER_MAX_TOTAL_BYTES`]
+//! 64 MiB LÓGICOS estimados ([`estimate_placed_bytes`]) enforceados durante
+//! el compuesto ([`empuja_frame`]): `try_play` devuelve `Err` honesto y
+//! `play` corta el armado con lo ya jugado. Antes el peor caso compuesto
+//! (96 frames × 32 capas × 4096 pts) clonaba la escena base CADA frame y
+//! acumulaba ~192 MB sin chequeo real.
+//!
+//! Sobre el fondo compartido (queda como propuesta, NO hecho): un
+//! `Arc<[PlacedMobject]>` por frame NO ahorra las copias del fondo, porque
+//! cada frame compuesto = fondo + animado y el slice plano se materializa
+//! entero igual (el ahorro real exigiría una representación de dos partes
+//! —`fondo: Arc<[…]>` + `extras`— o raster incremental, y ambas cambian el
+//! contrato `PlayedFrame.objects` con la Piel:
+//! `grafito-app/src/assistant.rs:7407` consume `&cuadro.objects` como
+//! `&[PlacedMobject]`). Con el presupuesto de arriba el peor caso ya es
+//! honesto y acotado; la copia por frame queda como costo de CPU acotado
+//! (≤1 memcpy de ≤2 MiB por frame, ≤64 MiB totales).
+//!
 //! El long-form (hasta 1500 frames por formato video) NO pasa por acá de
 //! una: el frente compone por chunks de `max_chunk_frames` (jamás el `Vec`
 //! total) y cada chunk respeta estos topes cortos.
@@ -279,6 +297,78 @@ pub const PLAYER_MAX_FRAMES: usize = 48;
 /// Tope de frames totales de un `play` (paridad con playlist: 96;
 /// corto histórico intacto en P0.1).
 pub const PLAYER_MAX_TOTAL_FRAMES: usize = 96;
+/// Presupuesto propio del set jugado (`Vec<PlayedFrame>`): 64 MiB de huella
+/// LÓGICA estimada (paridad con `GUION_MAX_MEMORIA_BYTES`). El de
+/// `Playlist::estimate_set_bytes` mide bytes RGBA del set (otra
+/// representación) y el previo de `try_play` (`frames × 16 × 512`) nunca
+/// llegaba a 64 MiB con ≤96 frames: el peor caso compuesto (96 frames ×
+/// 32 capas × 4096 pts) clonaba la escena base CADA frame y se iba a
+/// ~192 MB sin ningún chequeo real. Ahora el armado corta acá.
+pub const PLAYER_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
+
+/// Estimación honesta del heap de un mobject (puntos de polígonos, SVG de
+/// `Tex`, expresiones y ramas de `Group`). Pura.
+pub fn estimate_mobject_bytes(m: &Mobject) -> usize {
+    match m {
+        Mobject::Polygon { pts } => pts.len().saturating_mul(std::mem::size_of::<[f64; 2]>()),
+        Mobject::FunctionGraph { expr } => expr.len(),
+        Mobject::Tex { svg } => svg.len(),
+        Mobject::VectorField { func, .. } => func.len(),
+        Mobject::Group(hijos) => hijos.iter().fold(
+            hijos.len().saturating_mul(std::mem::size_of::<Mobject>()),
+            |acc, h| acc.saturating_add(estimate_mobject_bytes(h)),
+        ),
+        Mobject::Axes
+        | Mobject::Dot { .. }
+        | Mobject::ArrowField { .. }
+        | Mobject::Circle { .. }
+        | Mobject::Square { .. }
+        | Mobject::Rectangle { .. }
+        | Mobject::Ellipse { .. }
+        | Mobject::Arc { .. }
+        | Mobject::Line { .. }
+        | Mobject::Arrow { .. }
+        | Mobject::NumberPlane { .. } => 0,
+    }
+}
+
+/// Estimación honesta del costo de un colocado (struct + heap del mobject).
+/// Pura.
+pub fn estimate_placed_bytes(p: &PlacedMobject) -> usize {
+    std::mem::size_of::<PlacedMobject>().saturating_add(estimate_mobject_bytes(&p.mobject))
+}
+
+/// Empuja el frame al set con presupuesto propio ([`PLAYER_MAX_TOTAL_BYTES`],
+/// estimado con [`estimate_placed_bytes`]). En modo estricto exceder el
+/// tope es `Err` honesto; en modo total devuelve `Ok(false)` y el llamador
+/// corta el armado quedándose con lo ya jugado (jamás materializa el peor
+/// caso). Puro, sin pánicos.
+fn empuja_frame(
+    out: &mut Vec<PlayedFrame>,
+    bytes: &mut usize,
+    frame: Vec<PlacedMobject>,
+    clamp: bool,
+) -> SceneResult<bool> {
+    let estimado = frame
+        .iter()
+        .map(estimate_placed_bytes)
+        .fold(0usize, usize::saturating_add);
+    let nuevo = bytes.saturating_add(estimado);
+    if nuevo > PLAYER_MAX_TOTAL_BYTES {
+        if clamp {
+            return Ok(false);
+        }
+        return Err(SceneError::PresupuestoExcedido {
+            detalle: format!(
+                "el set jugado excede {PLAYER_MAX_TOTAL_BYTES} bytes estimados ({} frames compuestos): partí la escena o bajá la geometría",
+                out.len()
+            ),
+        });
+    }
+    *bytes = nuevo;
+    out.push(PlayedFrame { objects: frame });
+    Ok(true)
+}
 
 fn valida_frames_run(frames: usize, run_ms: u64, donde: &'static str) -> SceneResult<()> {
     if frames == 0 || frames > PLAYER_MAX_FRAMES {
@@ -1548,7 +1638,11 @@ impl ScenePlayer {
                 });
             }
         }
-        // Estimación honesta del set (64 MiB, paridad con el resto del crate).
+        // Chequeo grueso previo (por frames, sin conocer la geometría): el
+        // presupuesto REAL del set jugado es `PLAYER_MAX_TOTAL_BYTES` y se
+        // enforcea durante el compuesto en `empuja_frame` (antes esta cuenta
+        // —`frames × 16 × 512`— era el único "presupuesto" y nunca llegaba
+        // a 64 MiB con ≤96 frames).
         if let Some(bytes) = total.checked_mul(16 * 512) {
             if bytes > 64 * 1024 * 1024 {
                 return Err(SceneError::PresupuestoExcedido {
@@ -1591,7 +1685,9 @@ impl ScenePlayer {
             fondo.truncate(crate::scene::MAX_SCENE_LAYERS);
         }
         let mut out: Vec<PlayedFrame> = Vec::new();
-        for item in items {
+        // Presupuesto propio del set jugado (bytes lógicos estimados).
+        let mut bytes = 0usize;
+        'items: for item in items {
             if out.len() >= PLAYER_MAX_TOTAL_FRAMES {
                 break;
             }
@@ -1625,7 +1721,9 @@ impl ScenePlayer {
                             );
                             empuja_colocado(&mut frame, colocado, clamp)?;
                         }
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                     let fila = match anim.frame_at(1.0) {
@@ -1654,7 +1752,9 @@ impl ScenePlayer {
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         let mut frame = fondo.clone();
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                     let traza = anim.traza_en(1.0);
@@ -1676,7 +1776,9 @@ impl ScenePlayer {
                         let mut frame = fondo.clone();
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1690,7 +1792,9 @@ impl ScenePlayer {
                         let mut frame = fondo.clone();
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1704,7 +1808,9 @@ impl ScenePlayer {
                         let mut frame = fondo.clone();
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1718,7 +1824,9 @@ impl ScenePlayer {
                         let mut frame = fondo.clone();
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1732,7 +1840,9 @@ impl ScenePlayer {
                         let mut frame = fondo.clone();
                         let colocado = anim.placed_at(alpha_en(fi, n));
                         empuja_colocado(&mut frame, colocado, clamp)?;
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1752,7 +1862,9 @@ impl ScenePlayer {
                                 }
                             }
                         }
-                        out.push(PlayedFrame { objects: frame });
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
                     }
                     anim.finish();
                 }
@@ -1766,9 +1878,9 @@ impl ScenePlayer {
                         if out.len() >= PLAYER_MAX_TOTAL_FRAMES {
                             break;
                         }
-                        out.push(PlayedFrame {
-                            objects: congelado.clone(),
-                        });
+                        if !empuja_frame(&mut out, &mut bytes, congelado.clone(), clamp)? {
+                            break 'items;
+                        }
                     }
                 }
             }
@@ -1852,6 +1964,67 @@ mod player_tests {
 
     fn escena1() -> Scene {
         Scene::try_new(Ortho::default_16_9(), vec![Mobject::Axes], [10, 12, 16]).unwrap()
+    }
+
+    /// Regresión sin presupuesto propio: el peor caso compuesto (16 capas ×
+    /// 4096 puntos × 96 frames ≈ 100 MB lógicos; con las 32 capas del tope
+    /// ≈ 192 MB) clonaba la escena base CADA frame y devolvía `Ok` sin
+    /// chequear nada (el "presupuesto" previo, `frames × 16 × 512`, nunca
+    /// llega a 64 MiB con ≤96 frames). Ahora `try_play` corta con `Err`
+    /// honesto al cruzar los 64 MiB y `play` (modo total) se frena dentro
+    /// del tope.
+    #[test]
+    fn peor_caso_compuesto_err_honesto_en_vez_de_cien_mb() {
+        let capa = Mobject::Polygon {
+            pts: (0..crate::scene::MAX_MOBJECT_POINTS)
+                .map(|i| {
+                    let a = std::f64::consts::TAU * (i as f64)
+                        / (crate::scene::MAX_MOBJECT_POINTS as f64);
+                    [a.cos(), a.sin()]
+                })
+                .collect(),
+        };
+        let espera = || -> Vec<PlayItem> {
+            vec![
+                PlayItem::Wait(WaitAnim::try_new(48).expect("48 frames válidos")),
+                PlayItem::Wait(WaitAnim::try_new(48).expect("48 frames válidos")),
+            ]
+        };
+        // Estricto: Err honesto en vez de materializar ~100 MB.
+        let mut escena =
+            Scene::try_new(Ortho::default_16_9(), vec![capa.clone(); 16], [10, 12, 16])
+                .expect("escena válida");
+        let err =
+            ScenePlayer::try_play(&mut escena, espera()).expect_err("debe exceder el presupuesto");
+        assert!(
+            matches!(err, SceneError::PresupuestoExcedido { .. }),
+            "esperaba PresupuestoExcedido, fue: {err:?}"
+        );
+        // Total: se frena dejando el set dentro del tope (64 MiB estimados).
+        let mut escena =
+            Scene::try_new(Ortho::default_16_9(), vec![capa; 16], [10, 12, 16]).expect("escena");
+        let jugados = ScenePlayer::play(&mut escena, espera());
+        assert!(!jugados.is_empty(), "debe jugar lo que entra en el tope");
+        assert!(
+            jugados.len() < 96,
+            "el modo total debe cortar dentro del presupuesto, jugó {}",
+            jugados.len()
+        );
+        let estimado: usize = jugados
+            .iter()
+            .flat_map(|f| f.objects.iter())
+            .map(|p| match &p.mobject {
+                Mobject::Polygon { pts } => {
+                    std::mem::size_of::<PlacedMobject>()
+                        + pts.len() * std::mem::size_of::<[f64; 2]>()
+                }
+                _ => std::mem::size_of::<PlacedMobject>(),
+            })
+            .sum();
+        assert!(
+            estimado <= 64 * 1024 * 1024,
+            "el set jugado ({estimado} bytes) excede los 64 MiB del presupuesto"
+        );
     }
 
     #[test]

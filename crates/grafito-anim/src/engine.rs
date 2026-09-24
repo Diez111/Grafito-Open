@@ -2,8 +2,9 @@
 //! Mejoras de auditoria 2026-08-20: Statem AnimJobState, correccion de races/leaks/timeouts.
 
 use crate::protocol::{
-    downcast, kinds, localize_worker_error, sanitize_error_code, truncate_worker_message,
-    AnimJobId, AnimRequest, AnimResult, RenderProgress, WireMessage, ANIM_PROTOCOL_VERSION,
+    kinds, localize_worker_error, sanitize_error_code, truncate_worker_message, try_downcast,
+    AnimJobId, AnimRequest, AnimResult, ProtocolError, RenderProgress, WireMessage,
+    ANIM_PROTOCOL_VERSION, ANIM_PROTOCOL_VERSION_MAX, ANIM_PROTOCOL_VERSION_MIN,
     MAX_WORKER_MESSAGE_LEN,
 };
 use serde_json::{json, Value};
@@ -444,6 +445,17 @@ impl AnimEngine {
             .clone()
     }
 
+    /// Empuja una línea de diagnóstico local (trazas de handshake) con el
+    /// mismo tope que el stderr del motor ([`push_diagnostic_line`]). Antes
+    /// los mensajes inesperados del handshake se descartaban sin traza.
+    fn anota_diagnostico(&self, linea: String) {
+        let mut guard = self
+            .diagnostics
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        push_diagnostic_line(&mut guard, linea);
+    }
+
     /// Espera el handshake (hello + pong) antes de enviar jobs.
     /// Usa config.idle_timeout (H1) y no silencia Error (H2).
     pub fn wait_ready(&mut self) -> Result<(), String> {
@@ -470,7 +482,12 @@ impl AnimEngine {
                 Ok(Some(WireMessage::Hello {
                     protocol_version, ..
                 })) => {
-                    if protocol_version != ANIM_PROTOCOL_VERSION {
+                    // Rango real de negociación (antes `== 1` duro): v1
+                    // nativo; v2 tolerado degradando a v1 con traza; fuera
+                    // del rango → `Err` honesto.
+                    if !(ANIM_PROTOCOL_VERSION_MIN..=ANIM_PROTOCOL_VERSION_MAX)
+                        .contains(&protocol_version)
+                    {
                         self.state = AnimJobState::Failed {
                             code: "version_mismatch".into(),
                             message: truncate_worker_message(&format!("v{protocol_version}")),
@@ -479,8 +496,13 @@ impl AnimEngine {
                         return Err(localize_worker_error(
                             "version_mismatch",
                             &format!(
-                                "el motor habla v{protocol_version}; Grafito soporta v{ANIM_PROTOCOL_VERSION}"
+                                "el motor habla v{protocol_version}; Grafito soporta v{ANIM_PROTOCOL_VERSION_MIN}..=v{ANIM_PROTOCOL_VERSION_MAX}"
                             ),
+                        ));
+                    }
+                    if protocol_version != ANIM_PROTOCOL_VERSION {
+                        self.anota_diagnostico(format!(
+                            "handshake: motor en v{protocol_version}, se degrada a v{ANIM_PROTOCOL_VERSION} (campos nuevos ignorados)"
                         ));
                     }
                     break;
@@ -495,7 +517,15 @@ impl AnimEngine {
                     let _ = self.shutdown();
                     return Err(localize_worker_error(&code, &message));
                 }
-                Ok(_) => {}
+                Ok(None) => {}
+                Ok(Some(otro)) => {
+                    // Antes `Ok(_) => {}` descartaba sin traza: un mensaje
+                    // inesperado durante el handshake queda empujado como
+                    // diagnóstico (tope 64 líneas, como stderr).
+                    self.anota_diagnostico(format!(
+                        "handshake: mensaje inesperado antes del hello: {otro:?}"
+                    ));
+                }
                 Err(error) => {
                     self.state = AnimJobState::Failed {
                         code: "handshake_error".into(),
@@ -540,7 +570,14 @@ impl AnimEngine {
                     let _ = self.shutdown();
                     return Err(localize_worker_error(&code, &message));
                 }
-                Ok(_) => {}
+                Ok(None) => {}
+                Ok(Some(otro)) => {
+                    // Antes `Ok(_) => {}` descartaba sin traza: queda como
+                    // diagnóstico (tope 64 líneas, como stderr).
+                    self.anota_diagnostico(format!(
+                        "handshake: mensaje inesperado antes del pong: {otro:?}"
+                    ));
+                }
                 Err(e) => {
                     self.state = AnimJobState::Failed {
                         code: "handshake_error".into(),
@@ -1035,9 +1072,24 @@ fn send_parsed_line(sender: &SyncSender<WireMessage>, line: &[u8]) {
     let Ok(value) = parsed else {
         return;
     };
-    if let Some(message) = downcast(&value) {
-        // sync_channel puede bloquear: si esta llena, este thread frena al motor (backpressure)
-        let _ = sender.send(message);
+    match try_downcast(&value) {
+        Ok(message) => {
+            // sync_channel puede bloquear: si esta llena, este thread frena al motor (backpressure)
+            let _ = sender.send(message);
+        }
+        // Versión fuera del rango 1..=2: se empuja como `Error` tipado para
+        // que el handshake lo reporte honesto (antes la línea se descartaba
+        // y el síntoma era un timeout de "hello no recibido").
+        Err(ProtocolError::UnsupportedVersion { got, min, max }) => {
+            let _ = sender.send(WireMessage::Error {
+                code: "version_mismatch".into(),
+                message: truncate_worker_message(&format!(
+                    "v{got} fuera del rango soportado {min}..={max}"
+                )),
+            });
+        }
+        // Resto (kind desconocido, JSON cortado): se descarta como antes.
+        Err(_) => {}
     }
 }
 
@@ -1671,6 +1723,82 @@ done
         assert!(
             saw_protocol_error,
             "línea de 100 KiB debe producir Error{{code: protocol}} con line_cap 64 KiB"
+        );
+        let _ = engine.shutdown();
+    }
+
+    // Stub de handshake con ruido: hello v2 (tolerado, campos nuevos
+    // ignorados) + un `progress` inesperado antes del pong (debe quedar como
+    // diagnóstico, no descartado en silencio).
+    const STUB_V2_CON_RUIDO: &str = r#"
+printf '%s\n' '{"type":"hello","protocol_version":2,"capabilities":[],"campo_nuevo_v2":"x"}'
+printf '%s\n' '{"type":"progress","job_id":"job-1","step":"warmup","percent":5}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"ping"'*)
+      printf '%s\n' '{"type":"pong"}'
+      ;;
+    *'"type":"shutdown"'*)
+      break
+      ;;
+  esac
+done
+"#;
+
+    /// Regresión del `== 1` duro + del `Ok(_) => {}` mudo: un worker v2
+    /// negocia (degradando a v1 con traza) y los mensajes inesperados del
+    /// handshake quedan empujados a `diagnostics()` en vez de descartarse.
+    #[test]
+    fn handshake_tolerante_a_v2_con_traza_de_mensajes_inesperados() {
+        if !shell_available() {
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
+            return;
+        }
+        let (_guard, config) = stub_engine_with(STUB_V2_CON_RUIDO);
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        engine
+            .wait_ready()
+            .expect("v2 se tolera degradando a v1 (rango 1..=2)");
+        let diags = engine.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.contains("inesperado")),
+            "el mensaje inesperado del handshake debe quedar como diagnóstico: {diags:?}"
+        );
+        assert!(
+            diags.iter().any(|d| d.contains("v2")),
+            "la degradación v2→v1 debe quedar como diagnóstico: {diags:?}"
+        );
+        let _ = engine.shutdown();
+    }
+
+    // Stub con hello fuera del rango soportado (1..=2).
+    const STUB_VERSION_FUERA_DE_RANGO: &str = r#"
+printf '%s\n' '{"type":"hello","protocol_version":99,"capabilities":[]}'
+while IFS= read -r line; do
+  case "$line" in
+    *'"type":"shutdown"'*)
+      break
+      ;;
+  esac
+done
+"#;
+
+    /// Versión fuera del rango → error tipado "versión de protocolo
+    /// incompatible" (antes la línea se descartaba y el síntoma era un
+    /// timeout mudo de "hello no recibido").
+    #[test]
+    fn handshake_rechaza_version_fuera_de_rango_con_error_tipado() {
+        if !shell_available() {
+            eprintln!("skipping: POSIX shell stub unavailable on this platform");
+            return;
+        }
+        let (_guard, mut config) = stub_engine_with(STUB_VERSION_FUERA_DE_RANGO);
+        config.idle_timeout = Duration::from_secs(5);
+        let mut engine = AnimEngine::spawn(config).unwrap();
+        let err = engine.wait_ready().unwrap_err();
+        assert!(
+            err.contains("versión de protocolo incompatible"),
+            "debe reportar la versión honesto, fue: {err}"
         );
         let _ = engine.shutdown();
     }

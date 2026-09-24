@@ -373,8 +373,8 @@ pub fn latex_to_rgba_con_tinta(
     if wf <= 0.0 || hf <= 0.0 {
         return Err(TexError::Bitmap("dimensiones nulas".to_string()));
     }
-    // Rango sano antes del `as` (el `as u32` de un f32 fuera de rango es UB
-    // lógico: se valida primero).
+    // Rango sano antes del `as`: `f32 as usize` satura (definido desde 1.45),
+    // no es UB, pero un lado saturado pediría un bitmap enorme — se valida antes.
     if wf > 4096.0 || hf > 4096.0 {
         return Err(TexError::Bitmap("lado mayor a 4096".to_string()));
     }
