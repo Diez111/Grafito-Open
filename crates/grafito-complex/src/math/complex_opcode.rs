@@ -5,6 +5,11 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ComplexOp {
+    // NOTA: los códigos 16–19 (ex Min/Max/Floor/Ceil) y 31–33 (ex Sec/Csc/Cot)
+    // están retirados y se dejan sin asignar: el compilador jamás los emitió
+    // (el parser desazucara sec/csc/cot a Div(1, …)) y su semántica divergía
+    // del walk (Min/Max por norma, Floor/Ceil por componentes, gates 1e-15 vs
+    // 1e-30). No reutilizar los números: el formato u32 lo comparte la GPU.
     Nop = 0,
     PushConst = 1,
     PushVar = 2,
@@ -21,10 +26,6 @@ pub enum ComplexOp {
     Log = 13,
     Sqrt = 14,
     Abs = 15,
-    Min = 16,
-    Max = 17,
-    Floor = 18,
-    Ceil = 19,
     Asin = 22,
     Acos = 23,
     Atan = 24,
@@ -34,9 +35,6 @@ pub enum ComplexOp {
     Asinh = 28,
     Acosh = 29,
     Atanh = 30,
-    Sec = 31,
-    Csc = 32,
-    Cot = 33,
     Gamma = 100,
     BesselJ = 101,
     Conjugate = 102,
@@ -280,14 +278,15 @@ fn compile_inner(
     Ok(())
 }
 
-/// Valida el programa COMPLETO una sola vez (cota 4096 ops, 512 consts,
-/// profundidad máxima 64, exactamente un valor final en pila). El rechazo
+/// Valida el programa COMPLETO una sola vez (cota 4096 ops, 254 elementos de
+/// constantes = 127 constantes complejas (re, im intercalados), profundidad
+/// máxima 64, exactamente un valor final en pila). El rechazo
 /// fino a 32 slots WGSL vive en `gpu_program_is_supported` (render), no acá.
 fn validate_complex_program(prog: &ComplexBytecodeProgram) -> Result<(), CompileError> {
     if prog.code.len() > 4096 {
         return Err(CompileError::StackTooDeep);
     }
-    if prog.constants.len() > 512 {
+    if prog.constants.len() > 254 {
         return Err(CompileError::TooManyConstants);
     }
     // Validación de profundidad de pila del programa compilado (GPU: 32).
@@ -300,13 +299,13 @@ fn validate_complex_program(prog: &ComplexBytecodeProgram) -> Result<(), Compile
             match instr & 0xFF {
                 0 => {}
                 1 | 2 => depth += 1,
-                3..=7 | 16 | 17 => {
+                3..=7 => {
                     if depth < 2 {
                         return Err(CompileError::StackTooDeep);
                     }
                     depth -= 1;
                 }
-                8..=15 | 18 | 19 | 22..=33 | 102..=105 => {
+                8..=15 | 22..=30 | 102..=105 => {
                     if depth == 0 {
                         return Err(CompileError::StackTooDeep);
                     }
@@ -455,24 +454,6 @@ pub fn exec_cpu(prog: &ComplexBytecodeProgram, vars: &[Complex64]) -> Option<Com
                 let a = pop!();
                 push!(Complex64::new(a.norm(), 0.0));
             }
-            x if x == ComplexOp::Min as u8 => {
-                let b = pop!();
-                let a = pop!();
-                push!(if a.norm() <= b.norm() { a } else { b });
-            }
-            x if x == ComplexOp::Max as u8 => {
-                let b = pop!();
-                let a = pop!();
-                push!(if a.norm() >= b.norm() { a } else { b });
-            }
-            x if x == ComplexOp::Floor as u8 => {
-                let a = pop!();
-                push!(Complex64::new(a.re.floor(), a.im.floor()));
-            }
-            x if x == ComplexOp::Ceil as u8 => {
-                let a = pop!();
-                push!(Complex64::new(a.re.ceil(), a.im.ceil()));
-            }
             x if x == ComplexOp::Asin as u8 => unary!(Complex64::asin),
             x if x == ComplexOp::Acos as u8 => unary!(Complex64::acos),
             x if x == ComplexOp::Atan as u8 => unary!(Complex64::atan),
@@ -482,30 +463,6 @@ pub fn exec_cpu(prog: &ComplexBytecodeProgram, vars: &[Complex64]) -> Option<Com
             x if x == ComplexOp::Asinh as u8 => unary!(Complex64::asinh),
             x if x == ComplexOp::Acosh as u8 => unary!(Complex64::acosh),
             x if x == ComplexOp::Atanh as u8 => unary!(Complex64::atanh),
-            x if x == ComplexOp::Sec as u8 => {
-                let a = pop!();
-                let c = a.cos();
-                if c.norm() < 1e-15 {
-                    return None;
-                }
-                push!(Complex64::new(1.0, 0.0) / c);
-            }
-            x if x == ComplexOp::Csc as u8 => {
-                let a = pop!();
-                let s = a.sin();
-                if s.norm() < 1e-15 {
-                    return None;
-                }
-                push!(Complex64::new(1.0, 0.0) / s);
-            }
-            x if x == ComplexOp::Cot as u8 => {
-                let a = pop!();
-                let t = a.tan();
-                if t.norm() < 1e-15 {
-                    return None;
-                }
-                push!(Complex64::new(1.0, 0.0) / t);
-            }
             x if x == ComplexOp::Gamma as u8 => unary!(complex_gamma),
             x if x == ComplexOp::BesselJ as u8 => {
                 let a = pop!();

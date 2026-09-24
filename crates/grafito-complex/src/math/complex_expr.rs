@@ -846,6 +846,13 @@ fn parse_primary(tokens: &[Token], pos: &mut usize, depth: usize) -> Result<Comp
 /// que da ~15 dígitos de precisión para Re(z) > 0. Para Re(z) < 0 usa la
 /// fórmula de reflexión: Γ(z) = π / (sin(πz) * Γ(1-z)).
 pub(crate) fn complex_gamma(z: Complex64) -> Complex64 {
+    // Polos en enteros <= 0 (incluye z = 0): sin(πz) no es exactamente 0
+    // en f64 ((π * -1.0).sin() = -1.22e-16), así que sin este gate la rama
+    // de reflexión devolvería ~1e16 en vez del polo. Misma convención que
+    // `complex_zeta` (NaN) y mismo estilo de detección de entero real.
+    if z.im == 0.0 && z.re <= 0.0 && z.re.fract() == 0.0 {
+        return Complex64::new(f64::NAN, f64::NAN);
+    }
     // Coeficientes de Lanczos (g=7, n=9)
     const G: f64 = 7.0;
     const C: [f64; 9] = [
@@ -883,7 +890,7 @@ pub(crate) fn complex_gamma(z: Complex64) -> Complex64 {
         sum += Complex64::new(c, 0.0) / denom;
     }
 
-    let z_plus_g_minus_half = z_minus_1 + Complex64::new(G - 0.5, 0.0);
+    let z_plus_g_minus_half = z_minus_1 + Complex64::new(G + 0.5, 0.0);
     let sqrt_2pi = (2.0 * std::f64::consts::PI).sqrt();
 
     // (z + g - 0.5)^(z - 0.5)
@@ -940,8 +947,17 @@ pub(crate) fn complex_bessel_j(n: f64, z: Complex64) -> Complex64 {
         return sum;
     }
 
-    // Para z grande, usar la representación integral (Cuadratura trapezoidal)
-    let m = 256u32;
+    // Para z grande, usar la representación integral (cuadratura trapezoidal).
+    // El trapecio de m puntos pliega los modos J_{m·k}(z) sobre el resultado
+    // (aliasing): el error es ~|J_m(z)|, despreciable solo si m/2 > |z|.
+    // Por eso m escala con |z| (siguiente potencia de 2 de 4·|z|, tope 4096):
+    // con m fijo en 256, J₀(300) daba −0.1458 en vez de −0.0333.
+    let target = 4.0 * z.norm();
+    let m: u32 = if !target.is_finite() || target > 4096.0 {
+        4096
+    } else {
+        (target.ceil() as u32).next_power_of_two().clamp(256, 4096)
+    };
     let dtau = 2.0 * std::f64::consts::PI / m as f64;
     let mut integral = Complex64::new(0.0, 0.0);
     for j in 0..m {
@@ -989,15 +1005,21 @@ pub(crate) fn complex_erf(z: Complex64) -> Complex64 {
         return sum * Complex64::new(2.0 / sqrt_pi, 0.0);
     }
 
-    // Para |z| >= 3: usar la fórmula asintótica
-    // erf(z) ≈ 1 - e^{-z²} / (√π * z) para Re(z) > 0
-    // erf(z) ≈ -1 + e^{-z²} / (√π * z) para Re(z) < 0 (grandes)
+    // Para |z| >= 3: asintótica de 3 términos con simetría impar exacta
+    // por construcción:
+    //   erf(z) ≈ s − e^(−z²)/(√π·z)·(1 − u + 3u²),  u = 1/(2z²), s = sign(Re z).
+    // Para Re(z) < 0 la corrección se resta del −1 SIN cambiarle el signo:
+    // en z = −x real da −1 − e^(−x²)/(√π·(−x))·(...) = −1 + e^(−x²)/(√π·x)·(...)
+    // = −erf(x). El `* sign` extra que había en la corrección invertía su
+    // signo (en z = −5 daba −1.00000000000157 en vez de −0.99999999999846).
+    // El tercer término baja el error en la costura |z| = 3 de ~1e-6 a ~6e-8.
     if z.re.abs() > 1.0 {
         let exp_term = (-z * z).exp();
-        let one = Complex64::new(1.0, 0.0);
+        let inv_2z2 = Complex64::new(0.5, 0.0) / (z * z);
+        let series = Complex64::new(1.0, 0.0) - inv_2z2 + inv_2z2 * inv_2z2 * 3.0;
+        let correction = exp_term / (Complex64::new(sqrt_pi, 0.0) * z) * series;
         let sign = if z.re >= 0.0 { 1.0 } else { -1.0 };
-        let result =
-            sign * one - exp_term / (Complex64::new(sqrt_pi, 0.0) * z) * Complex64::new(sign, 0.0);
+        let result = Complex64::new(sign, 0.0) - correction;
         if result.re.is_finite() && result.im.is_finite() {
             return result;
         }
@@ -1290,41 +1312,83 @@ pub(crate) fn complex_bessel_y(n: f64, z: Complex64) -> Complex64 {
     }
 }
 
+/// Desempate único entre bytecode (`exec_cpu`) y walk (`ComplexExpr::eval`).
+///
+/// Si el fast path da un valor finito, gana; si da no-finito o `None`, el
+/// walk arbitra (puede devolver un finito que el bytecode redondeó mal o un
+/// `Err` honesto como división por cero). La misma regla se usa en
+/// `eval_complex_batch` y en `ComplexEvaluator::eval` (antes diferían: la
+/// evaluación de a uno aceptaba el valor de `exec_cpu` aun no-finito).
+pub(crate) fn eval_point_with_fallback(
+    program: Option<&super::complex_opcode::ComplexBytecodeProgram>,
+    ast: &ComplexExpr,
+    scratch: &mut HashMap<String, Complex64>,
+    symbol: &str,
+    z: Complex64,
+) -> Result<Complex64, String> {
+    if let Some(prog) = program {
+        if let Some(value) = super::complex_opcode::exec_cpu(prog, &[z]) {
+            if value.re.is_finite() && value.im.is_finite() {
+                return Ok(value);
+            }
+        }
+    }
+    scratch.insert(symbol.to_string(), z);
+    ast.eval(scratch)
+}
+
+/// Errores que no dependen del punto evaluado (fallarían idénticos en toda
+/// la grilla): se propagan como `Err` del batch en vez de devolver un
+/// vector entero de `None` sin diagnóstico. Acopla al formato de
+/// `ComplexExpr::Var` en este mismo archivo (`"Unknown variable: {name}"`).
+fn is_point_independent_error(message: &str) -> bool {
+    message.starts_with("Unknown variable: ")
+}
+
 pub fn eval_complex_batch(
     expr: &str,
     base_symbol: &str,
     points: impl Iterator<Item = Complex64>,
     vars: &std::collections::BTreeMap<String, f64>,
 ) -> Result<Vec<Option<Complex64>>, String> {
-    use super::complex_opcode::{compile_complex_expr, exec_cpu, ComplexBytecodeProgram};
-    let ast = parse(expr)?;
-    let mut cmap = HashMap::new();
+    let mut complex_vars = HashMap::new();
     for (k, v) in vars {
-        cmap.insert(k.clone(), Complex64::new(*v, 0.0));
+        complex_vars.insert(k.clone(), Complex64::new(*v, 0.0));
     }
+    eval_complex_batch_with_complex_vars(expr, base_symbol, points, &complex_vars)
+}
+
+/// Variante de `eval_complex_batch` que acepta variables complejas (la
+/// evaluación de a uno con `ComplexExpr::eval` ya las aceptaba; el batch
+/// solo admitía reales). Con alguna variable no real no hay fast path de
+/// bytecode y cada punto usa el walk.
+pub fn eval_complex_batch_with_complex_vars(
+    expr: &str,
+    base_symbol: &str,
+    points: impl Iterator<Item = Complex64>,
+    vars: &HashMap<String, Complex64>,
+) -> Result<Vec<Option<Complex64>>, String> {
+    use super::complex_opcode::{compile_complex_expr, ComplexBytecodeProgram};
+    let ast = parse(expr)?;
+    let mut cmap: HashMap<String, Complex64> = vars.clone();
     // Bytecode una vez (nombres → slots, resto a constantes): por punto
     // solo el loop plano sin `HashMap` ni `String`s. Si no compila
-    // (p.ej. `deriv_z`), el walk de abajo lo cubre punto a punto.
-    let flat: Option<ComplexBytecodeProgram> = {
+    // (p.ej. `deriv_z`) o hay variables complejas, el walk de abajo lo
+    // cubre punto a punto.
+    let flat: Option<ComplexBytecodeProgram> = if vars.values().all(|v| v.im == 0.0) {
+        let real_vars: std::collections::BTreeMap<String, f64> =
+            vars.iter().map(|(k, v)| (k.clone(), v.re)).collect();
         let mut prog = ComplexBytecodeProgram::default();
-        compile_complex_expr(&ast, vars, &[(base_symbol, 0)], &mut prog)
+        compile_complex_expr(&ast, &real_vars, &[(base_symbol, 0)], &mut prog)
             .ok()
             .map(|()| prog)
+    } else {
+        None
     };
 
     let mut res = Vec::new();
     for z in points {
-        if let Some(prog) = &flat {
-            if let Some(v) = exec_cpu(prog, &[z]) {
-                if v.re.is_finite() && v.im.is_finite() {
-                    res.push(Some(v));
-                    continue;
-                }
-            }
-            // `None` o no finito → el walk arbitra (igual que antes).
-        }
-        cmap.insert(base_symbol.to_string(), z);
-        match ast.eval(&cmap) {
+        match eval_point_with_fallback(flat.as_ref(), &ast, &mut cmap, base_symbol, z) {
             Ok(val) => {
                 if val.re.is_finite() && val.im.is_finite() {
                     res.push(Some(val));
@@ -1332,6 +1396,11 @@ pub fn eval_complex_batch(
                     res.push(None);
                 }
             }
+            // Un typo en una variable falla igual en todos los puntos:
+            // propagar el diagnóstico en vez de una grilla entera de `None`.
+            // Un polo (división por cero en ese z) es local al punto y queda
+            // como celda vacía.
+            Err(error) if is_point_independent_error(&error) => return Err(error),
             Err(_) => res.push(None),
         }
     }

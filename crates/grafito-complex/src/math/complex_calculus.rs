@@ -92,13 +92,15 @@ impl<'a> ComplexEvaluator<'a> {
     }
 
     fn eval(&mut self, z: Complex64) -> Result<Complex64, String> {
-        if let Some(program) = &self.program {
-            if let Some(value) = exec_cpu(program, &[z]) {
-                return Ok(value);
-            }
-        }
-        self.scratch.insert(self.symbol.to_string(), z);
-        self.expr.eval(&self.scratch)
+        // Desempate único con `eval_complex_batch`
+        // (`eval_point_with_fallback` en complex_expr).
+        crate::math::complex_expr::eval_point_with_fallback(
+            self.program.as_ref(),
+            self.expr,
+            &mut self.scratch,
+            self.symbol,
+            z,
+        )
     }
 }
 
@@ -399,12 +401,26 @@ pub fn format_complex_rounded(z: Complex64) -> String {
 
 /// Detects the sum of residues (and poles) enclosed by a closed contour.
 /// By Cauchy's Residue Theorem: \oint_C f(z) dz = 2 * pi * i * Sum(Residues)
+///
+/// El camino debe estar cerrado (último punto ≈ primero): un contorno
+/// abierto produce un "residuo" inventado sin aviso, así que se rechaza con
+/// error honesto en vez de integrar igual.
 pub fn sum_of_residues(
     expr: &ComplexExpr,
     closed_path: &[Complex64],
     vars: &HashMap<String, Complex64>,
     symbol: &str,
 ) -> Result<Complex64, String> {
+    if closed_path.len() >= 2 {
+        if let (Some(first), Some(last)) = (closed_path.first(), closed_path.last()) {
+            let gap = *last - *first;
+            if gap.norm() > 1e-9 {
+                return Err(format!(
+                    "contour is not closed: gap {gap} between endpoints"
+                ));
+            }
+        }
+    }
     let integral = contour_integral(expr, closed_path, vars, symbol)?;
     Ok(residues_from_contour_integral(integral))
 }

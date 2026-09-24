@@ -62,6 +62,13 @@ pub enum ConformalMap {
 /// Umbral para considerar una magnitud como singularidad.
 const SINGULARITY_THRESHOLD: f64 = 1e-15;
 
+/// Tope de entrada de `from_expr_string` (anti-DoS): el parseo es lineal
+/// pero las cadenas vienen de input de usuario sin cap previo.
+const MAX_MAP_EXPR_LEN: usize = 4096;
+
+/// Tope de anidado de paréntesis en `parse_mobius`.
+const MAX_MOBIUS_DEPTH: usize = 128;
+
 /// Comprueba singularidad relativa a una escala `scale`. Si `scale` no es
 /// finita o es <1, usa 1 como piso para no amplificar el umbral en
 /// magnitudes pequeñas.
@@ -221,8 +228,16 @@ impl ConformalMap {
                     Some(exp_w)
                 }
             }
-            // sinh, cosh, sin, cos, tan: inversa numérica
-            Self::Sinh | Self::Cosh | Self::Sine | Self::Cosine | Self::Tangent => None,
+            // sinh(z) = w → z = asinh(w) (rama principal)
+            Self::Sinh => Some(w.asinh()),
+            // cosh(z) = w → z = acosh(w) (rama principal)
+            Self::Cosh => Some(w.acosh()),
+            // sin(z) = w → z = asin(w) (rama principal)
+            Self::Sine => Some(w.asin()),
+            // cos(z) = w → z = acos(w) (rama principal)
+            Self::Cosine => Some(w.acos()),
+            // tan(z) = w → z = atan(w) (rama principal)
+            Self::Tangent => Some(w.atan()),
             // sqrt(z) = w → z = w^2
             Self::Sqrt => {
                 let sq = w * w;
@@ -310,7 +325,7 @@ impl ConformalMap {
     /// - `(a*z+b)/(c*z+d)` con coeficientes numéricos (Möbius)
     pub fn from_expr_string(s: &str) -> Option<Self> {
         let s: String = s.chars().filter(|c| !c.is_whitespace()).collect();
-        if s.is_empty() {
+        if s.is_empty() || s.len() > MAX_MAP_EXPR_LEN {
             return None;
         }
         // Casos directos primero
@@ -384,12 +399,19 @@ fn parse_mobius(s: &str) -> Option<ConformalMap> {
     // una Möbius canónica tiene paréntesis anidados. En su lugar, dividimos
     // por el primer '/' que esté a profundidad 0 de paréntesis.
     let bytes = s.as_bytes();
-    let mut depth = 0i32;
+    let mut depth = 0usize;
     let mut split_at = None;
     for (i, &b) in bytes.iter().enumerate() {
         match b {
-            b'(' => depth += 1,
-            b')' => depth -= 1,
+            b'(' => {
+                depth += 1;
+                if depth > MAX_MOBIUS_DEPTH {
+                    return None;
+                }
+            }
+            b')' => {
+                depth = depth.saturating_sub(1);
+            }
             b'/' if depth == 0 => {
                 split_at = Some(i);
                 break;

@@ -8,12 +8,16 @@
 //!
 //! # Compatibilidad hacia atrás
 //!
-//! Los call-sites existentes (`use grafito_geometry::complex_expr::...`)
-//! siguen funcionando porque `lib.rs` re-exporta este submódulo.
+//! Este crate nació como módulo plano `grafito_geometry::complex_expr` y se
+//! mudó aquí para reflejar el dominio de aplicación. Los call-sites deben
+//! usar `grafito_complex::...` (este crate); no hay re-exporto en
+//! `grafito-geometry`.
 
 pub mod algebraic_mappings;
 pub mod complex_calculus;
 pub mod complex_expr;
 pub mod complex_opcode;
 
-pub use complex_expr::{eval_complex_batch, parse as parse_complex, ComplexExpr};
+pub use complex_expr::{
+    eval_complex_batch, eval_complex_batch_with_complex_vars, parse as parse_complex, ComplexExpr,
+};

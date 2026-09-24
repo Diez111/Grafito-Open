@@ -44,6 +44,47 @@ const MAX_IMPLICIT_GRID_CELLS: usize = 1024 * 1024;
 const MAX_OBJECT_PARAMETERS: usize = 64;
 /// Épsilon geométrico para pruebas de degeneración (longitud, altura, dirección).
 pub const GEOM_EPS: f64 = 1e-12;
+/// Máximo de entradas en `Document::object_scripts` (una por etiqueta a lo
+/// sumo; nunca puede superar la cantidad de objetos del documento).
+pub const MAX_OBJECT_SCRIPTS: usize = MAX_OBJECT_COUNT;
+/// Bytes máximos de un guion individual (`on_click`/`on_update`/`on_load`).
+/// 4 KiB cubre con holgura todo lo almacenable por la vía validada
+/// (`check_script_allowlist` en `grafito-command` limita el guion total a
+/// `MAX_EXPR_LENGTH` = 2000 caracteres).
+pub const MAX_SCRIPT_BYTES: usize = 4_096;
+/// Pasos máximos de un guion almacenado (paridad con `MAX_GGT_STEPS` de
+/// custom tools en `grafito-command`; la expansión en ejecución tiene su
+/// propio presupuesto aparte).
+pub const MAX_SCRIPT_STEPS: usize = 100;
+/// Bytes totales de todos los guiones del documento (defensa ante
+/// `object_scripts` gigante que igual pasaría el tope de 10 MiB de JSON).
+pub const MAX_OBJECT_SCRIPTS_TOTAL_BYTES: usize = 1_048_576;
+
+/// Comandos canónicos permitidos dentro de guiones almacenados.
+///
+/// Espejo local de `GGBSCRIPT_ALLOWLIST`
+/// (`crates/grafito-command/src/ggbscript.rs`): core no puede depender de
+/// `grafito-command` (dependencia circular: command depende de core), así
+/// que la lista vive acá como fuente de validación en reposo y allá como
+/// fuente de validación al guardar/ejecutar. Si se agrega un comando al
+/// subset, hay que actualizar ambas y el test pinneado de allá
+/// (`auto_script_allowlist_is_benign_and_pinned`).
+pub const SCRIPT_ALLOWLIST: &[&str] = &[
+    "SetValue",
+    "Show",
+    "Hide",
+    "ZoomIn",
+    "ZoomOut",
+    "PlayPause",
+    "If",
+    "Repeat",
+    "Button",
+    "Checkbox",
+    "InputBox",
+    "TextField",
+    "DefineTool",
+    "LoadTool",
+];
 
 /// Wrapper fail-closed que garantiza que el `Document` interno pasó `validate_document`.
 ///
@@ -54,9 +95,14 @@ pub const GEOM_EPS: f64 = 1e-12;
 /// (determinismo total); el wrapper evita que un documento a medio mutar
 /// escape de `detached_clone` → `commit`.
 ///
-/// # Cableado (3 sitios) — fail-closed
+/// # Cableado — fail-closed
 ///
-/// Este wrapper hoy tiene 0 call-sites directos. El cableado propuesto es:
+/// Sitios que usan el wrapper vía `try_new_typed` (no hay 0 call-sites):
+/// `persistence::serialize_document` (`persistence.rs`) valida antes de
+/// serializar. `Document::commit` y `ChangeSet::restore` validan con
+/// `validate_document` directo sobre el staged/snapshot; migrarlos a
+/// `try_new_typed` queda como mejora sin cambio de comportamiento
+/// (ambas vías corren la misma `validate_document`).
 ///
 /// ```ignore
 /// // 1) Document::commit (document.rs ~384):
@@ -629,7 +675,176 @@ pub fn validate_document(doc: &Document) -> Result<(), String> {
         }
     }
 
+    validate_object_scripts(doc)?;
+
     Ok(())
+}
+
+/// Valida los guiones almacenados (`object_scripts` + `on_load_script`).
+///
+/// Fail-closed: un guion fuera del allowlist (o que exceda cotas/charset)
+/// rechaza el documento entero, así `ValidatedDocument::try_new` tampoco lo
+/// acepta. Espeja el chequeo al guardar de `grafito-command`
+/// (`check_script_allowlist`): la ejecución re-valida de todos modos
+/// (defensa en profundidad), pero un archivo editado a mano nunca debe
+/// llegar a la piel con script arbitrario.
+pub fn validate_object_scripts(doc: &Document) -> Result<(), String> {
+    if doc.object_scripts.len() > MAX_OBJECT_SCRIPTS {
+        return Err(format!(
+            "Document contains {} object scripts, maximum is {}",
+            doc.object_scripts.len(),
+            MAX_OBJECT_SCRIPTS
+        ));
+    }
+    let mut total_bytes = 0usize;
+    for (label, scripts) in &doc.object_scripts {
+        validate_string(label, "ObjectScripts label")?;
+        for (kind, script) in [
+            ("on_click", &scripts.on_click),
+            ("on_update", &scripts.on_update),
+        ] {
+            if let Some(script) = script {
+                total_bytes = total_bytes.saturating_add(script.len());
+                validate_script(script, &format!("ObjectScripts[{label}].{kind}"))?;
+            }
+        }
+    }
+    if let Some(script) = &doc.on_load_script {
+        total_bytes = total_bytes.saturating_add(script.len());
+        validate_script(script, "Document.on_load_script")?;
+    }
+    if total_bytes > MAX_OBJECT_SCRIPTS_TOTAL_BYTES {
+        return Err(format!(
+            "Object scripts exceed {MAX_OBJECT_SCRIPTS_TOTAL_BYTES} total bytes ({total_bytes})"
+        ));
+    }
+    Ok(())
+}
+
+/// Valida un guion contra cotas, charset y allowlist de comandos.
+///
+/// Espeja `check_script_allowlist` (`grafito-command/src/ggbscript.rs`) sin
+/// depender de ese crate: longitud total, cantidad de pasos, balance de
+/// delimitadores (con `"` protegiendo `;`) y cabeza de cada paso contra
+/// [`SCRIPT_ALLOWLIST`]. Sin allowlist que lo avale → `Err`.
+pub fn validate_script(script: &str, what: &str) -> Result<(), String> {
+    if script.len() > MAX_SCRIPT_BYTES {
+        return Err(format!(
+            "{what} excede {MAX_SCRIPT_BYTES} bytes (tiene {})",
+            script.len()
+        ));
+    }
+    for ch in script.chars() {
+        if ch == '\0' {
+            return Err(format!("{what} no debe contener NUL"));
+        }
+        if ch == '\u{FEFF}' {
+            return Err(format!("{what} no debe contener BOM"));
+        }
+        if ch.is_control() && !matches!(ch, '\t' | '\n' | '\r') {
+            return Err(format!("{what} no debe contener caracteres de control"));
+        }
+    }
+    let steps = split_script_steps(script).map_err(|e| format!("{what}: {e}"))?;
+    if steps.is_empty() {
+        return Err(format!("{what} no contiene pasos"));
+    }
+    if steps.len() > MAX_SCRIPT_STEPS {
+        return Err(format!(
+            "{what} excede {MAX_SCRIPT_STEPS} pasos (tiene {})",
+            steps.len()
+        ));
+    }
+    for step in &steps {
+        if step.len() > MAX_EXPR_LENGTH {
+            return Err(format!(
+                "{what}: el paso excede {MAX_EXPR_LENGTH} caracteres"
+            ));
+        }
+        let head = script_step_head(step).ok_or_else(|| {
+            format!("{what}: paso no es un comando válido del subset GGBScript: '{step}'")
+        })?;
+        if !SCRIPT_ALLOWLIST
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case(head))
+        {
+            return Err(format!(
+                "{what}: paso '{step}' usa '{head}', fuera del subset GGBScript (permitidos: {})",
+                SCRIPT_ALLOWLIST.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Parte un guion en pasos por `;` de nivel superior (espejo de
+/// `split_script_commands` en `grafito-command`: `"` protege `;` y se exige
+/// balance de `()[]{{}}`).
+fn split_script_steps(script: &str) -> Result<Vec<String>, String> {
+    let mut steps = Vec::new();
+    let mut delimiters = Vec::new();
+    let mut start = 0;
+    let mut in_string = false;
+    for (index, ch) in script.char_indices() {
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        match ch {
+            '(' | '[' | '{' => delimiters.push(ch),
+            ')' | ']' | '}' => {
+                let expected = match ch {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => return Err("guion con delimitadores desbalanceados".into()),
+                };
+                if delimiters.pop() != Some(expected) {
+                    return Err("guion con delimitadores desbalanceados".into());
+                }
+            }
+            ';' if delimiters.is_empty() => {
+                let step = script[start..index].trim();
+                if !step.is_empty() {
+                    steps.push(step.to_string());
+                }
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if in_string {
+        return Err("guion con comilla sin cerrar".into());
+    }
+    if !delimiters.is_empty() {
+        return Err("guion con delimitadores desbalanceados".into());
+    }
+    let tail = script[start..].trim();
+    if !tail.is_empty() {
+        steps.push(tail.to_string());
+    }
+    Ok(steps)
+}
+
+/// Cabeza de un paso (`SetValue` en `SetValue[x, 1]`): corrida inicial
+/// alfabética seguida de `[` o `(`. `None` si no hay forma de comando.
+fn script_step_head(step: &str) -> Option<&str> {
+    let step = step.trim();
+    let end = step
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(step.len());
+    if end == 0 {
+        return None;
+    }
+    let rest = step[end..].trim_start();
+    if rest.starts_with('[') || rest.starts_with('(') {
+        Some(&step[..end])
+    } else {
+        None
+    }
 }
 
 /// Valida la semántica propia de un objeto candidato y sus referencias.
@@ -753,21 +968,35 @@ fn validate_geo_object_legacy_match(doc: &Document, obj: &GeoObject) -> Result<(
             }
             validate_positive_f32(o.width, "Polygon.width")?;
             validate_optional_color(o.fill_color, "Polygon.fill_color")?;
-            // Validación de colinealidad/degeneración vía shoelace.
+            // Validación de colinealidad/degeneración vía área de regiones.
+            //
+            // FIX: el shoelace CON SIGNO (área algebraica neta) rechazaba
+            // toda curva auto-intersecada —Lissajous, lazos, lemniscatas—
+            // porque las regiones se cancelan y el área neta da ~0. El signo
+            // sirve para la orientación, NO para detectar degeneración: acá
+            // se suman las áreas ABSOLUTAS de los triángulos abanicados desde
+            // el primer vértice (invariante ante traslación y ante
+            // auto-intersección; da 0 sii todos los puntos son colineales).
             if o.vertices.len() >= 3 {
                 let n = o.vertices.len();
-                let mut area2 = 0.0;
+                let p0 = o.vertices[0];
+                let mut area2_abs = 0.0;
                 let mut perim = 0.0;
                 for i in 0..n {
                     let p1 = o.vertices[i];
                     let p2 = o.vertices[(i + 1) % n];
-                    area2 += p1.x * p2.y - p2.x * p1.y;
                     perim += (p2.x - p1.x).hypot(p2.y - p1.y);
                 }
-                if !area2.is_finite() || !perim.is_finite() {
+                for i in 1..n.saturating_sub(1) {
+                    let p1 = o.vertices[i];
+                    let p2 = o.vertices[i + 1];
+                    let cross = (p1.x - p0.x) * (p2.y - p0.y) - (p2.x - p0.x) * (p1.y - p0.y);
+                    area2_abs += cross.abs();
+                }
+                if !area2_abs.is_finite() || !perim.is_finite() {
                     return Err("Polygon vertices must be finite".to_string());
                 }
-                if area2.abs() <= GEOM_EPS * perim * perim {
+                if area2_abs <= GEOM_EPS * perim * perim {
                     return Err("Polygon is degenerate or colinear".to_string());
                 }
                 // Chequeo adicional: todos los cross de triples consecutivos < GEOM_EPS
@@ -2170,5 +2399,252 @@ mod tests_budgets_ola4 {
         // TOTAL de 32 MiB, no por elementos/hoja.
         let err = validate_document(&doc).unwrap_err();
         assert!(err.contains("MiB"), "debe citar el tope total, fue: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests_object_scripts {
+    use super::*;
+    use crate::document::ObjectScripts;
+    use std::collections::BTreeMap;
+
+    fn doc_con_on_load(script: &str) -> Document {
+        let mut doc = Document::new();
+        doc.on_load_script = Some(script.to_string());
+        doc
+    }
+
+    /// FIX 1 red-first: un `OnLoad` hostil (fuera del allowlist) debe hacer
+    /// fallar `validate_document`.
+    #[test]
+    fn on_load_hostil_falla_validate_document() {
+        let doc = doc_con_on_load("Delete[A]");
+        let err = validate_document(&doc).unwrap_err();
+        assert!(
+            err.contains("fuera del subset"),
+            "debe citar el allowlist, fue: {err}"
+        );
+    }
+
+    /// El wrapper fail-closed hereda el rechazo (corre `validate_document`).
+    #[test]
+    fn on_load_hostil_falla_validated_document() {
+        let doc = doc_con_on_load("Script[Delete[A]]");
+        assert!(ValidatedDocument::try_new(doc).is_err());
+        let doc = doc_con_on_load("Delete[A]");
+        assert!(ValidatedDocument::try_new_typed(doc).is_err());
+    }
+
+    /// `object_scripts` hostil también se rechaza (OnClick y OnUpdate).
+    #[test]
+    fn object_scripts_hostil_falla() {
+        let mut doc = Document::new();
+        doc.object_scripts.insert(
+            "A".to_string(),
+            ObjectScripts {
+                on_click: Some("Delete[A]".to_string()),
+                on_update: None,
+            },
+        );
+        assert!(validate_document(&doc).is_err());
+        let mut doc = Document::new();
+        doc.object_scripts.insert(
+            "A".to_string(),
+            ObjectScripts {
+                on_click: None,
+                on_update: Some("RunCommand[Delete[A]]".to_string()),
+            },
+        );
+        assert!(validate_document(&doc).is_err());
+    }
+
+    /// Guiones benignos del subset pasan (paridad con la vía al guardar).
+    #[test]
+    fn guiones_benignos_pasan() {
+        let mut doc = Document::new();
+        doc.object_scripts.insert(
+            "A".to_string(),
+            ObjectScripts {
+                on_click: Some("SetValue[x, 1]; Show[A]".to_string()),
+                on_update: Some("If[x > 0, \"Hide[B]\"]".to_string()),
+            },
+        );
+        doc.on_load_script = Some("ZoomIn[2]".to_string());
+        assert!(validate_document(&doc).is_ok());
+    }
+
+    /// Cotas: guion vacío, gigante, con NUL y exceso de entradas se rechazan.
+    #[test]
+    fn cotas_de_guiones() {
+        assert!(validate_document(&doc_con_on_load("")).is_err());
+        assert!(validate_document(&doc_con_on_load("   ")).is_err());
+        let gigante = format!("Show[{}]", "A".repeat(MAX_SCRIPT_BYTES));
+        assert!(validate_document(&doc_con_on_load(&gigante)).is_err());
+        assert!(validate_document(&doc_con_on_load("Show[A\0]")).is_err());
+        assert!(validate_document(&doc_con_on_load("Show[A")).is_err());
+        let mut doc = Document::new();
+        doc.object_scripts = (0..MAX_OBJECT_SCRIPTS + 1)
+            .map(|i| {
+                (
+                    format!("L{i}"),
+                    ObjectScripts {
+                        on_click: Some("Show[A]".to_string()),
+                        on_update: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let err = validate_document(&doc).unwrap_err();
+        assert!(err.contains("object scripts"), "fue: {err}");
+    }
+
+    /// El espejo local no diverge del subset benigno pinneado por test en
+    /// `grafito-command` (`auto_script_allowlist_is_benign_and_pinned`).
+    #[test]
+    fn allowlist_local_pinneada() {
+        for cmd in [
+            "SetValue",
+            "Show",
+            "Hide",
+            "ZoomIn",
+            "ZoomOut",
+            "PlayPause",
+            "If",
+            "Repeat",
+            "Button",
+            "Checkbox",
+            "InputBox",
+            "TextField",
+            "DefineTool",
+            "LoadTool",
+        ] {
+            assert!(
+                SCRIPT_ALLOWLIST.contains(&cmd),
+                "falta {cmd} en el espejo local"
+            );
+        }
+        assert_eq!(SCRIPT_ALLOWLIST.len(), 14);
+        // Destructivos jamás entran.
+        for cmd in ["Delete", "Script", "RunCommand", "Rename", "Clear"] {
+            assert!(
+                !SCRIPT_ALLOWLIST.iter().any(|n| n.eq_ignore_ascii_case(cmd)),
+                "{cmd} no debe estar en el allowlist"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_polygon_lazos_autointersectados {
+    //! Regresión del bug Lissajous: el shoelace CON SIGNO daba área algebraica
+    //! neta 0 en toda curva auto-intersecada (las regiones se cancelan) y la
+    //! validación la rechazaba como "degenerate or colinear" en cualquier
+    //! parametrización. Estos lazos DEBEN validar; lo colineal DEBE seguir
+    //! rechazándose.
+
+    use super::*;
+    use crate::object::PolygonObj;
+    use grafito_geometry::Point2;
+
+    fn valida(pts: Vec<Point2>) -> Result<(), String> {
+        let doc = Document::new();
+        validate_object_candidate(&doc, &GeoObject::Polygon(PolygonObj::new(pts)))
+    }
+
+    /// Muestrea una curva paramétrica cerrada en `n` pasos (paridad con
+    /// `grafito_geometry::special_curves::lissajous`: `t = 2πi/n`).
+    fn curva<F>(n: usize, f: F) -> Vec<Point2>
+    where
+        F: Fn(f64) -> (f64, f64),
+    {
+        (0..n)
+            .map(|i| {
+                let t = std::f64::consts::TAU * (i as f64) / (n as f64);
+                let (x, y) = f(t);
+                Point2::new(x, y)
+            })
+            .collect()
+    }
+
+    /// Lissajous(3,2) con δ=π/2 y 400 puntos: el caso exacto del comando
+    /// `Lissajous[a, b, freq_x, freq_y, delta]` (`commands.rs:12407-12445`).
+    #[test]
+    fn lissajous_3_2_pasa_pese_a_auto_intersecarse() {
+        let pts = curva(400, |t| {
+            (
+                (3.0 * t + std::f64::consts::FRAC_PI_2).sin(),
+                (2.0 * t).sin(),
+            )
+        });
+        assert!(
+            valida(pts).is_ok(),
+            "Lissajous(3,2) es una curva válida: su área neta con signo da 0, \
+             pero NO está degenerada"
+        );
+    }
+
+    /// Lazo 1: lemniscata de Bernoulli (dos lóbulos con cruce en el origen).
+    #[test]
+    fn lemniscata_de_bernoulli_pasa() {
+        let pts = curva(400, |t| {
+            let d = 1.0 + t.sin().powi(2);
+            (t.cos() / d, t.sin() * t.cos() / d)
+        });
+        assert!(
+            valida(pts).is_ok(),
+            "lemniscata: lazo auto-intersecado válido"
+        );
+    }
+
+    /// Lazo 2: rosa de 3 pétalos (`r = sen(3θ)`, se cruza en el origen).
+    #[test]
+    fn rosa_de_3_petalos_pasa() {
+        let pts = curva(400, |t| {
+            let r = (3.0 * t).sin();
+            (r * t.cos(), r * t.sin())
+        });
+        assert!(valida(pts).is_ok(), "rosa de 3 pétalos: lazo válido");
+    }
+
+    /// Lazo 3: lazo de trébol (proyección del nudo trefoil, 3 lazos).
+    #[test]
+    fn lazo_de_trebol_pasa() {
+        let pts = curva(400, |t| {
+            (
+                t.sin() + 2.0 * (2.0 * t).sin(),
+                t.cos() - 2.0 * (2.0 * t).cos(),
+            )
+        });
+        assert!(valida(pts).is_ok(), "lazo de trébol: lazo válido");
+    }
+
+    /// Lo genuinamente degenerado SIGUE rechazándose: puntos colineales.
+    #[test]
+    fn colineales_siguen_rechazandose() {
+        let diagonal: Vec<Point2> = (0..8).map(|i| Point2::new(i as f64, i as f64)).collect();
+        let err = valida(diagonal).expect_err("colineal es degenerado");
+        assert!(
+            err.contains("degenerate or colinear"),
+            "debe citar degeneración, fue: {err}"
+        );
+        // Colineales en orden no monótono (zigzag sobre la recta y=x con
+        // cruces de signo alternado): el área neta Y la absoluta dan 0.
+        let zigzag: Vec<Point2> = [0.0, 3.0, 1.0, 4.0, 2.0, 5.0, 6.0]
+            .iter()
+            .map(|i| Point2::new(*i, *i))
+            .collect();
+        let err = valida(zigzag).expect_err("zigzag colineal con área 0 es degenerado");
+        assert!(err.contains("degenerate or colinear"), "fue: {err}");
+    }
+
+    /// Un triángulo simple sigue pasando (sanity del chequeo).
+    #[test]
+    fn triangulo_simple_pasa() {
+        let pts = vec![
+            Point2::new(0.0, 0.0),
+            Point2::new(1.0, 0.0),
+            Point2::new(0.0, 1.0),
+        ];
+        assert!(valida(pts).is_ok());
     }
 }
