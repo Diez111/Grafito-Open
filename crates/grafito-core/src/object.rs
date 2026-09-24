@@ -93,6 +93,33 @@ pub enum RenderSpace {
     D3,
 }
 
+/// ¿La expresión menciona la variable `name` como token entero?
+///
+/// Misma tokenización que `expr_references_variables` en `document.rs`
+/// (`[alnum _]+`, así `1e3` no colisiona con una variable `e`). Sin
+/// alocar: recorre `char_indices` comparando por rebanadas.
+pub(crate) fn expr_mentions_var(expr: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let mut token_start: Option<usize> = None;
+    for (i, ch) in expr.char_indices() {
+        if ch.is_alphanumeric() || ch == '_' {
+            if token_start.is_none() {
+                token_start = Some(i);
+            }
+        } else if let Some(start) = token_start.take() {
+            if &expr[start..i] == name {
+                return true;
+            }
+        }
+    }
+    if let Some(start) = token_start {
+        return &expr[start..] == name;
+    }
+    false
+}
+
 impl GeoObject {
     pub fn render_space(&self) -> RenderSpace {
         match self {
@@ -707,6 +734,144 @@ impl GeoObject {
         }
     }
 
+    /// ¿Alguna expresión del objeto menciona la variable `name`?
+    ///
+    /// Fast-path de `try_set_variable` (FIX5.1): si ningún objeto, celda,
+    /// secuencia viva ni hoja CAS menciona la variable, cambiar su valor no
+    /// altera geometría derivada y se muta in place sin clon/validación.
+    /// El `match` es exhaustivo a propósito: agregar una variante obliga a
+    /// decidir acá (fail-closed en compilación, nunca un falso negativo
+    /// silencioso).
+    pub fn references_variable(&self, name: &str) -> bool {
+        if name.is_empty() {
+            return false;
+        }
+        let opt = |e: &Option<String>| e.as_deref().is_some_and(|e| expr_mentions_var(e, name));
+        match self {
+            GeoObject::Point(o) => opt(&o.x_expr) || opt(&o.y_expr),
+            GeoObject::Line(o) => {
+                opt(&o.start_x_expr)
+                    || opt(&o.start_y_expr)
+                    || opt(&o.end_x_expr)
+                    || opt(&o.end_y_expr)
+            }
+            GeoObject::Circle(o) => opt(&o.radius_expr),
+            GeoObject::Polygon(o) => o
+                .x_exprs
+                .iter()
+                .flatten()
+                .chain(o.y_exprs.iter().flatten())
+                .any(|e| expr_mentions_var(e, name)),
+            GeoObject::Plane3D(o) => {
+                opt(&o.a_expr) || opt(&o.b_expr) || opt(&o.c_expr) || opt(&o.d_expr)
+            }
+            GeoObject::Line3D(o) => {
+                opt(&o.px_expr)
+                    || opt(&o.py_expr)
+                    || opt(&o.pz_expr)
+                    || opt(&o.dx_expr)
+                    || opt(&o.dy_expr)
+                    || opt(&o.dz_expr)
+            }
+            GeoObject::Function(o) => {
+                expr_mentions_var(&o.expr, name)
+                    || opt(&o.domain_min_expr)
+                    || opt(&o.domain_max_expr)
+            }
+            GeoObject::ComplexGrid(o) => expr_mentions_var(&o.expr, name),
+            GeoObject::ComplexMapping(o) => expr_mentions_var(&o.expr, name),
+            GeoObject::ComplexIntegral(o) => expr_mentions_var(&o.expr, name),
+            GeoObject::Transformed(o) => expr_mentions_var(&o.complex_expr, name),
+            GeoObject::ParametricCurve2D(o) => {
+                expr_mentions_var(&o.expr_x, name)
+                    || expr_mentions_var(&o.expr_y, name)
+                    || opt(&o.t_min_expr)
+                    || opt(&o.t_max_expr)
+            }
+            GeoObject::ParametricCurve3D(o) => {
+                expr_mentions_var(&o.expr_x, name)
+                    || expr_mentions_var(&o.expr_y, name)
+                    || expr_mentions_var(&o.expr_z, name)
+                    || opt(&o.t_min_expr)
+                    || opt(&o.t_max_expr)
+            }
+            GeoObject::PolarCurve(o) => {
+                expr_mentions_var(&o.expr_r, name) || opt(&o.t_min_expr) || opt(&o.t_max_expr)
+            }
+            GeoObject::VectorField2D(o) => {
+                expr_mentions_var(&o.expr_u, name) || expr_mentions_var(&o.expr_v, name)
+            }
+            GeoObject::VectorField3D(o) => {
+                expr_mentions_var(&o.expr_u, name)
+                    || expr_mentions_var(&o.expr_v, name)
+                    || expr_mentions_var(&o.expr_w, name)
+            }
+            GeoObject::ImplicitCurve(o) => {
+                expr_mentions_var(&o.expr_lhs, name) || expr_mentions_var(&o.expr_rhs, name)
+            }
+            GeoObject::Surface3D(o) => {
+                expr_mentions_var(&o.expr, name)
+                    || expr_mentions_var(&o.expr_x, name)
+                    || expr_mentions_var(&o.expr_y, name)
+                    || expr_mentions_var(&o.expr_z, name)
+                    || opt(&o.x_min_expr)
+                    || opt(&o.x_max_expr)
+                    || opt(&o.y_min_expr)
+                    || opt(&o.y_max_expr)
+            }
+            GeoObject::ImplicitSurface3D(o) => expr_mentions_var(&o.expr, name),
+            GeoObject::PhasePortrait(o) => {
+                expr_mentions_var(&o.expr_dx, name) || expr_mentions_var(&o.expr_dy, name)
+            }
+            GeoObject::List(o) => o.items.iter().any(|item| match item {
+                ListItem::Text(text) => expr_mentions_var(text, name),
+                ListItem::List(items) => items.iter().any(
+                    |sub| matches!(sub, ListItem::Text(text) if expr_mentions_var(text, name)),
+                ),
+                ListItem::Scalar(_) => false,
+            }),
+            // Datos puros sin expresiones evaluadas con variables del
+            // documento (contenido estático, geometría numérica, datos).
+            GeoObject::Pencil(_)
+            | GeoObject::Text(_)
+            | GeoObject::Polyline(_)
+            | GeoObject::Ellipse(_)
+            | GeoObject::Parabola(_)
+            | GeoObject::Hyperbola(_)
+            | GeoObject::Arc(_)
+            | GeoObject::Sector(_)
+            | GeoObject::BezierCurve(_)
+            | GeoObject::Spline(_)
+            | GeoObject::Point3D(_)
+            | GeoObject::Segment3D(_)
+            | GeoObject::Sphere3D(_)
+            | GeoObject::Cube3D(_)
+            | GeoObject::Tetrahedron3D(_)
+            | GeoObject::Pyramid3D(_)
+            | GeoObject::Cone3D(_)
+            | GeoObject::Cylinder3D(_)
+            | GeoObject::Platonic3D(_)
+            | GeoObject::InfiniteCone3D(_)
+            | GeoObject::InfiniteCylinder3D(_)
+            | GeoObject::Torus3D(_)
+            | GeoObject::MoebiusStrip(_)
+            | GeoObject::Prism3D(_)
+            | GeoObject::Quadric3D(_)
+            | GeoObject::Histogram(_)
+            | GeoObject::BarChart(_)
+            | GeoObject::PieChart(_)
+            | GeoObject::ScatterPlot(_)
+            | GeoObject::BoxPlot(_)
+            | GeoObject::RegressionLine(_)
+            | GeoObject::DataTable(_)
+            | GeoObject::Attractor3D(_)
+            | GeoObject::Fractal2D(_)
+            | GeoObject::RegularPolychoron4D(_)
+            | GeoObject::RegularPolytopeND(_)
+            | GeoObject::HyperSurface4D(_) => false,
+        }
+    }
+
     /// Drops runtime-only caches before a document is used as a transaction
     /// staging area. Clones normally share these `Arc` caches with the live
     /// document, so staging must detach them before a failed operation can
@@ -744,6 +909,7 @@ impl GeoObject {
                     o.cached_key = Default::default();
                     o.cached_region = Default::default();
                     o.cached_asts = Default::default();
+                    o.referenced_vars = Default::default();
                 }
                 GeoObject::ImplicitSurface3D(o) => {
                     o.mesh_slots = RwLock::new(VecDeque::new());

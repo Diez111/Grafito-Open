@@ -228,12 +228,98 @@ fn bench_spatial_index_rebuild(c: &mut Criterion) {
     });
 }
 
+/// FIX 4: re-solve con muchas constructivas (filtros + clones por pasada).
+/// 3000 Midpoint (comparten 2 entradas) + 120 PointOnObject sobre polígonos
+/// de 1500 vértices + 8 Distance numéricas (ejercita el filtro
+/// constructivo-vs-numérico por pasada). El cuerpo solo re-evalúa (sin
+/// `move_point`) para que el costo por-restricción domine sobre el overhead
+/// constante del clon+validación del documento.
+fn make_many_constructive_doc() -> (Document, Vec<usize>, grafito_core::ObjectId) {
+    let mut doc = Document::new();
+    let a = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
+    let b = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(4.0, 0.0))));
+    for _ in 0..3000 {
+        doc.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))),
+            "Midpoint",
+            &[a, b],
+        );
+    }
+    for i in 0..120 {
+        let verts: Vec<Point2> = (0..1500)
+            .map(|k| {
+                let t = k as f64 / 1500.0 * std::f64::consts::TAU;
+                Point2::new(
+                    i as f64 * 10.0 + t.cos() * 5.0,
+                    i as f64 * 10.0 + t.sin() * 5.0,
+                )
+            })
+            .collect();
+        let poly = doc.add_object(GeoObject::Polygon(PolygonObj::new(verts)));
+        let driver = doc.add_object(GeoObject::Point(PointObj::new(Point2::new(i as f64, 0.0))));
+        doc.add_constructed_object(
+            GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))),
+            "PointOnObject",
+            &[poly, driver],
+        );
+    }
+    // 8 Distance sobre pares de puntos dedicados (filtro por pasada).
+    let mut drivers = Vec::with_capacity(16);
+    for i in 0..16 {
+        drivers.push(doc.add_object(GeoObject::Point(PointObj::new(Point2::new(i as f64, 10.0)))));
+    }
+    for i in 0..8 {
+        doc.add_distance_constraint(drivers[2 * i], drivers[2 * i + 1], 1.0);
+    }
+    let order = doc.propagation_order(&[a]);
+    // Perturbación única fuera del cuerpo: cada iteración re-evalúa el
+    // mismo orden (las constructivas siempre se aplican; el solve numérico
+    // converge de inmediato).
+    doc.move_point(a, Point2::new(0.5, 0.5));
+    (doc, order, a)
+}
+
+fn bench_re_evaluate_many_constructive(c: &mut Criterion) {
+    let (mut doc, order, _) = make_many_constructive_doc();
+    c.bench_function("re_evaluate_many_constructive", |b| {
+        b.iter(|| {
+            doc.re_evaluate_constraints(black_box(&order));
+            black_box(doc.object_count());
+        })
+    });
+}
+
+/// FIX 5.1: `try_set_variable` sobre variable no referenciada en doc de
+/// 5000 puntos (un clon entero + serde + validación por frame de slider
+/// en el camino lento).
+fn bench_try_set_variable_unreferenced_5k(c: &mut Criterion) {
+    let mut doc = Document::new();
+    for i in 0..5000 {
+        doc.add_object(GeoObject::Point(PointObj::new(Point2::new(
+            i as f64 * 0.1,
+            (i as f64).sin(),
+        ))));
+    }
+    doc.try_set_variable("k".to_string(), 0.0).unwrap();
+    let mut flip = false;
+    c.bench_function("try_set_variable_unreferenced_5k", |b| {
+        b.iter(|| {
+            flip = !flip;
+            doc.try_set_variable("k".to_string(), black_box(if flip { 1.0 } else { 0.0 }))
+                .unwrap();
+            black_box(doc.object_count());
+        })
+    });
+}
+
 criterion_group!(
     benches,
     bench_re_evaluate_constraints_many_points,
     bench_numeric_solver_constraints,
     bench_expression_binding_update,
     bench_serialize_large_document,
-    bench_spatial_index_rebuild
+    bench_spatial_index_rebuild,
+    bench_re_evaluate_many_constructive,
+    bench_try_set_variable_unreferenced_5k
 );
 criterion_main!(benches);

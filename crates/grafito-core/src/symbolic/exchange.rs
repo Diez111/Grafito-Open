@@ -129,7 +129,7 @@ impl LayerTable {
     pub fn set_layer_visible(&self, document: &mut Document, layer: u32, visible: bool) -> usize {
         let mut touched = 0;
         for id in self.objects_on_layer(document, layer) {
-            if let Some(object) = document.get_object_mut(id) {
+            if let Some(object) = document.get_object_mut_touch(id) {
                 set_visible(object, visible);
                 touched += 1;
             }

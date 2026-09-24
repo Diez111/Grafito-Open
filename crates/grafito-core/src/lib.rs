@@ -3,7 +3,7 @@
 #![allow(deprecated)]
 //! Grafito Core — Modelo de documento, objetos geométricos y restricciones.
 //!
-//! Este crate define el modelo central de Grafito: el [`Document`], los 32 tipos
+//! Este crate define el modelo central de Grafito: el [`Document`], los 58 tipos
 //! de objetos geométricos representados por [`GeoObject`], los índices
 //! espaciales, los dos sistemas de restricciones (constructivas y numéricas)
 //! y el puente de análisis matemático ([`analyzable`]).
