@@ -81,6 +81,15 @@ pub enum MathError {
         variable: String,
         at: f64,
     },
+    /// La integral impropia diverge: su valor no es un número finito.
+    ///
+    /// `at` es el punto singular implicado, o el extremo infinito (±∞) donde
+    /// la antiderivada no tiene límite finito.
+    DivergentIntegral {
+        expression: String,
+        variable: String,
+        at: f64,
+    },
     /// El enfoque pedido no es un número real finito.
     NonFiniteLimitPoint {
         expression: String,
@@ -102,4 +111,10 @@ pub enum MathOperation {
     NumericalIntegration,
     /// Límite numérico bilateral.
     Limit,
+    /// Resolución de una ecuación en derivadas parciales por separación de variables.
+    PdeSolve,
+    /// Suma simbólica en forma cerrada.
+    Summation,
+    /// Resolución de una ecuación trascendental (p. ej. Lambert W).
+    TranscendentalSolve,
 }
