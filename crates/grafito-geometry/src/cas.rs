@@ -1378,6 +1378,11 @@ const POLE_PROBE_SCALES: [f64; 10] = [
 /// Escalas moderadas para la fórmula de derivadas: evita ruido de
 /// cancelación en `h ≤ 1e-9` (términos `±2/h` con redondeo ~1e-4).
 const POLE_DERIV_SCALES: [f64; 7] = [1e-3, 3e-4, 1e-4, 3e-5, 1e-5, 3e-6, 1e-6];
+/// Escalas gruesas para la parte principal: el ruido de cancelación al
+/// derivar el producto sin simplificar escala como `eps/h` (~1e-10 en
+/// `h = 1e-6`), así que se sondea en `h ≥ 1e-5` donde queda ≤ 1e-11,
+/// bajo el piso absoluto de conservación.
+const PP_SCALES: [f64; 7] = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5, 1e-5];
 
 /// Límite bilateral estable por acuerdo de cola (últimas 4 escalas).
 ///
@@ -1417,6 +1422,65 @@ fn stable_bilateral_limit(e: &crate::ast::Expr, var: &str, at: f64, scales: &[f6
     } else {
         None
     }
+}
+
+/// Límite por promedio bilateral `(l+r)/2`: devuelve `(valor, dispersión)`.
+///
+/// `stable_bilateral_limit` exige acuerdo muestra a muestra en la cola, lo
+/// que rechaza derivas `O(h)` legítimas: para `g(x) = x²·(1/x²+3/x) = 1+3x`
+/// la cola varía ~9e-5 ≫ `tol` ~1e-6 y la parte principal fallaba con un
+/// `Err` falso aunque el residuo salía bien. Acá se promedia cada par
+/// (la parte impar se cancela) y se exige:
+/// 1. acuerdo bilateral relativo a `h`: `|l−r|/2 ≤ 1e-9 + 10·h·S`
+///    (un salto genuino da `|l−r|/2 → cte > 0` y se rechaza);
+/// 2. estabilidad de los promedios en la cola (la parte par es `O(h²)`).
+///
+/// La dispersión (`máx|promedio − valor|` en la cola) estima el error
+/// numérico y permite filtrar ruido de cancelación: al derivar el producto
+/// `(x−at)^m·f` sin simplificar (el simplificador no cancela
+/// `(x−1)²/(x−1)² → 1`), el numerador `2h³−2h³` deja error `~eps/h`
+/// que de otro modo pasa el piso absoluto como coeficiente espurio.
+fn symmetric_bilateral_limit(
+    e: &crate::ast::Expr,
+    var: &str,
+    at: f64,
+    scales: &[f64],
+) -> Option<(f64, f64)> {
+    const TAIL: usize = 4;
+    if scales.len() < TAIL {
+        return None;
+    }
+    let mut means = Vec::with_capacity(scales.len());
+    for h in scales {
+        let (l, r) = (e.eval_at(var, at - h), e.eval_at(var, at + h));
+        if !l.is_finite() || !r.is_finite() {
+            return None;
+        }
+        let half_spread = (l - r).abs() * 0.5;
+        let mag = 1.0_f64.max(l.abs().max(r.abs()));
+        if half_spread > 1e-9 + 10.0 * h * mag {
+            return None;
+        }
+        means.push((l + r) * 0.5);
+    }
+    let tail = means.get(means.len() - TAIL..)?;
+    let mut value = 0.0_f64;
+    for v in tail {
+        value += *v;
+    }
+    value /= TAIL as f64;
+    if !value.is_finite() {
+        return None;
+    }
+    let mag = 1.0_f64.max(value.abs());
+    let mut spread = 0.0_f64;
+    for v in tail {
+        spread = spread.max((v - value).abs());
+    }
+    if spread > 1e-9 + 1e-6 * mag {
+        return None;
+    }
+    Some((value, spread))
 }
 
 /// ¿Tiende `g` a cero? Sondas diminutas todas `≤ 1e-9`.
@@ -1583,6 +1647,17 @@ fn residue_by_derivatives(
 ///
 /// Acotada a `MAX_SERIES_TERMS` 64 términos y orden ≤ `MAX_LAURENT_ORDER`.
 /// Referencia GeoGebra: `Series` (parte polar).
+///
+/// Método: `a_{−k} = g^{(m−k)}(at)/(m−k)!` con `g = (x−at)^m·f`, donde cada
+/// límite se toma por promedio bilateral ([`symmetric_bilateral_limit`]
+/// local) en escalas gruesas (`PP_SCALES`, `h ≥ 1e-5`). El promedio cancela
+/// la deriva impar `O(h)` (p. ej. `g = 1+3x` en `1/x²+3/x`) y la
+/// dispersión entre escalas filtra el ruido de cancelación `~eps/h` (p. ej.
+/// el `a_{−1} ~ 1e-10` espurio en `1/(x−1)²`): se conserva un coeficiente
+/// solo si supera 10× su dispersión más un piso absoluto de 1e-12.
+/// Coeficientes menores a eso son indistinguibles del ruido numérico con
+/// este método; un cero genuino por debajo del piso se reporta como
+/// ausencia del término (error honesto documentado, no número inventado).
 pub fn laurent_principal_part(
     expr: &str,
     var: &str,
@@ -1614,10 +1689,12 @@ pub fn laurent_principal_part(
         for _ in 0..derivs {
             g = g.diff(var).simplify();
         }
-        match stable_bilateral_limit(&g, var, at, &POLE_DERIV_SCALES) {
-            Some(value) if value.is_finite() => {
-                let coeff = value / factorial_double(derivs);
-                if coeff.abs() > 1e-12 {
+        match symmetric_bilateral_limit(&g, var, at, &PP_SCALES) {
+            Some((value, spread)) if value.is_finite() && spread.is_finite() => {
+                let fact = factorial_double(derivs);
+                let coeff = value / fact;
+                let noise = spread / fact;
+                if coeff.abs() > 10.0 * noise + 1e-12 {
                     out.push((-(k as i32), coeff));
                 }
             }
@@ -3045,6 +3122,37 @@ mod tests {
         assert_eq!(pp[0].0, -1);
         assert!((pp[0].1 - 1.0).abs() < 1e-4, "got {:?}", pp);
         assert!(pp.len() <= MAX_SERIES_TERMS);
+    }
+
+    #[test]
+    fn principal_part_sum_of_orders() {
+        // Regresión: `1/x² + 3/x` fallaba con `Err(a_-2 sin límite estable)`
+        // porque `g = x²·f = 1+3x` varía ~9e-5 en la cola ≫ tol del límite
+        // muestra a muestra, aunque el residuo (a_-1 = 3) salía bien.
+        let pp = laurent_principal_part("1/x^2 + 3/x", "x", 0.0, 16).expect("suma de órdenes");
+        assert_eq!(pp.len(), 2, "got {:?}", pp);
+        let a1 = pp.iter().find(|(p, _)| *p == -1).expect("a_-1 presente");
+        let a2 = pp.iter().find(|(p, _)| *p == -2).expect("a_-2 presente");
+        assert!((a1.1 - 3.0).abs() < 1e-6, "got {:?}", pp);
+        assert!((a2.1 - 1.0).abs() < 1e-6, "got {:?}", pp);
+    }
+
+    #[test]
+    fn principal_part_double_pole_no_noise() {
+        // Regresión: `1/(x-1)²` devolvía un `a_-1 ~ -1.16e-10` espurio por
+        // cancelación catastrófica al derivar el producto sin simplificar.
+        let pp = laurent_principal_part("1/(x-1)^2", "x", 1.0, 16).expect("polo doble");
+        assert_eq!(pp.len(), 1, "got {:?}", pp);
+        assert_eq!(pp[0].0, -2);
+        assert!((pp[0].1 - 1.0).abs() < 1e-6, "got {:?}", pp);
+    }
+
+    #[test]
+    fn principal_part_pure_double_pole_at_origin() {
+        let pp = laurent_principal_part("1/x^2", "x", 0.0, 16).expect("1/x²");
+        assert_eq!(pp.len(), 1, "got {:?}", pp);
+        assert_eq!(pp[0].0, -2);
+        assert!((pp[0].1 - 1.0).abs() < 1e-6, "got {:?}", pp);
     }
 
     // --- Frente G-A: Buchberger ---

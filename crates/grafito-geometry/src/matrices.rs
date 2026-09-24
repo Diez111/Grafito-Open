@@ -873,61 +873,14 @@ pub fn null_space(m: &Matrix) -> Option<Vec<Vec<f64>>> {
     Some(null_space_basis_dense(&nmat))
 }
 
+/// Serie de Taylor: wrapper fino de compatibilidad.
+///
+/// La implementación canónica vive en
+/// [`crate::symbolic::taylor_series`] (devuelve `Result<String, String>`);
+/// este wrapper conserva la firma histórica `Option<String>` (`None` = error)
+/// para no romper callers. No duplicar la lógica acá.
 pub fn taylor_series(expr: &str, var: &str, center: f64, order: usize) -> Option<String> {
-    if order > crate::analysis::MAX_TAYLOR_ORDER {
-        return None;
-    }
-    use crate::ast::parse_ast;
-    let ast = parse_ast(expr).ok()?;
-    let coefficients =
-        crate::analysis::taylor_coefficients_from_ast(&ast, var, center, order).ok()?;
-    let mut terms = Vec::new();
-    for (n, coeff) in coefficients.into_iter().enumerate() {
-        if coeff.abs() > 1e-12 {
-            let term = if (center).abs() < 1e-12 {
-                if n == 0 {
-                    format_coeff(coeff)
-                } else if n == 1 {
-                    format!("{}*{}", format_coeff(coeff), var)
-                } else {
-                    format!("{}*{}^{}", format_coeff(coeff), var, n)
-                }
-            } else if n == 0 {
-                format_coeff(coeff)
-            } else if n == 1 {
-                format!("{}*({}-{})", format_coeff(coeff), var, format_f64(center))
-            } else {
-                format!(
-                    "{}*({}-{})^{}",
-                    format_coeff(coeff),
-                    var,
-                    format_f64(center),
-                    n
-                )
-            };
-            terms.push(term);
-        }
-    }
-    if terms.is_empty() {
-        return Some("0".to_string());
-    }
-    Some(terms.join(" + ").replace("+ -", "- "))
-}
-
-fn format_coeff(c: f64) -> String {
-    if (c - c.round()).abs() < 1e-10 {
-        format!("{}", c.round() as i64)
-    } else {
-        format!("{:.6}", c)
-    }
-}
-
-fn format_f64(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-10 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{:.6}", v)
-    }
+    crate::symbolic::taylor_series(expr, var, center, order).ok()
 }
 
 impl fmt::Display for Matrix {

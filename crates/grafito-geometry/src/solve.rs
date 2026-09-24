@@ -767,7 +767,16 @@ pub fn solve_linear_system_exact(a: &[Vec<f64>], b: &[f64]) -> Result<Vec<f64>, 
 // Sistema poli 2×2 por eliminación (resultante de Sylvester interpolada)
 // ---------------------------------------------------------------------------
 
-type BiPoly = HashMap<(u32, u32), f64>;
+/// Polinomio bivariado ralo: mapa `(exp_x, exp_y) → coeficiente`.
+///
+/// Contrato público (`grafito_geometry::solve::BiPoly`): se expone como
+/// alias de `HashMap` a propósito — el código interno lo construye con la
+/// API estándar (`new`/`insert`/`entry`/iteración) en ~20 sitios, así que
+/// una `struct` opaca rompería compatibilidad sin ganar invariantes (este
+/// tipo no tiene invariantes propios: cualquier mapa finito es válido; los
+/// presupuestos `MAX_SYSTEM_DEGREE`/`MAX_SYSTEM_TERMS` los aplica el
+/// solver, no el tipo).
+pub type BiPoly = HashMap<(u32, u32), f64>;
 
 fn collect_bi(ast: &Expr, x: &str, y: &str) -> Option<BiPoly> {
     fn add(a: BiPoly, b: &BiPoly, sign: f64) -> Option<BiPoly> {
@@ -993,7 +1002,28 @@ fn sylvester_entry(
 }
 
 /// Resultante `Res_y(f1, f2)(x)` por interpolación de determinantes.
-fn sylvester_resultant(f1: &BiPoly, f2: &BiPoly, m: usize, n: usize) -> Option<Vec<f64>> {
+///
+/// Contrato público (`grafito_geometry::solve::sylvester_resultant`):
+/// `m`/`n` son los grados en `y` de `f1`/`f2`; devuelve los coeficientes
+/// ascendentes del polinomio en `x`, o `None` si excede presupuesto
+/// (`m + n > 8`, grado interpolado `> 32`) o la resultante es
+/// idénticamente nula.
+///
+/// Convención (estándar textbook, igual que `Resultant` de Mathematica,
+/// `resultant` de SymPy y Maple): para polinomios mónicos es el producto
+/// de diferencias de raíces, `Res(f,g) = a_m^n·∏g(αᵢ) =
+/// (−1)^{mn}·b_n^m·∏f(βⱼ)`, antisimétrica `Res(g,f) = (−1)^{mn}·Res(f,g)`.
+/// P. ej. `Res_y(y²+1, y−1) = 2`, `Res_y(y−x, y−1) = x−1`.
+///
+/// Detalle de implementación: la matriz se arma en potencias ascendentes,
+/// cuyo determinante difiere de la estándar en `(−1)^{N(N−1)/2}` con
+/// `N = m+n` (reversión de columnas); se corrige el signo acá para
+/// devolver la estándar. NOTA DE SEMÁNTICA (2026-09): antes se devolvía el
+/// determinante crudo (p. ej. `−2` en vez de `2` para `x²+1, x−1`);
+/// cualquier call site que asuma el signo anterior debe actualizarse.
+/// El solver interno (`solve_system_2x2`) solo usa las raíces, así que no
+/// le afecta el signo global.
+pub fn sylvester_resultant(f1: &BiPoly, f2: &BiPoly, m: usize, n: usize) -> Option<Vec<f64>> {
     let size = m + n;
     if size == 0 || size > 8 {
         return None;
@@ -1017,6 +1047,12 @@ fn sylvester_resultant(f1: &BiPoly, f2: &BiPoly, m: usize, n: usize) -> Option<V
     }
     let mut vals = Vec::with_capacity(xs.len());
     let mut peak = 0.0_f64;
+    // Corrección a la convención estándar: ver doc de la función.
+    let sign = if (size * (size - 1) / 2) % 2 == 1 {
+        -1.0
+    } else {
+        1.0
+    };
     for x in &xs {
         let mut mat = vec![vec![0.0; size]; size];
         for (r, row) in mat.iter_mut().enumerate() {
@@ -1024,7 +1060,7 @@ fn sylvester_resultant(f1: &BiPoly, f2: &BiPoly, m: usize, n: usize) -> Option<V
                 *slot = sylvester_entry(f1, f2, m, n, r, c, *x);
             }
         }
-        let d = numeric_det(&mat)?;
+        let d = numeric_det(&mat)? * sign;
         if d.is_finite() {
             peak = peak.max(d.abs());
         }

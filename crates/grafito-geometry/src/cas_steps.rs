@@ -5,6 +5,20 @@
 //! Instrumenta `diff_expr` y `integrate_expr` con visitor que loguea
 //! `CasStep { before, after, rule }` y reutiliza `simplify_expr`.
 //! El límite usa Richardson bilateral (igual que `symbolic::richardson_limit`).
+//!
+//! Contrato de consumo para `grafito-command` (listo para cablear, sin UI):
+//! - Punto de entrada sin estado: [`steps_for_op`] (`&CasOp →
+//!   Result<Vec<CasStep>, String>`). Puro, sin I/O ni spawn: seguro de llamar
+//!   desde cualquier hilo/executor.
+//! - Punto de entrada con statem: [`CasStepper::run`] (misma salida, más
+//!   transiciones tipadas `Idle → Parsing → Stepping → Verifying → Done`).
+//! - Cada [`CasStep`] trae `index`, `rule` ([`RewriteRule`], con `Display`
+//!   estable para serializar), `before`/`after` (≤ 4 KiB, truncado en borde
+//!   UTF-8) y `description` en español rioplatense lista para el panel.
+//! - Errores honestos en `Result`: entradas inválidas o presupuestos
+//!   excedidos devuelven `Err(String)`, nunca pasos inventados.
+//! - Ejemplo: `steps_for_op(&CasOp::Derivative { expr: "x^2".into(), var:
+//!   "x".into() })`.
 
 use crate::ast::{parse_ast, Expr};
 use std::collections::HashSet;
@@ -127,7 +141,10 @@ impl std::fmt::Display for RewriteRule {
     }
 }
 
-/// Un paso pedagógico `before --rule--> after`.
+/// Un paso pedagógico `before --rule--> after`, listo para renderizar en el
+/// panel del asistente (`grafito-command`): `before`/`after` son expresiones
+/// acotadas a `MAX_STEP_BYTES` y `description` es texto final en español
+/// rioplatense (no requiere post-procesado).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CasStep {
     pub index: usize,
@@ -141,7 +158,9 @@ pub struct CasStep {
 // CasOp — despacho genérico
 // ---------------------------------------------------------------------------
 
-/// Operación CAS cuya traza se solicita.
+/// Operación CAS cuya traza se solicita. `Clone + Debug + PartialEq` para que
+/// `grafito-command` pueda guardarla encolada/serializada antes de llamar a
+/// [`steps_for_op`].
 #[derive(Clone, Debug, PartialEq)]
 pub enum CasOp {
     Derivative {
@@ -1565,6 +1584,10 @@ fn taylor_steps(
 // ---------------------------------------------------------------------------
 
 /// Despacho genérico `CasOp → Vec<CasStep>` sin goldens hardcodeados.
+///
+/// Punto de entrada sin estado para `grafito-command`: puro y acotado
+/// (≤ `MAX_CAS_STEPS` pasos, campos ≤ `MAX_STEP_BYTES`). Devuelve `Err` con
+/// entradas inválidas o presupuestos excedidos.
 pub fn steps_for_op(op: &CasOp) -> Result<Vec<CasStep>, String> {
     match op {
         CasOp::Derivative { expr, var } => steps_for_derivative(expr, var),

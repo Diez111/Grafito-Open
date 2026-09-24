@@ -316,16 +316,19 @@ fn require_finite_amount(value: f64, cmd: &str, what: &str) -> Result<(), String
 /// `FutureValue[tasa, n, presente, cuota]`: valor futuro con pagos al final
 /// de cada período. `FV = presente·(1+r)^n + cuota·(((1+r)^n − 1)/r)`;
 /// con tasa 0 → `presente + cuota·n`.
+///
+/// La forma cerrada la implementa `cas_extra::finance_future_value`
+/// (núcleo canónico compartido); acá solo quedan la validación de aula
+/// (cota propia `MAX_FINANCE_PERIODS`, mensajes con prefijo `CMD`) y el
+/// chequeo de resultado finito. El orden de args difiere de
+/// [`crate::cas_extra::future_value`] (`(tasa, n, cuota, capital)`), así que
+/// no se puede delegar la firma completa sin romper callers.
 pub fn future_value(rate: f64, periods: u32, present: f64, payment: f64) -> Result<f64, String> {
     const CMD: &str = "FutureValue";
     require_finite_amount(present, CMD, "el capital")?;
     require_finite_amount(payment, CMD, "la cuota")?;
     let factor = growth_factor(rate, periods).map_err(|e| format!("{CMD}: {e}"))?;
-    let value = if rate == 0.0 {
-        present + payment * f64::from(periods)
-    } else {
-        present * factor + payment * (factor - 1.0) / rate
-    };
+    let value = crate::cas_extra::finance_future_value(factor, rate, periods, payment, present);
     if value.is_finite() {
         Ok(value)
     } else {
@@ -335,16 +338,15 @@ pub fn future_value(rate: f64, periods: u32, present: f64, payment: f64) -> Resu
 
 /// `PresentValue[tasa, n, futuro, cuota]`: inversa de `future_value`.
 /// Con tasa 0 → `futuro − cuota·n`.
+///
+/// Como arriba: forma cerrada en `cas_extra::finance_present_value`,
+/// validación y mensajes propios de este módulo.
 pub fn present_value(rate: f64, periods: u32, future: f64, payment: f64) -> Result<f64, String> {
     const CMD: &str = "PresentValue";
     require_finite_amount(future, CMD, "el monto futuro")?;
     require_finite_amount(payment, CMD, "la cuota")?;
     let factor = growth_factor(rate, periods).map_err(|e| format!("{CMD}: {e}"))?;
-    let value = if rate == 0.0 {
-        future - payment * f64::from(periods)
-    } else {
-        (future - payment * (factor - 1.0) / rate) / factor
-    };
+    let value = crate::cas_extra::finance_present_value(factor, rate, periods, payment, future);
     if value.is_finite() {
         Ok(value)
     } else {
@@ -354,6 +356,11 @@ pub fn present_value(rate: f64, periods: u32, future: f64, payment: f64) -> Resu
 
 /// `Payment[tasa, n, presente]`: cuota de un préstamo (`presente` financiado).
 /// `cuota = presente·r / (1 − (1+r)^−n)`; con tasa 0 → `presente / n`.
+///
+/// Equivale a `-cas_extra::finance_target_payment(factor, tasa,
+/// n, presente, futuro = 0)` (convención de aula: cuota siempre ≥ 0, sin
+/// signo de flujo). No se unifica con `cas_extra::payment` (4 args, con
+/// signo) para no romper ninguna de las dos firmas.
 pub fn payment(rate: f64, periods: u32, present: f64) -> Result<f64, String> {
     const CMD: &str = "Payment";
     require_finite_amount(present, CMD, "el capital")?;
@@ -361,11 +368,9 @@ pub fn payment(rate: f64, periods: u32, present: f64) -> Result<f64, String> {
     let value = if rate == 0.0 {
         present / f64::from(periods)
     } else {
-        let denominator = 1.0 - 1.0 / factor;
-        if denominator == 0.0 || !denominator.is_finite() {
-            return Err(format!("{CMD}: denominador nulo o no finito"));
-        }
-        present * rate / denominator
+        let signed = crate::cas_extra::finance_target_payment(factor, rate, periods, present, 0.0)
+            .ok_or_else(|| format!("{CMD}: denominador nulo o no finito"))?;
+        -signed
     };
     if value.is_finite() {
         Ok(value)

@@ -3,6 +3,11 @@
 
 use crate::dd::DD;
 
+/// Dígitos decimales máximos con sentido para el redondeo outward de
+/// [`Interval::new`]: más allá de 15 un `f64` ya no distingue el paso de
+/// cuantización y se conserva la precisión DD completa.
+pub const MAX_INTERVAL_PREC_DIGITS: u32 = 15;
+
 #[derive(Debug, Clone)]
 pub struct Interval {
     pub lo: DD,
@@ -10,15 +15,50 @@ pub struct Interval {
 }
 
 impl Interval {
-    pub fn new(_prec: u32, lo: f64, hi: f64) -> Self {
+    /// Construye `[lo, hi]` con redondeo outward a `prec` dígitos decimales:
+    /// `lo` se redondea hacia abajo y `hi` hacia arriba (más 1 ulp f64 de
+    /// resguardo en cada extremo), de modo que el intervalo resultante
+    /// contiene al `[lo, hi]` pedido.
+    ///
+    /// - `prec = 0` → sin cuantizar: se guardan los extremos tal cual en DD.
+    /// - `1 <= prec <= 15` → cuantización decimal outward real.
+    /// - `prec > 15` → se satura a 15 (documentado, no silencioso: más
+    ///   dígitos no son representables en `f64`).
+    ///
+    /// Honestidad: el respaldo es double-double de precisión FIJA (~106 bits
+    /// de mantisa), NO aritmética de intervalos rigurosa de precisión
+    /// arbitraria (MPFR/etc.). `prec` NO aumenta la precisión interna: solo
+    /// ensancha (outward) los extremos a la granularidad pedida. Los extremos
+    /// se normalizan (`lo <= hi`, se reordenan si vienen invertidos); los no
+    /// finitos (`NaN`/`Inf`) se guardan tal cual sin cuantizar, igual que
+    /// `prec = 0`.
+    pub fn new(prec: u32, lo: f64, hi: f64) -> Self {
+        let (mut lo, mut hi) = if lo <= hi { (lo, hi) } else { (hi, lo) };
+        if prec > 0 && lo.is_finite() && hi.is_finite() {
+            let digits = prec.min(MAX_INTERVAL_PREC_DIGITS);
+            let scale = 10_f64.powi(digits as i32);
+            if scale.is_finite() && scale > 0.0 {
+                // `floor`/`ceil` dirigen el redondeo hacia afuera; el
+                // `next_down`/`next_up` cubre el error de la
+                // multiplicación/división en f64.
+                let qlo = (lo * scale).floor() / scale;
+                let qhi = (hi * scale).ceil() / scale;
+                if qlo.is_finite() && qhi.is_finite() && qlo <= qhi {
+                    lo = qlo.next_down();
+                    hi = qhi.next_up();
+                }
+            }
+        }
         Self {
             lo: DD::from_f64(lo),
             hi: DD::from_f64(hi),
         }
     }
 
-    pub fn point(_prec: u32, val: f64) -> Self {
-        Self::new(0, val, val)
+    /// Intervalo punto `[val, val]` con el mismo redondeo outward de
+    /// [`Interval::new`] (antes ignoraba `prec`, ver `new`).
+    pub fn point(prec: u32, val: f64) -> Self {
+        Self::new(prec, val, val)
     }
 
     pub fn crosses_zero(&self) -> bool {
@@ -201,5 +241,49 @@ mod tests {
     fn test_interval_midpoint() {
         let i = Interval::new(0, -2.0, 2.0);
         assert!((i.midpoint() - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn prec_cero_no_cuantiza() {
+        // `prec = 0` conserva el comportamiento previo: extremos tal cual.
+        let i = Interval::new(0, 0.123_456_789, 0.987_654_321);
+        assert!((i.lo.to_f64() - 0.123_456_789).abs() < 1e-15);
+        assert!((i.hi.to_f64() - 0.987_654_321).abs() < 1e-15);
+    }
+
+    #[test]
+    fn prec_hace_outward_real() {
+        // `prec = 2` ensancha hacia afuera: contiene al [lo, hi] pedido y
+        // toca la grilla de 0.01 por fuera (más 1 ulp de resguardo).
+        let (lo, hi) = (0.123_456, 0.987_654);
+        let i = Interval::new(2, lo, hi);
+        assert!(i.lo.to_f64() <= 0.12, "lo = {}", i.lo.to_f64());
+        assert!(i.hi.to_f64() >= 0.99, "hi = {}", i.hi.to_f64());
+        assert!(i.lo.to_f64() <= lo && hi <= i.hi.to_f64());
+        assert!(i.contains(lo) && i.contains(hi));
+    }
+
+    #[test]
+    fn prec_normaliza_extremos_invertidos() {
+        let i = Interval::new(0, 2.0, -2.0);
+        assert!(i.lo.to_f64() <= i.hi.to_f64());
+        assert!(i.contains(0.0));
+    }
+
+    #[test]
+    fn prec_mayor_a_15_satura_sin_panico() {
+        let i = Interval::new(99, 0.1, 0.2);
+        assert!(i.lo.to_f64() <= 0.1);
+        assert!(i.hi.to_f64() >= 0.2);
+    }
+
+    #[test]
+    fn point_respeta_prec() {
+        // Antes `point` ignoraba su `prec` (delegaba con 0): ahora ensancha.
+        let a = Interval::point(0, 0.123_456);
+        let b = Interval::point(2, 0.123_456);
+        assert!((a.lo.to_f64() - 0.123_456).abs() < 1e-15);
+        assert!(b.lo.to_f64() <= 0.123_456 && 0.123_456 <= b.hi.to_f64());
+        assert!(b.lo.to_f64() < a.lo.to_f64() || b.hi.to_f64() > a.hi.to_f64());
     }
 }

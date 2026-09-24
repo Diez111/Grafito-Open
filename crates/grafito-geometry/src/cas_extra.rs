@@ -749,6 +749,93 @@ pub fn random_polynomial(degree: usize, seed: u64) -> Result<Vec<f64>, String> {
 // ---------------------------------------------------------------------------
 // Finanzas estándar (pagos vencidos)
 // ---------------------------------------------------------------------------
+//
+// Núcleo canónico de las formas cerradas (ver `FINANCE_ZERO_RATE`): este
+// módulo es la casa de la matemática financiera y `stats_extra` delega en
+// estos núcleos (`crate::cas_extra::finance_*`) para no duplicar lógica.
+// Lo que NO se unifica, a propósito:
+// - orden de parámetros (`cas_extra`: `(tasa, n, cuota, capital)`;
+//   `stats_extra` (convención de aula): `(tasa, n, capital, cuota)`) y
+// - `payment` de 4 args (cuota que lleva `presente → futuro`, con signo) vs
+//   `payment` de 3 args de aula (amortización, `futuro = 0`, siempre ≥ 0),
+// - cota de períodos (1200 acá = 100 años mensuales; 100_000 en aula).
+// Cada módulo conserva su validación, sus cotas y sus mensajes.
+
+/// Umbral bajo el cual la tasa se trata como cero en las formas cerradas:
+/// evita cancelación catastrófica en `(factor − 1) / tasa` con tasas
+/// diminutas (para `tasa = 0.0` el resultado es bit-idéntico al lineal).
+pub(crate) const FINANCE_ZERO_RATE: f64 = 1e-12;
+
+/// Factor `(1 + tasa)^n`, o `None` si la tasa es inválida o el factor no es
+/// finito positivo. No valida `periods`: cada caller aplica su propia cota.
+pub(crate) fn finance_factor(rate: f64, periods: u32) -> Option<f64> {
+    if !rate.is_finite() {
+        return None;
+    }
+    let growth = 1.0 + rate;
+    if !growth.is_finite() || growth <= 0.0 {
+        return None;
+    }
+    let exponent = i32::try_from(periods).ok()?;
+    let factor = growth.powi(exponent);
+    (factor.is_finite() && factor > 0.0).then_some(factor)
+}
+
+/// Valor futuro con pagos vencidos: `presente·factor + cuota·((factor−1)/tasa)`.
+/// Requiere `factor = finance_factor(tasa, n)`; pura, sin validación.
+pub(crate) fn finance_future_value(
+    factor: f64,
+    rate: f64,
+    periods: u32,
+    payment: f64,
+    present: f64,
+) -> f64 {
+    if rate.abs() < FINANCE_ZERO_RATE {
+        present + payment * f64::from(periods)
+    } else {
+        present * factor + payment * (factor - 1.0) / rate
+    }
+}
+
+/// Valor presente (inversa del futuro). Requiere `factor = finance_factor`.
+/// Pura, sin validación.
+pub(crate) fn finance_present_value(
+    factor: f64,
+    rate: f64,
+    periods: u32,
+    payment: f64,
+    future: f64,
+) -> f64 {
+    if rate.abs() < FINANCE_ZERO_RATE {
+        future - payment * f64::from(periods)
+    } else {
+        (future - payment * (factor - 1.0) / rate) / factor
+    }
+}
+
+/// Cuota que lleva `present` a `future` en `n` períodos (convención de signos
+/// del flujo). `None` si el denominador es nulo; la validación de entradas
+/// la hace el caller. Pura, sin validación.
+pub(crate) fn finance_target_payment(
+    factor: f64,
+    rate: f64,
+    periods: u32,
+    present: f64,
+    future: f64,
+) -> Option<f64> {
+    if rate.abs() < FINANCE_ZERO_RATE {
+        let n = f64::from(periods);
+        if n == 0.0 {
+            return None;
+        }
+        return Some((future - present) / n);
+    }
+    let denominator = factor - 1.0;
+    if denominator == 0.0 {
+        return None;
+    }
+    Some((future - present * factor) * rate / denominator)
+}
 
 fn check_finance(rate: f64, periods: u32, first: f64, second: f64) -> Result<f64, String> {
     if !rate.is_finite() || !first.is_finite() || !second.is_finite() {
@@ -760,25 +847,16 @@ fn check_finance(rate: f64, periods: u32, first: f64, second: f64) -> Result<f64
     if periods == 0 || periods > MAX_FINANCE_PERIODS {
         return Err(format!("periodos debe estar en 1..={MAX_FINANCE_PERIODS}"));
     }
-    let growth = 1.0 + rate;
-    if !growth.is_finite() || growth <= 0.0 {
+    if !(1.0 + rate).is_finite() || 1.0 + rate <= 0.0 {
         return Err("tasa inválida (se exige 1+tasa > 0)".to_string());
     }
-    Ok(growth)
+    finance_factor(rate, periods).ok_or_else(|| "factor fuera de rango".to_string())
 }
 
 /// Valor futuro `PV*(1+r)^n + PMT*[((1+r)^n-1)/r]`.
 pub fn future_value(rate: f64, n_periods: u32, payment: f64, present: f64) -> Result<f64, String> {
-    let growth = check_finance(rate, n_periods, payment, present)?;
-    let factor = growth.powf(f64::from(n_periods));
-    if !factor.is_finite() {
-        return Err("factor fuera de rango".to_string());
-    }
-    let out = if rate.abs() < 1e-12 {
-        present + payment * f64::from(n_periods)
-    } else {
-        present * factor + payment * ((factor - 1.0) / rate)
-    };
+    let factor = check_finance(rate, n_periods, payment, present)?;
+    let out = finance_future_value(factor, rate, n_periods, payment, present);
     if !out.is_finite() {
         return Err("resultado no finito".to_string());
     }
@@ -787,16 +865,8 @@ pub fn future_value(rate: f64, n_periods: u32, payment: f64, present: f64) -> Re
 
 /// Valor presente `FV/(1+r)^n - PMT*[1-(1+r)^-n]/r`.
 pub fn present_value(rate: f64, n_periods: u32, payment: f64, future: f64) -> Result<f64, String> {
-    let growth = check_finance(rate, n_periods, payment, future)?;
-    let factor = growth.powf(f64::from(n_periods));
-    if !factor.is_finite() || factor == 0.0 {
-        return Err("factor fuera de rango".to_string());
-    }
-    let out = if rate.abs() < 1e-12 {
-        future - payment * f64::from(n_periods)
-    } else {
-        future / factor - payment * (1.0 - 1.0 / factor) / rate
-    };
+    let factor = check_finance(rate, n_periods, payment, future)?;
+    let out = finance_present_value(factor, rate, n_periods, payment, future);
     if !out.is_finite() {
         return Err("resultado no finito".to_string());
     }
@@ -805,20 +875,9 @@ pub fn present_value(rate: f64, n_periods: u32, payment: f64, future: f64) -> Re
 
 /// Cuota `PMT` que lleva `present` a `future` en `n` periodos.
 pub fn payment(rate: f64, n_periods: u32, present: f64, future: f64) -> Result<f64, String> {
-    let growth = check_finance(rate, n_periods, present, future)?;
-    let factor = growth.powf(f64::from(n_periods));
-    if !factor.is_finite() {
-        return Err("factor fuera de rango".to_string());
-    }
-    let out = if rate.abs() < 1e-12 {
-        (future - present) / f64::from(n_periods)
-    } else {
-        let denominator = factor - 1.0;
-        if denominator == 0.0 {
-            return Err("denominador nulo en la cuota".to_string());
-        }
-        (future - present * factor) * rate / denominator
-    };
+    let factor = check_finance(rate, n_periods, present, future)?;
+    let out = finance_target_payment(factor, rate, n_periods, present, future)
+        .ok_or_else(|| "denominador nulo en la cuota".to_string())?;
     if !out.is_finite() {
         return Err("resultado no finito".to_string());
     }

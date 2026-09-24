@@ -975,6 +975,24 @@ fn is_known_math_function(name: &str) -> bool {
     )
 }
 
+/// Capacidad del LRU de expresiones compiladas: 128 (NO subir sin medir).
+///
+/// Medición 2026-09-23 (`benches/cache_probe.rs`, temporal, borrado tras
+/// medir; round-robin `evaluate_cached` sobre W expresiones distintas,
+/// criterion, release):
+/// - W=64 (realista): 128 → 10.22µs; 512 → 9.97µs (−2.4%, ruido); 1024 →
+///   10.23µs (+0.1%). Sin ganancia: Δ < 3% en todos los casos.
+/// - W=200/600 (sintéticos, exceden 128 a propósito): 512/1024 ganan 50×+,
+///   pero ningún path real genera ese working set: `expand`/`factor`/
+///   Groebner operan sobre AST, no sobre este cache de strings; los
+///   consumidores de `evaluate_cached` (`function_sampling`, probes de
+///   polo) evalúan 1 expresión N veces o decenas como máximo.
+///
+/// Cada entrada retiene un `Arc<CompiledExpr>` (AST + opcodes): 512/1024
+/// multiplican la memoria retenida sin beneficio real. Conclusión: se queda
+/// en 128. Si un perfil futuro muestra un working set real > 128 con
+/// `miss` dominando, reabrir con datos (igual que `docs/profiling.md` hizo
+/// con mimalloc y `-march=native`).
 const MAX_COMPILED_EXPR_CACHE: usize = 128;
 #[allow(clippy::useless_nonzero_new_unchecked)]
 const COMPILED_EXPR_CACHE_SIZE: NonZeroUsize =

@@ -2569,9 +2569,13 @@ fn poly_exact_div(a: &[f64], b: &[f64]) -> Option<Vec<f64>> {
 /// Para coeficientes enteros pequeños usa ExactRational implícitamente vía
 /// normalización por contenido; para f64 generales usa Euclides con
 /// tolerancia y escala para evitar blow-up.
-fn poly_gcd_subresultant(mut a: Vec<f64>, mut b: Vec<f64>) -> Vec<f64> {
-    a = poly_trim(&a);
-    b = poly_trim(&b);
+///
+/// Contrato público (`grafito_geometry::symbolic::poly_gcd_subresultant`):
+/// coeficientes en orden ascendente (`v[i]` = coef. de `xⁱ`); devuelve el
+/// GCD normalizado mónico (o `vec![0.0]` si ambos son cero).
+pub fn poly_gcd_subresultant(a: Vec<f64>, b: Vec<f64>) -> Vec<f64> {
+    let mut a = poly_trim(&a);
+    let mut b = poly_trim(&b);
     if poly_is_zero(&a) {
         return poly_monic(&b);
     }
@@ -5834,7 +5838,7 @@ fn diff_expr_depth(e: &Expr, var: &str, depth: u32) -> Expr {
 // Simplificación algebraica (propias, iterada hasta punto fijo)
 // ============================================================================
 
-fn simplify_expr(e: &Expr) -> Expr {
+pub(crate) fn simplify_expr(e: &Expr) -> Expr {
     let mut current = e.clone();
     for _ in 0..30 {
         let next = simplify_once(&current);
@@ -6009,7 +6013,7 @@ fn simplify_once(e: &Expr) -> Expr {
 
 /// Integración indefinida por reglas básicas. Devuelve `None` si la expresión
 /// no encaja en las reglas soportadas (quedando el fallback a `Expr::integrate`).
-fn integrate_expr(e: &Expr, var: &str) -> Option<Expr> {
+pub(crate) fn integrate_expr(e: &Expr, var: &str) -> Option<Expr> {
     integrate_expr_depth(e, var, 0)
 }
 
