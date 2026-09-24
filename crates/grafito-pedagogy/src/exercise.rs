@@ -1,4 +1,30 @@
 //! Ejercicios — generación y validación, sin red.
+//!
+//! # Cómo seguir con el resto de las familias (patrón sembrado)
+//!
+//! `prob-distribuciones` es la primera familia sembrada (el `match
+//! lo.id.as_str()` de `ExerciseGenerator::generate_with_seed`); los ~40 LOs
+//! restantes hoy caen al genérico `_ =>` ("Si f(x)=a·x+b, evalúa en x=c"),
+//! que es pedagógicamente incorrecto para `alg-matrices`, `am2-edo`, etc.
+//! Para sumar una familia, repetir el patrón:
+//!
+//! 1. Un brazo `"lo-id" => { ... }` en el `match`, ANTES del `_ =>`.
+//! 2. Parámetros 100 % derivados de la seed vía `wyhash`/`wyhash2` (`h0`,
+//!    `h1`, `h2`): determinismo puro, sin `rand`, sin reloj.
+//! 3. `solution` derivada SIEMPRE de los parámetros (idealmente exacta:
+//!    fracción reducida o entero), jamás hardcodeada desincronizada.
+//! 4. `kind` coherente con la respuesta: `Numeric` si la respuesta es un
+//!    número, `Symbolic` si es expresión, `Graphical` solo si pide un dibujo.
+//! 5. `validator`: `NumericTol(0.02)` para números (acepta fracción o
+//!    decimal), `Exact` para texto corto.
+//! 6. Tests mínimos por familia: determinismo por semilla (misma seed ⇒ mismo
+//!    ejercicio), coherencia de `kind`/`validator`, `validate().is_ok()` y
+//!    auto-evaluación `FeedbackEngine::assess(&ex, &ex.solution).correct`.
+//!
+//! Familias sugeridas por esfuerzo: `alg-matrices` (determinante 2×2 con
+//! coeficientes sembrados), `am2-edo` (separable con constante sembrada),
+//! `prob-var` (esperanza de una VA discreta), `sec-fracc` (suma de
+//! fracciones con denominadores sembrados).
 
 use crate::curriculum::LearningObjective;
 use crate::level::PedagogicalLevel;
@@ -106,6 +132,43 @@ fn wyhash2(seed: u64) -> u64 {
     seed.wrapping_mul(WY_CONST).wrapping_add(WY_CONST2)
 }
 
+/// Combinatoria `C(n, k)` en `u64` (los generadores la usan con `n ≤ 6`:
+/// sin overflow posible). `k` se acota a `min(k, n-k)` para multiplicar menos.
+fn combinatoria(n: u64, k: u64) -> u64 {
+    let k = k.min(n.saturating_sub(k));
+    let mut num = 1u64;
+    let mut den = 1u64;
+    for i in 0..k {
+        num = num.saturating_mul(n.saturating_sub(i));
+        den = den.saturating_mul(i.saturating_add(1));
+    }
+    if den == 0 {
+        return 0;
+    }
+    num / den
+}
+
+/// Máximo común divisor (Euclides, saturante).
+fn mcd(a: u64, b: u64) -> u64 {
+    let (mut a, mut b) = (a, b);
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
+/// Reduce la fracción `num/den` a términos mínimos (`den == 0` se devuelve
+/// sin tocar: inalcanzable desde los generadores, que usan `den ∈ {2, 4}`).
+fn reducir_fraccion(num: u64, den: u64) -> (u64, u64) {
+    if den == 0 {
+        return (num, den);
+    }
+    let d = mcd(num, den).max(1);
+    (num / d, den / d)
+}
+
 impl ExerciseGenerator {
     pub fn generate(&self, lo: &LearningObjective, level: PedagogicalLevel) -> Exercise {
         self.generate_with_seed(lo, level, 0)
@@ -140,8 +203,6 @@ impl ExerciseGenerator {
                 let mut params = BTreeMap::new();
                 params.insert("a".to_string(), a as f64);
                 params.insert("b".to_string(), b as f64);
-                // variante por seed%5 documentada: ya implícita en a,b
-                let _variant = seed % 5;
                 (
                     prompt,
                     solution,
@@ -282,6 +343,46 @@ impl ExerciseGenerator {
                         )
                     }
                 }
+            }
+            "prob-distribuciones" => {
+                // Familia sembrada (patrón para el resto, ver doc del módulo):
+                // binomial B(n, p) con parámetros 100 % derivados de la seed.
+                // Respuesta EXACTA como fracción reducida (el validador
+                // `NumericTol` acepta fracción o decimal equivalente).
+                let n = 2 + (h0 % 5); // ensayos 2..=6
+                let k = h1 % (n + 1); // éxitos 0..=n
+                let (p_num, p_den): (u64, u64) = match h2 % 3 {
+                    0 => (1, 4),
+                    1 => (1, 2),
+                    _ => (3, 4),
+                };
+                let prompt = format!(
+                    "Sea X ~ B({n}, {p_num}/{p_den}). ¿Cuánto vale P(X = {k})? Respondé como fracción o decimal."
+                );
+                // P(X=k) = C(n,k)·p^k·(1-p)^(n-k) en aritmética exacta sobre
+                // p_den^n (n ≤ 6 ⇒ p_den^n ≤ 4^6 = 4096: todo entra en u64).
+                let comb = combinatoria(n, k);
+                let num = comb
+                    .saturating_mul(p_num.pow(k as u32))
+                    .saturating_mul((p_den - p_num).pow((n - k) as u32));
+                let den = p_den.pow(n as u32);
+                let (num, den) = reducir_fraccion(num, den);
+                let solution = if den == 1 {
+                    num.to_string()
+                } else {
+                    format!("{num}/{den}")
+                };
+                let mut params = BTreeMap::new();
+                params.insert("n".to_string(), n as f64);
+                params.insert("k".to_string(), k as f64);
+                params.insert("p".to_string(), p_num as f64 / p_den as f64);
+                (
+                    prompt,
+                    solution,
+                    ExerciseKind::Numeric,
+                    ValidatorKind::NumericTol(0.02),
+                    params,
+                )
             }
             _ => {
                 // Genérico paramétrico: Si f(x)=a*x+b, evalúa en x=c
@@ -652,5 +753,83 @@ mod tests {
                 lo.id, ex.solution
             );
         }
+    }
+
+    /// Parsea `"a/b"` o número decimal a f64 (para verificar la fracción exacta).
+    fn parse_fraccion(s: &str) -> Option<f64> {
+        if let Some((a, b)) = s.split_once('/') {
+            let a: f64 = a.trim().parse().ok()?;
+            let b: f64 = b.trim().parse().ok()?;
+            if b.abs() < f64::EPSILON {
+                return None;
+            }
+            Some(a / b)
+        } else {
+            s.trim().parse().ok()
+        }
+    }
+
+    #[test]
+    fn prob_distribuciones_familia_sembra_determinista_y_coherente() {
+        // Familia sembrada (patrón para el resto de los LOs, ver doc del
+        // módulo): determinismo por semilla, kind coherente y solución exacta.
+        use crate::feedback::FeedbackEngine;
+        use crate::level::UTNProgram;
+        let lo = LearningObjective::new("prob-distribuciones", "Distribuciones", "...", None);
+        let gen = ExerciseGenerator;
+        let nivel = PedagogicalLevel::UTN(UTNProgram::Probabilidad);
+        let mut variantes = std::collections::HashSet::new();
+        for seed in 0..20u64 {
+            let ex = gen.generate_with_seed(&lo, nivel, seed);
+            let otro = gen.generate_with_seed(&lo, nivel, seed);
+            // 1. Determinismo por semilla: mismo ejercicio byte a byte.
+            assert_eq!(ex.prompt, otro.prompt, "seed {seed}");
+            assert_eq!(ex.solution, otro.solution, "seed {seed}");
+            assert_eq!(ex.params, otro.params, "seed {seed}");
+            assert_eq!(ex.seed, Some(seed));
+            // 2. kind coherente: la respuesta es una probabilidad (número).
+            assert_eq!(ex.kind, ExerciseKind::Numeric, "seed {seed}");
+            assert!(
+                matches!(ex.validator, ValidatorKind::NumericTol(_)),
+                "seed {seed}"
+            );
+            assert!(ex.validate().is_ok(), "seed {seed}: {:?}", ex.validate());
+            // 3. La solución es la binomial EXACTA (fracción reducida).
+            let n = ex.params["n"] as u64;
+            let k = ex.params["k"] as u64;
+            let p = ex.params["p"];
+            let esperado =
+                combinatoria(n, k) as f64 * p.powi(k as i32) * (1.0 - p).powi((n - k) as i32);
+            let obtenido = parse_fraccion(&ex.solution).expect("solución numérica");
+            assert!(
+                (obtenido - esperado).abs() < 1e-12,
+                "seed {seed}: {obtenido} vs {esperado}"
+            );
+            // 4. Auto-evaluación: la solución siempre se corrige correcta.
+            assert!(
+                FeedbackEngine.assess(&ex, &ex.solution).correct,
+                "seed {seed}"
+            );
+            variantes.insert(format!("{}|{}", ex.prompt, ex.solution));
+        }
+        // La seed varía los parámetros: no es un único enunciado fijo.
+        assert!(
+            variantes.len() > 4,
+            "solo {} variantes en 20 seeds",
+            variantes.len()
+        );
+    }
+
+    #[test]
+    fn combinatoria_y_fraccion_reducida() {
+        assert_eq!(combinatoria(6, 3), 20);
+        assert_eq!(combinatoria(5, 0), 1);
+        assert_eq!(combinatoria(5, 5), 1);
+        assert_eq!(combinatoria(4, 2), 6);
+        assert_eq!(reducir_fraccion(2, 4), (1, 2));
+        assert_eq!(reducir_fraccion(3, 8), (3, 8));
+        assert_eq!(reducir_fraccion(8, 8), (1, 1));
+        // den == 0 se devuelve sin tocar (inalcanzable desde los generadores).
+        assert_eq!(reducir_fraccion(3, 0), (3, 0));
     }
 }

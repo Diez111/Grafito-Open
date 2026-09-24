@@ -102,11 +102,34 @@ impl BktParams {
 }
 
 /// Actualización bayesiana estándar BKT (pura, sin mutar externo).
+///
+/// **Contrato NaN gemelo de `grafito-profile::bkt_update`** (duplicado a
+/// propósito para no crear ciclo pedagogy→profile): entradas no finitas caen a
+/// defaults (`p=0.3`, `guess=0.2`, `slip=0.1`, `learn=0.3`) y la salida
+/// SIEMPRE es finita y ∈ [0,1]. Antes `clamp` dejaba pasar NaN (con
+/// `p_learn = NaN`, posible por struct literal con campos `pub`) y la función
+/// retornaba NaN — mismo nombre y firma, contrato distinto al gemelo.
 pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
-    let p = p_known.clamp(0.0, 1.0);
-    let guess = params.p_guess.clamp(0.0, 1.0);
-    let slip = params.p_slip.clamp(0.0, 1.0);
-    let learn = params.p_learn.clamp(0.0, 1.0);
+    let p = if p_known.is_finite() {
+        p_known.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
+    let guess = if params.p_guess.is_finite() {
+        params.p_guess.clamp(0.0, 1.0)
+    } else {
+        0.2
+    };
+    let slip = if params.p_slip.is_finite() {
+        params.p_slip.clamp(0.0, 1.0)
+    } else {
+        0.1
+    };
+    let learn = if params.p_learn.is_finite() {
+        params.p_learn.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
     let posterior = if correct {
         let num = p * (1.0 - slip);
         let denom = num + (1.0 - p) * guess;
@@ -132,10 +155,23 @@ pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
 /// Probabilidad predicha de acierto dado `p_known` y `params`.
 ///
 /// `P(correct) = p_known*(1-p_slip) + (1-p_known)*p_guess`
+/// NaN-safe con los mismos defaults que [`bkt_update`] (salida finita ∈ [0,1]).
 pub fn predict_correct_prob(p_known: f64, params: &BktParams) -> f64 {
-    let p = p_known.clamp(0.0, 1.0);
-    let guess = params.p_guess.clamp(0.0, 1.0);
-    let slip = params.p_slip.clamp(0.0, 1.0);
+    let p = if p_known.is_finite() {
+        p_known.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
+    let guess = if params.p_guess.is_finite() {
+        params.p_guess.clamp(0.0, 1.0)
+    } else {
+        0.2
+    };
+    let slip = if params.p_slip.is_finite() {
+        params.p_slip.clamp(0.0, 1.0)
+    } else {
+        0.1
+    };
     let prob = p * (1.0 - slip) + (1.0 - p) * guess;
     prob.clamp(0.0, 1.0)
 }
@@ -152,6 +188,12 @@ pub fn predict_correct_prob(p_known: f64, params: &BktParams) -> f64 {
 /// - Retorna nuevos `BktParams` clonados con solo `p_learn` modificado.
 /// - **No usar como sustituto de EM**; es atajo online sin E-step.
 ///
+/// **Contrato NaN gemelo de [`bkt_update`]**: `tasa_acierto` o `p_learn` no
+/// finitos caen a defaults (`rate=0.5`, `learn=0.3`) y la salida SIEMPRE es
+/// finita ∈ [0.05, 0.95]. Antes `p_learn = NaN` (posible por struct literal
+/// con campos `pub`) pasaba por `clamp` sin filtro — `clamp` NO filtra NaN —
+/// y la función retornaba `p_learn = NaN`.
+///
 /// TODO(demo-vs-real): reemplazar por `fit_params_em` cuando haya historial
 /// offline suficiente.
 pub fn ajuste_heuristico_p_learn(params: &BktParams, tasa_acierto: f64) -> BktParams {
@@ -160,7 +202,12 @@ pub fn ajuste_heuristico_p_learn(params: &BktParams, tasa_acierto: f64) -> BktPa
     } else {
         0.5
     };
-    let new_learn = (params.p_learn * 0.3 + rate * 0.2 + 0.15).clamp(0.05, 0.95);
+    let learn = if params.p_learn.is_finite() {
+        params.p_learn.clamp(0.0, 1.0)
+    } else {
+        0.3
+    };
+    let new_learn = (learn * 0.3 + rate * 0.2 + 0.15).clamp(0.05, 0.95);
     let mut out = params.clone();
     out.p_learn = new_learn;
     out
@@ -645,12 +692,89 @@ mod tests {
     }
 
     #[test]
+    fn ajuste_heuristico_p_learn_nan_no_fuga() {
+        // Fuga NaN tipo `clamp`: `p_learn = NaN` (posible por struct literal
+        // con campos `pub`) pasaba por `.clamp(0.05, 0.95)` sin filtro — clamp
+        // NO filtra NaN — y la función retornaba `p_learn = NaN`. Ahora el
+        // contrato es gemelo al de `bkt_update`: entradas no finitas caen a
+        // defaults (`learn=0.3`, `rate=0.5`) y la salida SIEMPRE es finita.
+        let nan = f64::NAN;
+        let params_nan = BktParams {
+            p_init: nan,
+            p_learn: nan,
+            p_guess: nan,
+            p_slip: nan,
+        };
+        for tasa in [0.0_f64, 0.5, 1.0, nan, f64::INFINITY, f64::NEG_INFINITY] {
+            let out = ajuste_heuristico_p_learn(&params_nan, tasa);
+            assert!(out.p_learn.is_finite(), "p_learn no finito con tasa {tasa}");
+            assert!(
+                (0.05..=0.95).contains(&out.p_learn),
+                "p_learn fuera de rango: {}",
+                out.p_learn
+            );
+        }
+        // Valor exacto: learn default 0.3 → 0.3*0.3 + 0.5*0.2 + 0.15 = 0.34.
+        let out = ajuste_heuristico_p_learn(&params_nan, 0.5);
+        assert!((out.p_learn - 0.34).abs() < 1e-12);
+        // El resto de los campos se clona sin tocar.
+        assert!(out.p_init.is_nan());
+    }
+
+    #[test]
     fn bkt_update_monotono() {
         let params = BktParams::default();
         let up = bkt_update(0.3, true, &params);
         assert!(up > 0.3);
         let down = bkt_update(up, false, &params);
         assert!(down < up);
+    }
+
+    #[test]
+    fn bkt_update_contracto_nan_y_extremos_paridad() {
+        // Contrato NaN compartido con el gemelo `grafito-profile::bkt`
+        // (duplicado a propósito para no crear ciclo; ver doc de `bkt_update`).
+        // Mismos casos de entrada que
+        // `grafito-profile::bkt::tests::bkt_update_contracto_nan_y_extremos`:
+        // entradas no finitas caen a defaults (p=0.3, guess=0.2, slip=0.1,
+        // learn=0.3) y la salida SIEMPRE es finita y ∈ [0,1]. Antes de igualar
+        // contratos, `p_learn = NaN` retornaba NaN (clamp no filtra NaN).
+        let nan = f64::NAN;
+        let params_nan = BktParams {
+            p_init: nan,
+            p_learn: nan,
+            p_guess: nan,
+            p_slip: nan,
+        };
+        let default = BktParams::default();
+        let casos: [(f64, bool, &BktParams, f64); 5] = [
+            (nan, true, &default, 0.7609756097560976),
+            (nan, false, &default, 0.3355932203389831),
+            (0.5, true, &params_nan, 0.8727272727272727),
+            (2.0, true, &default, 1.0),
+            (-1.0, false, &default, 0.3),
+        ];
+        for (p_known, correct, params, esperado) in casos {
+            let got = bkt_update(p_known, correct, params);
+            assert!(got.is_finite(), "salida no finita: {got}");
+            assert!((0.0..=1.0).contains(&got), "salida fuera de [0,1]: {got}");
+            assert!(
+                (got - esperado).abs() < 1e-9,
+                "paridad rota: p_known={p_known} correct={correct} → {got}, esperado {esperado}"
+            );
+        }
+        // Propiedad: ninguna combinación de basura produce NaN/inf o fuga de rango.
+        for p_known in [nan, f64::INFINITY, f64::NEG_INFINITY, -5.0, 5.0] {
+            for correct in [true, false] {
+                let got = bkt_update(p_known, correct, &params_nan);
+                assert!(got.is_finite() && (0.0..=1.0).contains(&got), "{got}");
+                let pred = predict_correct_prob(p_known, &params_nan);
+                assert!(
+                    pred.is_finite() && (0.0..=1.0).contains(&pred),
+                    "predict NaN-unsafe: {pred}"
+                );
+            }
+        }
     }
 
     #[test]

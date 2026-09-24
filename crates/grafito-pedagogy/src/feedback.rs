@@ -298,10 +298,139 @@ fn has_power_marker(s: &str) -> bool {
         || s.contains('√')
 }
 
+/// Clave "sin notación": minúsculas canónicas sin `^`/`**`/`²`/`³`
+/// (`x^2`, `x**2`, `x²` → `x2`). Dos textos con la misma clave difieren solo
+/// en notación. Pura, sin regex ni `unwrap`.
+fn notation_key(s: &str) -> String {
+    canonical_symbolic(s).replace(['^'], "")
+}
+
+/// Funciones elementales presentes en una expresión canónica.
+fn funciones_elementales(s: &str) -> Vec<&'static str> {
+    ["sin", "cos", "tan", "exp", "ln", "log", "sqrt"]
+        .into_iter()
+        .filter(|f| s.contains(f))
+        .collect()
+}
+
+/// ¿El texto contiene un patrón real `(a+b)·c`: un grupo `(...)` con `+` que
+/// se MULTIPLICA (explícito `*`, implícito letra/dígito/`(` tras el `)`)?
+///
+/// `(x+1)^2` NO cuenta (la potencia no es propiedad distributiva) — con el
+/// chequeo viejo (`prompt contiene '('` y `'+'`) cualquier error de un
+/// enunciado con paréntesis se etiquetaba "propiedad distributiva" y robaba
+/// el diagnóstico de Sign/Fraction/ChainRule/Concept. Pura, sin regex.
+fn tiene_distributiva_multiplicada(s: &str) -> bool {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '(' {
+            let mut depth = 0i32;
+            let mut close: Option<usize> = None;
+            for (j, c) in chars.iter().enumerate().skip(i) {
+                match c {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            close = Some(j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(cierre) = close {
+                let interior: String = chars[i + 1..cierre].iter().collect();
+                if interior.contains('+') {
+                    let mut k = cierre + 1;
+                    while k < chars.len() && (chars[k] == ' ' || chars[k] == '\t') {
+                        k += 1;
+                    }
+                    let multiplica = match chars.get(k) {
+                        Some('*') | Some('(') => true,
+                        Some(c) if c.is_ascii_digit() => true,
+                        // Implícito sin espacio: `(a+b)c`.
+                        Some(c) if k == cierre + 1 && c.is_ascii_alphabetic() => true,
+                        _ => false,
+                    };
+                    if multiplica {
+                        return true;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// ¿Mismos términos con los signos cambiados? (`2*x-1` vs `1-2*x`).
+///
+/// Solo textos simples sin paréntesis: tokeniza en términos firmados y exige
+/// igualdad del multiset de términos SIN signo con diferencia EN los signos —
+/// el error de signo clásico al distribuir. Pura, sin regex ni `unwrap`.
+fn terminos_con_signos_opuestos(sol: &str, ans: &str) -> bool {
+    fn terminos_firmados(s: &str) -> Option<Vec<(bool, String)>> {
+        if s.contains('(') || s.contains(')') {
+            return None;
+        }
+        let mut out: Vec<(bool, String)> = Vec::new();
+        let mut positivo = true;
+        let mut actual = String::new();
+        for c in s.chars() {
+            match c {
+                '+' | '-' => {
+                    let t = actual.trim().to_lowercase();
+                    if !t.is_empty() {
+                        out.push((positivo, t));
+                    }
+                    actual.clear();
+                    positivo = c == '+';
+                }
+                _ => actual.push(c),
+            }
+        }
+        let t = actual.trim().to_lowercase();
+        if !t.is_empty() {
+            out.push((positivo, t));
+        }
+        if out.len() < 2 {
+            return None;
+        }
+        Some(out)
+    }
+    let (Some(a), Some(b)) = (terminos_firmados(sol), terminos_firmados(ans)) else {
+        return false;
+    };
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut sin_signo_a: Vec<&str> = a.iter().map(|(_, t)| t.as_str()).collect();
+    let mut sin_signo_b: Vec<&str> = b.iter().map(|(_, t)| t.as_str()).collect();
+    sin_signo_a.sort_unstable();
+    sin_signo_b.sort_unstable();
+    if sin_signo_a != sin_signo_b {
+        return false;
+    }
+    let mut firmados_a = a.clone();
+    let mut firmados_b = b.clone();
+    firmados_a.sort_by(|x, y| x.1.cmp(&y.1).then(x.0.cmp(&y.0)));
+    firmados_b.sort_by(|x, y| x.1.cmp(&y.1).then(x.0.cmp(&y.0)));
+    firmados_a != firmados_b
+}
+
+/// Diagnóstico de misconception (10 tipadas) por SEÑALES ESTRICTAS con
+/// prioridad fija. El orden documentado se respeta y **solo se diagnostica
+/// cada variante cuando hay evidencia de esa variante** (antes `Distributive`
+/// y `Notation` se robaban el diagnóstico con señales toscas):
+///
+/// `Sign → Fraction → Distributive → ChainRule → Domain → Notation →
+///  Exponent → Algebra → Concept`
 fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -> Misconception {
     // Orden: Sign, Fraction, Distributive, ChainRule, Domain, Notation, Exponent, Algebra, Concept
 
-    // Sign: '-' distinto (contenido o signo numérico)
+    // Sign: '-' distinto (contenido o signo numérico o términos firmados al revés)
     let sol_has_minus = sol_norm.contains('-');
     let ans_has_minus = ans_norm.contains('-');
     if sol_has_minus != ans_has_minus {
@@ -311,6 +440,9 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
         if sv != 0.0 && av != 0.0 && sv.signum() != av.signum() {
             return Misconception::Sign;
         }
+    }
+    if terminos_con_signos_opuestos(&exercise.solution, answer) {
+        return Misconception::Sign;
     }
 
     // Fraction: ambas contienen '/' pero valores difieren
@@ -331,9 +463,14 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
     let ans_low = answer.to_lowercase();
     let prompt_low = exercise.prompt.to_lowercase();
 
-    // Distributive: prompt indica (a+b)*c y respuesta errónea (solo prompt, para no confundir con chain rule)
-    let has_distributive_context = prompt_low.contains('(') && prompt_low.contains('+');
-    if has_distributive_context {
+    // Distributive: patrón real `(a+b)·c` (paréntesis multiplicado) en el
+    // prompt, o respuesta que expandió sin paréntesis
+    // (`a*c+b*c`) contra solución con paréntesis. Solo prompt (no solución):
+    // una solución puede ser legítimamente un producto `(x+1)*sin(x)` sin que
+    // el error del alumno sea distributivo (p. ej. olvidar la derivada de
+    // afuera). El prompt con `(x+1)^2` ya NO dispara nada: la potencia no es
+    // distributiva.
+    if tiene_distributiva_multiplicada(&prompt_low) {
         return Misconception::Distributive;
     }
     if ans_norm.contains('+')
@@ -344,10 +481,11 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
         return Misconception::Distributive;
     }
 
-    // ChainRule: solución contiene sin/cos y respuesta no
-    let sol_has_trig = sol_low.contains("cos") || sol_low.contains("sin");
-    let ans_has_trig = ans_low.contains("cos") || ans_low.contains("sin");
-    if sol_has_trig && !ans_has_trig {
+    // ChainRule: la solución compone funciones elementales que la respuesta
+    // dejó afuera (derivar sin(x²) y quedarse con 2x: falta cos).
+    let sol_funcs = funciones_elementales(&canonical_symbolic(&exercise.solution));
+    let ans_funcs = funciones_elementales(&canonical_symbolic(answer));
+    if !sol_funcs.is_empty() && sol_funcs.iter().any(|f| !ans_funcs.contains(f)) {
         return Misconception::ChainRule;
     }
 
@@ -364,39 +502,27 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
         return Misconception::Domain;
     }
 
-    // Notation: diferencias de notación (^, ², sen vs sin, sqrt vs √)
-    let notation_mismatch = (sol_low.contains('^')
-        && !ans_low.contains('^')
-        && !ans_low.contains("**")
-        && !ans_low.contains('²'))
-        || (!sol_low.contains('^') && ans_low.contains('^'))
+    // Notation: mismos términos con distinta notación (^ vs ², sin vs sen,
+    // sqrt vs √). Se exige que las claves "sin notación" sean IGUALES: con el
+    // chequeo viejo (`solución con ^2` y `respuesta con un "2" sin ^`),
+    // "21" contra "x^2" daba "notación".
+    let notation_diff = sol_low.contains('^') != ans_low.contains('^')
         || (sol_low.contains("sin") && ans_low.contains("sen"))
-        || (sol_low.contains('²') && !ans_low.contains('²') && !ans_low.contains('^'))
-        || (sol_low.contains("√") && ans_low.contains("sqrt"))
-        || (sol_low.contains("sqrt") && ans_low.contains('√'));
-    if notation_mismatch {
-        return Misconception::Notation;
-    }
-    // Si ambas son numéricamente cercanas pero strings difieren solo por notación menor, ya habría sido correct.
-    // Detectamos caso x^2 vs x2 (falta ^)
-    if sol_low.contains("x^2") && ans_low == "x2" {
-        return Misconception::Notation;
-    }
-    if sol_low == "x^2" && ans_low == "x2" {
-        return Misconception::Notation;
-    }
-    // Caso genérico: solución con ^ y respuesta sin ^ pero misma base
-    if sol_norm.contains("^2") && ans_norm.contains("2") && !ans_norm.contains('^') {
-        // si no fue detectado antes, considéralo notación
-        // solo si no hay otra misconception más específica
-        // lo dejamos como Notation si no es distributive
+        || (sol_low.contains("sen") && ans_low.contains("sin"))
+        || sol_low.contains('²') != ans_low.contains('²')
+        || (sol_low.contains("sqrt") && ans_low.contains('√'))
+        || (sol_low.contains('√') && ans_low.contains("sqrt"));
+    if notation_diff && notation_key(&exercise.solution) == notation_key(answer) {
         return Misconception::Notation;
     }
 
-    // Exponent: ambas con marcadores de potencia/raíz pero distintas
+    // Exponent: ambas con marcadores de potencia/raíz pero distinto exponente
     // (ej. x^2 vs x^3, sqrt(4) vs sqrt(9)). No roba casos de Notation
-    // porque exige marcador en ambas.
-    if has_power_marker(&sol_low) && has_power_marker(&ans_low) {
+    // (exige marcador en ambas y claves distintas).
+    if has_power_marker(&sol_low)
+        && has_power_marker(&ans_low)
+        && notation_key(&exercise.solution) != notation_key(answer)
+    {
         return Misconception::Exponent;
     }
 
@@ -799,6 +925,133 @@ mod tests {
         assert_eq!(Verdict::Equivalent.etiqueta(), "equivalente");
         assert_eq!(Verdict::Partial.etiqueta(), "parcial");
         assert_eq!(Verdict::Incorrect.etiqueta(), "incorrecta");
+    }
+
+    #[test]
+    fn regresion_diez_misconceptions_diagnostico_por_senal_estricta() {
+        // Regresión FIX 5: los 10 diagnósticos con un caso por variante. Los
+        // prompts traen un paréntesis NO multiplicado (`(x+1)^2`, `(a+b):`) a
+        // propósito: el chequeo viejo `prompt contiene '(' && '+'` devolvía
+        // `Distributive` para cualquiera de estos casos y robaba el
+        // diagnóstico de Sign/ChainRule/Domain/Notation/Exponent/Algebra/
+        // Concept (rojo-hoy marcado abajo).
+        let casos: [(Misconception, &str, &str, &str, bool); 10] = [
+            // (esperado, prompt, solución, respuesta, ¿rojo-hoy?)
+            // Sign: términos firmados al revés — hoy: "propiedad distributiva".
+            (
+                Misconception::Sign,
+                "Desarrollá (x+1)^2 y restá 2*x",
+                "2*x-1",
+                "1-2*x",
+                true,
+            ),
+            // Fraction: sumó numeradores y denominadores por separado
+            // (señal Fraction precede al robo — verde hoy, se conserva de guarda).
+            (
+                Misconception::Fraction,
+                "Sumá (1/2)+(1/3)",
+                "5/6",
+                "2/5",
+                false,
+            ),
+            // Distributive: patrón real (a+b)·c (verde hoy: guarda del caso original).
+            (Misconception::Distributive, "(2+3)*4", "20", "14", false),
+            // ChainRule: se olvidó la derivada de afuera (falta cos) — hoy: Distributive.
+            (
+                Misconception::ChainRule,
+                "Derivá (x+1)^2·sin(x) en x=0",
+                "2*(x+1)*sin(x)+(x+1)^2*cos(x)",
+                "2*(x+1)*sin(x)",
+                true,
+            ),
+            // Domain: dio un número donde no existe — hoy: Distributive.
+            (
+                Misconception::Domain,
+                "Analizá (1/x)+(x+1) en x=0",
+                "no existe",
+                "0",
+                true,
+            ),
+            // Notation: x^2 escrito x2 — hoy: Distributive.
+            (
+                Misconception::Notation,
+                "Escribí con notación (a+b): x al cuadrado",
+                "x^2",
+                "x2",
+                true,
+            ),
+            // Exponent: confundió el exponente — hoy: Distributive.
+            (
+                Misconception::Exponent,
+                "Potenciá (x+1)^2 vs (x+1)^3",
+                "x^2",
+                "x^3",
+                true,
+            ),
+            // Algebra: despeje erróneo — hoy: Distributive.
+            (
+                Misconception::Algebra,
+                "Despejá x en (x+1)+x=5",
+                "x=2",
+                "x=3",
+                true,
+            ),
+            // Concept: valor cualquiera sin error de los anteriores — hoy: Distributive.
+            (
+                Misconception::Concept,
+                "Deriva (x+1)^2 en x=1",
+                "4",
+                "5",
+                true,
+            ),
+            // None: respuesta exacta (verde hoy: camino correcto).
+            (Misconception::None, "Calculá (2+3)*4", "20", "20", false),
+        ];
+        assert_eq!(casos.len(), 10, "un caso por cada Misconception");
+        for (esperado, prompt, sol, ans, _rojo_hoy) in casos {
+            let ex = mk_ex(prompt, sol);
+            let fb = FeedbackEngine.assess(&ex, ans);
+            assert_eq!(
+                fb.misconception, esperado,
+                "diagnóstico mal para prompt '{prompt}' sol '{sol}' ans '{ans}'"
+            );
+            if esperado == Misconception::None {
+                assert!(fb.correct);
+            } else {
+                assert!(!fb.correct, "caso {esperado:?} debe ser incorrecto");
+            }
+        }
+    }
+
+    #[test]
+    fn notation_no_roba_casos_con_digitos_sueltos() {
+        // Regresión FIX 5 (señal tosca de Notation): "sol contiene ^2 y la
+        // respuesta contiene un 2 sin ^" etiquetaba "notación" a "21" contra
+        // "x^2" y a cualquier número que contuviera un 2.
+        let ex = mk_ex("Escribí x al cuadrado", "x^2");
+        let fb = FeedbackEngine.assess(&ex, "21");
+        assert_ne!(
+            fb.misconception,
+            Misconception::Notation,
+            "21 vs x^2 no es notación"
+        );
+        // La notación real (misma clave sin ^) sí se detecta.
+        let fb2 = FeedbackEngine.assess(&ex, "x2");
+        assert_eq!(fb2.misconception, Misconception::Notation);
+    }
+
+    #[test]
+    fn distributiva_exige_parentesis_multiplicado() {
+        // Regresión FIX 5: `(a+b)` solo con potencia detrás NO es distributiva.
+        assert!(super::tiene_distributiva_multiplicada("(2+3)*4"));
+        assert!(super::tiene_distributiva_multiplicada("despejá (x+1)(x-1)"));
+        assert!(!super::tiene_distributiva_multiplicada(
+            "deriva (x+1)^2 en x=1"
+        ));
+        assert!(!super::tiene_distributiva_multiplicada("sumá (1/2)+(1/3)"));
+        assert!(!super::tiene_distributiva_multiplicada(
+            "analizá (1/x)+(x+1) en x=0"
+        ));
     }
 
     #[test]

@@ -275,7 +275,7 @@ impl Curriculum {
         ]
     }
 
-    /// UTN AM2 — 7 LOs.
+    /// UTN AM2 — 9 LOs (incluye EDP y Fourier: huecos que el CAS ya cubre).
     pub fn utn_am2() -> Vec<LearningObjective> {
         vec![
             Self::lo(
@@ -360,10 +360,36 @@ impl Curriculum {
                 &["green", "stokes", "gauss", "teorema", "integral"],
                 6.0,
             ),
+            Self::lo(
+                "am2-edp",
+                "EDP",
+                "Ecuaciones en derivadas parciales, clasificación y separación de variables",
+                Some(UTNProgram::AM2),
+                14,
+                &["am2-edo", "am2-multivariable"],
+                &[
+                    "edp",
+                    "derivadas parciales",
+                    "pde",
+                    "clasificacion",
+                    "separable",
+                ],
+                8.0,
+            ),
+            Self::lo(
+                "am2-fourier",
+                "Series de Fourier",
+                "Series ortogonales, coeficientes y aproximación",
+                Some(UTNProgram::AM2),
+                14,
+                &["am2-series"],
+                &["fourier", "serie de fourier", "ortogonal", "aproximacion"],
+                6.0,
+            ),
         ]
     }
 
-    /// UTN Álgebra — 6 LOs.
+    /// UTN Álgebra — 7 LOs.
     pub fn utn_algebra() -> Vec<LearningObjective> {
         vec![
             Self::lo(
@@ -535,7 +561,7 @@ impl Curriculum {
         ]
     }
 
-    /// Secundaria — 11 LOs (incluye `sec-pitagoras`).
+    /// Secundaria — 12 LOs (incluye `sec-pitagoras`).
     pub fn secondary() -> Vec<LearningObjective> {
         vec![
             Self::lo(
@@ -682,7 +708,61 @@ impl Curriculum {
         ]
     }
 
-    /// Todos los LOs (primaria + secundaria + UTN).
+    /// UTN avanzado (análisis complejo / computación simbólica) — 3 LOs.
+    ///
+    /// Huecos del currículum que el CAS ya resuelve (`grafito-geometry`:
+    /// `Residue`, `GroebnerOrdered`/`Eliminate`, `LaplaceDerivative`/
+    /// `LaplaceIntegral` vía `steps_for_op`) y que hasta ahora ningún LO
+    /// referenciaba. `program: None` **honesto**: `UTNProgram` hoy solo tiene
+    /// AM1/AM2/Álgebra/Probabilidad y agregar variantes rompería matches
+    /// exhaustivos en crates hermanos (fuera de la propiedad de esta oleada).
+    pub fn avanzados() -> Vec<LearningObjective> {
+        vec![
+            Self::lo(
+                "am3-residuos",
+                "Teorema de los residuos",
+                "Función compleja, singularidades, teorema de los residuos y de la argumentación",
+                None,
+                15,
+                &["am2-series", "am1-int"],
+                &[
+                    "residuo",
+                    "residuos",
+                    "contorno",
+                    "complejo",
+                    "singularidad",
+                ],
+                6.0,
+            ),
+            Self::lo(
+                "comp-groebner",
+                "Bases de Gröbner",
+                "Ideal polinomial, criterio de eliminación y órdenes monomiales",
+                None,
+                15,
+                &["alg-matrices"],
+                &["groebner", "gröbner", "buchberger", "eliminacion", "ideal"],
+                6.0,
+            ),
+            Self::lo(
+                "comp-laplace",
+                "Transformada de Laplace",
+                "Transformada directa e inversa, corrimientos y cálculo operacional",
+                None,
+                15,
+                &["am2-edo"],
+                &[
+                    "laplace",
+                    "transformada de laplace",
+                    "transformada",
+                    "operacional",
+                ],
+                6.0,
+            ),
+        ]
+    }
+
+    /// Todos los LOs (primaria + secundaria + UTN + avanzados).
     pub fn all() -> Vec<LearningObjective> {
         let mut v = Vec::new();
         v.extend(Self::primary());
@@ -691,6 +771,7 @@ impl Curriculum {
         v.extend(Self::utn_am2());
         v.extend(Self::utn_algebra());
         v.extend(Self::utn_probabilidad());
+        v.extend(Self::avanzados());
         v
     }
 
@@ -853,10 +934,11 @@ mod tests {
         assert_eq!(Curriculum::primary().len(), 5);
         assert_eq!(Curriculum::secondary().len(), 12);
         assert_eq!(Curriculum::utn_am1().len(), 8);
-        assert_eq!(Curriculum::utn_am2().len(), 7);
+        assert_eq!(Curriculum::utn_am2().len(), 9);
         assert_eq!(Curriculum::utn_algebra().len(), 7);
         assert_eq!(Curriculum::utn_probabilidad().len(), 6);
-        assert_eq!(Curriculum::all().len(), 45);
+        assert_eq!(Curriculum::avanzados().len(), 3);
+        assert_eq!(Curriculum::all().len(), 50);
     }
     #[test]
     fn get_and_prereqs() {
@@ -926,10 +1008,42 @@ mod tests {
     }
 
     #[test]
-    fn cuarenta_y_cinco_los_dag_valido() {
-        // 45 LOs: 5 primaria + 12 secundaria + 8 AM1 + 7 AM2 + 7 Álgebra + 6 Prob.
+    fn los_por_grupo_coinciden_con_los_docs() {
+        // Regresión FIX 11: los docs decían "Secundaria — 11 LOs" y
+        // "UTN Álgebra — 6 LOs" con 12 y 7 reales. El test fija los conteos
+        // para que docs y código no vuelvan a divergir.
+        assert_eq!(Curriculum::primary().len(), 5, "doc: Primaria — 5 LOs");
+        assert_eq!(
+            Curriculum::secondary().len(),
+            12,
+            "doc: Secundaria — 12 LOs"
+        );
+        assert_eq!(Curriculum::utn_am1().len(), 8, "doc: UTN AM1 — 8 LOs");
+        assert_eq!(Curriculum::utn_am2().len(), 9, "doc: UTN AM2 — 9 LOs");
+        assert_eq!(
+            Curriculum::utn_algebra().len(),
+            7,
+            "doc: UTN Álgebra — 7 LOs"
+        );
+        assert_eq!(
+            Curriculum::utn_probabilidad().len(),
+            6,
+            "doc: UTN Probabilidad — 6 LOs"
+        );
+        assert_eq!(
+            Curriculum::avanzados().len(),
+            3,
+            "doc: UTN avanzado — 3 LOs"
+        );
+    }
+
+    #[test]
+    fn cincuenta_los_dag_valido() {
+        // 50 LOs: 5 primaria + 12 secundaria + 8 AM1 + 9 AM2 + 7 Álgebra +
+        // 6 Prob. + 3 avanzados (EDP/Fourier/residuos/Gröbner/Laplace ya
+        // cubiertos por el CAS: ver `avanzados`).
         let todos = Curriculum::all();
-        assert_eq!(todos.len(), 45, "el currículum debe tener 45 LOs");
+        assert_eq!(todos.len(), 50, "el currículum debe tener 50 LOs");
         // Sin IDs duplicados.
         let mut vistos = std::collections::HashSet::new();
         for lo in &todos {
@@ -955,7 +1069,7 @@ mod tests {
         }
         // Orden topológico sin ciclos y respeta aristas.
         let orden = Curriculum::topological_order().expect("sin ciclos");
-        assert_eq!(orden.len(), 45);
+        assert_eq!(orden.len(), 50);
         let mut pos: BTreeMap<String, usize> = BTreeMap::new();
         for (i, lo) in orden.iter().enumerate() {
             pos.insert(lo.id.clone(), i);
@@ -1041,5 +1155,38 @@ mod tests {
             .any(|lo| lo.id == "sec-fractales"));
         let prereqs = Curriculum::prerequisites_for("alg-subespacios");
         assert!(prereqs.iter().any(|p| p.id == "alg-vectores"));
+    }
+
+    #[test]
+    fn los_nuevos_cubren_huecos_del_cas() {
+        // Huecos: el CAS ya resuelve EDP, Fourier, residuos, Gröbner y
+        // Laplace (`grafito-geometry::cas_steps::steps_for_op`) y hasta ahora
+        // ningún LO los referenciaba. Cada uno con level_min, prerequisitos
+        // (DAG) y tags.
+        for (concepto, id, level_min, prereq) in [
+            ("edp", "am2-edp", 14, "am2-edo"),
+            ("fourier", "am2-fourier", 14, "am2-series"),
+            ("residuos", "am3-residuos", 15, "am2-series"),
+            ("groebner", "comp-groebner", 15, "alg-matrices"),
+            ("laplace", "comp-laplace", 15, "am2-edo"),
+        ] {
+            let los = Curriculum::find_for_concept(concepto);
+            assert!(
+                los.iter().any(|lo| lo.id == id),
+                "find_for_concept({concepto:?}) no devuelve {id}"
+            );
+            let lo = Curriculum::get(id).expect("LO nuevo existe");
+            assert_eq!(lo.level_min, level_min, "{id} level_min");
+            assert!(!lo.requires.is_empty(), "{id} sin prerequisitos");
+            assert!(
+                lo.requires.iter().any(|r| r == prereq),
+                "{id} debería requerir {prereq}"
+            );
+            assert!(!lo.tags.is_empty(), "{id} sin tags");
+            assert!(!lo.description.trim().is_empty(), "{id} sin descripción");
+        }
+        // El DAG (Kahn) sigue cerrando con los 5 adentro.
+        let orden = Curriculum::topological_order().expect("sin ciclos");
+        assert_eq!(orden.len(), 50);
     }
 }

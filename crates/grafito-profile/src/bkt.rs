@@ -238,18 +238,33 @@ pub fn bkt_params_for_branch(branch_id: &str) -> BktParams {
     }
 }
 
-/// IDs de los 45 LOs del currículum cubiertos por [`bkt_params_for_lo_opt`].
+/// IDs de los 50 LOs del currículum cubiertos por [`bkt_params_for_lo_opt`].
 ///
 /// Espejo manual de `Curriculum::all()` en
 /// `grafito-pedagogy/src/curriculum.rs`: 5 primaria, 12 secundaria, 8 AM1,
-/// 7 AM2, 7 Álgebra y 6 Probabilidad = 45 en total (ver test `all_counts`
-/// allí).
+/// 9 AM2 (incluye `am2-edp` y `am2-fourier`), 7 Álgebra, 6 Probabilidad y 3
+/// avanzados (`am3-residuos`, `comp-groebner`, `comp-laplace`) = 50 en total
+/// (ver test `all_counts` allí).
 /// `grafito-profile` no depende de `grafito-pedagogy` (hoja sin ciclos), así
 /// que la cobertura se verifica contra esta lista: si el currículum añade,
 /// renombra o quita un LO hay que actualizar esta constante Y el `match` de
-/// [`bkt_params_for_lo_opt`]; el test `all_los_covered_against_mirror` falla
-/// en caso contrario (longitud + `is_some` por ID).
-pub const ALL_LO_IDS: [&str; 45] = [
+/// [`bkt_params_for_lo_opt`].
+///
+/// **Honesto sobre lo que los tests de este crate verifican**:
+/// `all_lo_ids_mirror_has_50_entries` y `all_los_covered_against_mirror`
+/// iteran `ALL_LO_IDS` contra sí mismos — chequean consistencia *interna* del
+/// espejo (longitud, sin duplicados, `is_some` por ID, params válidos), NO
+/// contra `Curriculum::all()`. Si el currículum cambia un LO, estos tests
+/// **no** fallan. El cruce real vive en [`los_without_calibration`]: función
+/// pura que recibe los IDs del currículum (el caller que vea ambos) y
+/// devuelve los que quedaron sin calibración. **Dónde llamarlo**: un test en
+/// un crate que converja `grafito-pedagogy` + `grafito-profile` (p. ej.
+/// `grafito-app` o `grafito-command`, que ya dependen de ambos):
+/// ```ignore
+/// let ids: Vec<&str> = Curriculum::all().iter().map(|lo| lo.id.as_str()).collect();
+/// assert!(grafito_profile::los_without_calibration(&ids).is_empty());
+/// ```
+pub const ALL_LO_IDS: [&str; 50] = [
     "pri-conteo",
     "pri-fracc-vis",
     "pri-perim-area",
@@ -282,6 +297,8 @@ pub const ALL_LO_IDS: [&str; 45] = [
     "am2-int-multi",
     "am2-campos",
     "am2-teoremas",
+    "am2-edp",
+    "am2-fourier",
     "alg-vectores",
     "alg-rectas-planos",
     "alg-matrices",
@@ -295,18 +312,21 @@ pub const ALL_LO_IDS: [&str; 45] = [
     "prob-inferencia",
     "prob-regresion",
     "prob-muestreo",
+    "am3-residuos",
+    "comp-groebner",
+    "comp-laplace",
 ];
 
-/// Mapeo fino por LO individual (45 LOs) con distinción conocido/desconocido.
+/// Mapeo fino por LO individual (50 LOs) con distinción conocido/desconocido.
 ///
 /// Fuente única de verdad para [`bkt_params_for_lo`] e [`is_known_lo`]: los
-/// 45 brazos retornan `BktParams` y el `match` completo se envuelve en
+/// 50 brazos retornan `BktParams` y el `match` completo se envuelve en
 /// `Some(...)`; cualquier otro ID usa `return None` temprano. Si se añade un
 /// LO en `grafito-pedagogy/src/curriculum.rs`, añadir su brazo aquí Y su ID
 /// en [`ALL_LO_IDS`].
 ///
 /// `p_init` escala con `level_min`: primaria (1-2) → 0.40-0.35, secundaria
-/// (4-8) → 0.33-0.28, universidad (10-15) → 0.26-0.18. `p_learn`/`p_guess`
+/// (4-8) → 0.33-0.28, universidad (10-15) → 0.26-0.16. `p_learn`/`p_guess`
 /// por bloque temático; `p_slip` crece con dificultad.
 pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
     Some(match lo_id {
@@ -509,6 +529,18 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
             p_guess: 0.18,
             p_slip: 0.15,
         },
+        "am2-edp" => BktParams {
+            p_init: 0.17,
+            p_learn: 0.23,
+            p_guess: 0.18,
+            p_slip: 0.15,
+        },
+        "am2-fourier" => BktParams {
+            p_init: 0.17,
+            p_learn: 0.23,
+            p_guess: 0.18,
+            p_slip: 0.15,
+        },
 
         // Álgebra (7)
         "alg-vectores" => BktParams {
@@ -592,23 +624,61 @@ pub fn bkt_params_for_lo_opt(lo_id: &str) -> Option<BktParams> {
             p_slip: 0.13,
         },
 
+        // Avanzados (3) — análisis complejo / computación simbólica
+        "am3-residuos" => BktParams {
+            p_init: 0.16,
+            p_learn: 0.22,
+            p_guess: 0.17,
+            p_slip: 0.16,
+        },
+        "comp-groebner" => BktParams {
+            p_init: 0.16,
+            p_learn: 0.22,
+            p_guess: 0.17,
+            p_slip: 0.16,
+        },
+        "comp-laplace" => BktParams {
+            p_init: 0.16,
+            p_learn: 0.22,
+            p_guess: 0.17,
+            p_slip: 0.16,
+        },
+
         // Cualquier otro ID es desconocido para el currículum. Incluye las
         // claves legacy de perfil (`functions`/`algebra`/`geometry`/
         // `geometry3d`/`trigonometry`/`calculus`/`stats`/`complex`), que NO
         // son LOs: `bkt_params_for_lo` las resuelve vía `bkt_params_for_branch`
         // para compatibilidad con perfiles antiguos. Se usa `return` temprano
-        // para no contaminar el `Some(match ...)` que envuelve los 45 LOs.
+        // para no contaminar el `Some(match ...)` que envuelve los 50 LOs.
         _ => return None,
     })
 }
 
-/// ¿El ID corresponde a uno de los 45 LOs del currículum?
+/// ¿El ID corresponde a uno de los 50 LOs del currículum?
 ///
 /// Equivale a `bkt_params_for_lo_opt(lo_id).is_some()`. Retorna `false` para
 /// claves legacy de rama (`algebra`, `calculus`, …) aunque
 /// [`bkt_params_for_lo`] les dé parámetros: esas no son LOs.
 pub fn is_known_lo(lo_id: &str) -> bool {
     bkt_params_for_lo_opt(lo_id).is_some()
+}
+
+/// LOs **sin** calibración BKT por LO dentro de `ids` (en el mismo orden).
+///
+/// Es el cruce currículum ↔ perfil que este crate no puede hacer solo
+/// (`grafito-profile` es hoja a propósito y no ve `Curriculum`): la función
+/// viva acá, **pura y testeable**, y el caller que converja ambos crates le
+/// pasa `Curriculum::all()` y debe recibir `vec![]` (ver doc de
+/// [`ALL_LO_IDS`] para el snippet del test en `grafito-app`/`grafito-command`).
+///
+/// Un ID está "calibrado" si [`bkt_params_for_lo_opt`] devuelve `Some`. Las
+/// claves legacy de rama (`algebra`, `calculus`, …) NO son LOs y se reportan
+/// como sin calibración (honesto: no tienen parámetros por LO).
+pub fn los_without_calibration(ids: &[&str]) -> Vec<String> {
+    ids.iter()
+        .filter(|id| bkt_params_for_lo_opt(id).is_none())
+        .map(|id| (*id).to_string())
+        .collect()
 }
 
 /// Parámetros BKT por LO con fallback compatible.
@@ -730,11 +800,11 @@ mod tests {
     }
 
     #[test]
-    fn all_lo_ids_mirror_has_45_entries() {
+    fn all_lo_ids_mirror_has_50_entries() {
         // Espejo de `Curriculum::all().len()` (ver
         // `grafito-pedagogy/src/curriculum.rs::all_counts`): si el currículum
         // cambia de tamaño, actualizar `ALL_LO_IDS` + `bkt_params_for_lo_opt`.
-        assert_eq!(ALL_LO_IDS.len(), 45, "deben ser 45 LOs");
+        assert_eq!(ALL_LO_IDS.len(), 50, "deben ser 50 LOs");
         // Sin duplicados.
         let mut sorted = ALL_LO_IDS;
         sorted.sort_unstable();
@@ -748,7 +818,7 @@ mod tests {
         // Verifica por ID que cada LO del espejo tiene parámetros conocidos y
         // válidos. Falla si falta un brazo en `bkt_params_for_lo_opt` (opt
         // retornaría `None`) o si algún parámetro es inválido.
-        assert_eq!(ALL_LO_IDS.len(), 45, "deben ser 45 LOs");
+        assert_eq!(ALL_LO_IDS.len(), 50, "deben ser 50 LOs");
         for id in ALL_LO_IDS {
             assert!(
                 is_known_lo(id),
@@ -825,10 +895,78 @@ mod tests {
     }
 
     #[test]
+    fn bkt_update_contracto_nan_y_extremos_paridad() {
+        // Contrato NaN compartido con el gemelo `grafito-pedagogy::bkt`
+        // (duplicado a propósito para no crear ciclo; ver doc del módulo).
+        // Mismos casos de entrada que
+        // `grafito-pedagogy::bkt::tests::bkt_update_contracto_nan_y_extremos`:
+        // entradas no finitas caen a defaults (p=0.3, guess=0.2, slip=0.1,
+        // learn=0.3) y la salida SIEMPRE es finita y ∈ [0,1].
+        let nan = f64::NAN;
+        let params_nan = BktParams {
+            p_init: nan,
+            p_learn: nan,
+            p_guess: nan,
+            p_slip: nan,
+        };
+        let casos: [(f64, bool, &BktParams, f64); 5] = [
+            (nan, true, &BKT_DEFAULT_PARAMS, 0.7609756097560976),
+            (nan, false, &BKT_DEFAULT_PARAMS, 0.3355932203389831),
+            (0.5, true, &params_nan, 0.8727272727272727),
+            (2.0, true, &BKT_DEFAULT_PARAMS, 1.0),
+            (-1.0, false, &BKT_DEFAULT_PARAMS, 0.3),
+        ];
+        for (p_known, correct, params, esperado) in casos {
+            let got = bkt_update(p_known, correct, params);
+            assert!(got.is_finite(), "salida no finita: {got}");
+            assert!((0.0..=1.0).contains(&got), "salida fuera de [0,1]: {got}");
+            assert!(
+                (got - esperado).abs() < 1e-9,
+                "paridad rota: p_known={p_known} correct={correct} → {got}, esperado {esperado}"
+            );
+        }
+        // Propiedad: ninguna combinación de basura produce NaN/inf o fuga de rango.
+        for p_known in [nan, f64::INFINITY, f64::NEG_INFINITY, -5.0, 5.0] {
+            for correct in [true, false] {
+                let got = bkt_update(p_known, correct, &params_nan);
+                assert!(got.is_finite() && (0.0..=1.0).contains(&got), "{got}");
+            }
+        }
+    }
+
+    #[test]
     fn mastery_from_bkt_clamps_and_handles_nan() {
         assert!((mastery_from_bkt(0.7) - 0.7_f32).abs() < 1e-6);
         assert_eq!(mastery_from_bkt(f64::NAN), 0.0);
         assert_eq!(mastery_from_bkt(2.0), 1.0);
         assert_eq!(mastery_from_bkt(-1.0), 0.0);
+    }
+
+    #[test]
+    fn los_without_calibration_cruza_ids_contra_el_espejo() {
+        // El cruce currículum ↔ perfil: el caller que vea ambos pasa los IDs
+        // del currículum y debe recibir los que quedaron sin calibración.
+        // Acá se verifica la función con el espejo local (consistencia
+        // interna); el llamado real con `Curriculum::all()` vive en un test de
+        // `grafito-app`/`grafito-command` (ver doc de `ALL_LO_IDS`).
+        // Todos los LOs del espejo están calibrados → vacío.
+        assert!(los_without_calibration(&ALL_LO_IDS).is_empty());
+        // Vacío en, vacío out.
+        assert!(los_without_calibration(&[]).is_empty());
+        // Un LO conocido + uno inventado + clave legacy → solo los dos últimos.
+        let ids = ["am1-der", "no-existe", "calculus"];
+        assert_eq!(
+            los_without_calibration(&ids),
+            vec!["no-existe".to_string(), "calculus".to_string()]
+        );
+        // Los LOs nuevos (Tarea 3) también están calibrados.
+        let nuevos = [
+            "am2-edp",
+            "am2-fourier",
+            "am3-residuos",
+            "comp-groebner",
+            "comp-laplace",
+        ];
+        assert!(los_without_calibration(&nuevos).is_empty());
     }
 }

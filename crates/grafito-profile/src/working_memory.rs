@@ -31,6 +31,14 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Tope de claves distintas del conteo de misconceptions (acotado de verdad:
+/// etiquetas variables del LLM no pueden hacer crecer el mapa sin cota).
+pub const MAX_KEYS: usize = 32;
+/// Tope de chars por clave de misconception (se trunca por char, UTF-8-safe).
+pub const MAX_KEY_CHARS: usize = 64;
+/// Tope de chars del tema/concepto (se persiste en JSON: nada de strings sin cota).
+pub const MAX_TOPIC_CHARS: usize = 64;
+
 /// Memoria de trabajo de la sesión (RAM episódica).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkingMemory {
@@ -75,14 +83,16 @@ impl WorkingMemory {
     }
 
     /// Define el tema actual y actualiza `last_concept`.
+    /// Acotado a [`MAX_TOPIC_CHARS`] chars (se persiste en JSON).
     pub fn set_topic(&mut self, topic: impl Into<String>) {
         let t = topic.into();
-        let trimmed = t.trim().to_string();
+        let trimmed = t.trim();
         if trimmed.is_empty() {
             return;
         }
-        self.current_topic = Some(trimmed.clone());
-        self.last_concept = Some(trimmed);
+        let bounded: String = trimmed.chars().take(MAX_TOPIC_CHARS).collect();
+        self.current_topic = Some(bounded.clone());
+        self.last_concept = Some(bounded);
     }
 
     /// Actualiza el epoch de sesión.
@@ -95,14 +105,23 @@ impl WorkingMemory {
     /// - Incrementa `steps_tried` (saturating).
     /// - Si `misconception` no vacía, incrementa su contador (cap 255) y actualiza `last_concept`.
     /// - Si vacía o whitespace, solo cuenta el paso.
+    /// - Acotado de verdad: clave truncada a [`MAX_KEY_CHARS`] chars y máximo
+    ///   [`MAX_KEYS`] claves distintas (una clave nueva con el mapa lleno se
+    ///   descarta: `steps_tried` igual cuenta el paso).
     pub fn record_attempt(&mut self, misconception: &str) {
         self.steps_tried = self.steps_tried.saturating_add(1);
         let m = misconception.trim().to_lowercase();
         if m.is_empty() {
             return;
         }
-        // Normaliza clave: lowercase, sin espacios extra.
-        let key = m.clone();
+        // Normaliza clave: lowercase, sin espacios extra, acotada por chars.
+        let key: String = m.chars().take(MAX_KEY_CHARS).collect();
+        if !self.misconception_counts.contains_key(&key)
+            && self.misconception_counts.len() >= MAX_KEYS
+        {
+            // Mapa lleno con clave nueva: descartar (acotado, determinista).
+            return;
+        }
         let entry = self.misconception_counts.entry(key.clone()).or_insert(0);
         *entry = entry.saturating_add(1);
         self.last_concept = Some(key);
@@ -311,5 +330,47 @@ mod tests {
         let json = serde_json::to_string(&wm).expect("serialize");
         let de: WorkingMemory = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(wm, de);
+    }
+
+    #[test]
+    fn record_attempt_acota_claves_y_largo() {
+        // Regresión FIX 8: 1000 etiquetas variables del LLM no pueden hacer
+        // crecer el mapa sin cota (antes: cualquier string no vacío era clave).
+        let mut wm = WorkingMemory::new();
+        for i in 0..1000u32 {
+            wm.record_attempt(&format!("etiqueta-llm-{i}"));
+        }
+        assert!(
+            wm.misconception_counts.len() <= MAX_KEYS,
+            "mapa sin cota: {} claves",
+            wm.misconception_counts.len()
+        );
+        // Las primeras MAX_KEYS claves sobreviven (determinista: BTreeMap).
+        assert_eq!(wm.misconception_counts.len(), MAX_KEYS);
+        assert!(wm.misconception_counts.contains_key("etiqueta-llm-0"));
+        // Clave larga se trunca por chars (UTF-8-safe), no por bytes.
+        let mut wm2 = WorkingMemory::new();
+        wm2.record_attempt(&"ñ".repeat(500));
+        let key = wm2.misconception_counts.keys().next().expect("clave");
+        assert!(key.chars().count() <= MAX_KEY_CHARS);
+        // El paso se cuenta aunque la etiqueta nueva se descarte por cota.
+        assert_eq!(wm.steps_tried, 1000);
+    }
+
+    #[test]
+    fn set_topic_acota_chars() {
+        // Regresión FIX 8: el tema se persiste en JSON, nada de strings sin cota.
+        let mut wm = WorkingMemory::new();
+        wm.set_topic("á".repeat(500));
+        let topic = wm.current_topic.as_deref().expect("tema");
+        assert!(topic.chars().count() <= MAX_TOPIC_CHARS);
+        assert_eq!(
+            wm.last_concept
+                .as_deref()
+                .expect("concepto")
+                .chars()
+                .count(),
+            topic.chars().count()
+        );
     }
 }

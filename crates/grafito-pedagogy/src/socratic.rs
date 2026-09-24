@@ -14,19 +14,35 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 /// Estado del diálogo socrático.
+///
+/// `/statem`: `HeuristicQ` NO replica `SocraticFsm::attempts` (el contador
+/// vive una sola vez en el FSM). El payload redundante permitía fabricar FSMs
+/// inconsistentes (`state.attempts != fsm.attempts`) vía struct literal /
+/// `Deserialize`; eliminado para que el estado inválido no exista.
+///
+/// **Forma serde** (verificado con grep 2026-09: NADA en el workspace
+/// persiste `SocraticState`/`SocraticFsm` — el único consumidor externo,
+/// `SocraticGuardContext` de `grafito-assistant`, es `Debug + Clone` sin
+/// serde, y la config de `grafito-app` solo persiste
+/// `assistant_socratic_enabled: bool`): por eso NO hace falta `#[serde(alias)]`
+/// ni migración. Si alguien lo persiste en el futuro, la forma actual es
+/// externamente tagged — `HeuristicQ` serializa como `"HeuristicQ"` (variante
+/// unit), NO como `{"HeuristicQ":{"attempts":N}}` (payload eliminado). El
+/// test `r6e_forma_serde_del_fsm_fijada` fija esta forma para que un cambio
+/// futuro sea visible.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SocraticState {
     /// Revisión del objetivo de aprendizaje.
     Review { lo_id: String },
     /// Pregunta heurística — el estudiante debe razonar.
-    HeuristicQ { attempts: u8 },
+    HeuristicQ,
     /// Esperando respuesta del estudiante hasta un deadline.
     AwaitStudent { deadline_epoch: u64 },
     /// Rectificación de un misconception detectado.
     Rectify { misconception: String },
     /// Resumen y consolidación.
     Summarize,
-    /// Finalizado.
+    /// Finalizado. **Terminal**: ninguna transición sale de acá (`AlreadyDone`).
     Done,
 }
 
@@ -75,21 +91,60 @@ pub struct SocraticRepair {
 }
 
 impl SocraticRepair {
+    /// Redacta `= <dígito>` de un texto generado para el estudiante.
+    ///
+    /// `contains_numeric_answer` (parte del guard con `attempts < 2`) dispara
+    /// con ejemplos legítimos del scaffold como `probá con (x=1, x=2)`:
+    /// si el caller vuelve a pasar el repair por el guard, el repair se
+    /// auto-detecta como telling y entra en bucle. Se reescribe a
+    /// `(x igual a 1, x igual a 2)` — misma pista, sin marcador. Solo se usa
+    /// sobre textos generados por el scaffold (jamás sobre texto del LLM).
+    fn redactar_igual_numerico(texto: &str) -> String {
+        let mut out = String::with_capacity(texto.len());
+        let chars: Vec<char> = texto.chars().collect();
+        let mut i = 0usize;
+        while i < chars.len() {
+            if chars[i] == '=' {
+                let mut j = i + 1;
+                while j < chars.len() && (chars[j] == ' ' || chars[j] == '\t') {
+                    j += 1;
+                }
+                let neg = j < chars.len() && chars[j] == '-';
+                let k = if neg { j + 1 } else { j };
+                if k < chars.len() && chars[k].is_ascii_digit() {
+                    out.push_str(" igual a ");
+                    i += 1;
+                    continue;
+                }
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out
+    }
+
     /// Voz de Mili para el transcript: sin jerga interna.
     ///
     /// Garantiza que el turno NO contenga `GUARD`, `REPARACIÓN`, `attempts`,
     /// `can_reveal`, `Re-preguntá` ni interpolaciones degeneradas como
     /// `¿Te imaginás hola`. Pura y determinista, sin `unwrap`.
+    ///
+    /// **Auto-exento del guard** (FIX bucle de reparación): la redacción no
+    /// incluye el marcador literal `la solución` (antes
+    /// `contains_solution_marker(to_student_voice(..)) == true` →
+    /// `TellingTooEarly` otra vez si el repair volvía por el guard) y los
+    /// campos interpolados pasan por [`Self::redactar_igual_numerico`], así
+    /// `is_telling` sobre la voz devuelve `false` en cualquier estado.
     pub fn to_student_voice(&self) -> String {
+        let pregunta = Self::redactar_igual_numerico(&self.pregunta_humana);
+        let pista = Self::redactar_igual_numerico(&self.pista);
         if self.pista.trim().is_empty() {
             format!(
-                "Antes de mostrarte la solución, ¿qué forma te imaginás? {} Contame qué probaste y lo vemos juntos.",
-                self.pregunta_humana
+                "Antes de mostrarte cómo sale, ¿qué forma te imaginás? {pregunta} Contame qué probaste y lo vemos juntos."
             )
         } else {
             format!(
-                "Antes de mostrarte la solución, ¿qué forma te imaginás? {} Pista: {}",
-                self.pregunta_humana, self.pista
+                "Antes de mostrarte cómo sale, ¿qué forma te imaginás? {pregunta} Pista: {pista}"
             )
         }
     }
@@ -148,7 +203,7 @@ impl SocraticFsm {
     ///
     /// - Si ya está en `Done` → `AlreadyDone`.
     /// - Si `attempts >= 3` → transiciona a `Summarize` y retorna `TooManyAttempts`.
-    /// - En otro caso avanza a `HeuristicQ {attempts}` o mantiene `Review` → `HeuristicQ`.
+    /// - En otro caso avanza a `HeuristicQ` o mantiene `Review` → `HeuristicQ`.
     pub fn ask(&mut self) -> Result<SocraticState, GuardError> {
         if matches!(self.state, SocraticState::Done) {
             return Err(GuardError::AlreadyDone);
@@ -158,9 +213,7 @@ impl SocraticFsm {
             return Err(GuardError::TooManyAttempts);
         }
         // Si está en Review, pasa a HeuristicQ; si ya está en HeuristicQ/AwaitStudent/Rectify, regenera pregunta.
-        let next = SocraticState::HeuristicQ {
-            attempts: self.attempts,
-        };
+        let next = SocraticState::HeuristicQ;
         self.state = next.clone();
         self.push_history(format!("ask heuristic attempts={}", self.attempts));
         Ok(next)
@@ -168,6 +221,7 @@ impl SocraticFsm {
 
     /// Registra un intento del estudiante.
     ///
+    /// - `Done` es terminal → `AlreadyDone` (no resucita el FSM).
     /// - Incrementa `attempts` (cap 255).
     /// - `misconception` se valida contra el enum cerrado
     ///   ([`Misconception::parse`], es/en): solo una variante conocida produce
@@ -175,7 +229,10 @@ impl SocraticFsm {
     ///   LLM); etiqueta desconocida/vacía se ignora con traza honesta.
     /// - Si `attempts >= 3` → `Summarize`.
     /// - Si no, `Rectify` con misconception conocida o `HeuristicQ`.
-    pub fn record_attempt(&mut self, misconception: Option<String>) {
+    pub fn record_attempt(&mut self, misconception: Option<String>) -> Result<(), GuardError> {
+        if matches!(self.state, SocraticState::Done) {
+            return Err(GuardError::AlreadyDone);
+        }
         self.attempts = self.attempts.saturating_add(1);
         let parsed = misconception
             .as_deref()
@@ -206,20 +263,19 @@ impl SocraticFsm {
 
         if self.attempts >= 3 {
             self.state = SocraticState::Summarize;
-            return;
+            return Ok(());
         }
         if let Some(m) = parsed {
             self.state = SocraticState::Rectify {
                 misconception: format!("{m:?}"),
             };
-            return;
+            return Ok(());
         }
-        // Por defecto espera respuesta del estudiante con deadline heurístico
-        // (ahora + 5 min) si no hay misconception.
-        // Mantenemos HeuristicQ para siguiente pregunta.
-        self.state = SocraticState::HeuristicQ {
-            attempts: self.attempts,
-        };
+        // Sin misconception conocida: nueva pregunta heurística para el
+        // siguiente turno (el `attempts` vive SOLO en `self.attempts`; el
+        // estado ya no lo duplica).
+        self.state = SocraticState::HeuristicQ;
+        Ok(())
     }
 
     /// Marca éxito. Requiere `attempts >= 1` Y remate correcto (R6e:
@@ -245,32 +301,70 @@ impl SocraticFsm {
         self.mark_success(last_check_correct)
     }
 
-    /// Avanza a resumen.
-    pub fn summarize(&mut self) -> SocraticState {
+    /// Avanza a resumen. `Done` es terminal → `AlreadyDone`.
+    pub fn summarize(&mut self) -> Result<SocraticState, GuardError> {
+        if matches!(self.state, SocraticState::Done) {
+            return Err(GuardError::AlreadyDone);
+        }
         self.state = SocraticState::Summarize;
         self.push_history("summarize".to_string());
-        self.state.clone()
+        Ok(self.state.clone())
     }
 
-    /// Finaliza el FSM.
+    /// Finaliza el FSM. Idempotente desde `Done` (ya es terminal).
     pub fn finish(&mut self) -> SocraticState {
         self.state = SocraticState::Done;
         self.push_history("done".to_string());
         self.state.clone()
     }
 
-    /// Pone al FSM en espera de estudiante con deadline.
-    pub fn await_student(&mut self, deadline_epoch: u64) {
+    /// Pone al FSM en espera de estudiante con deadline. `Done` → `AlreadyDone`.
+    pub fn await_student(&mut self, deadline_epoch: u64) -> Result<(), GuardError> {
+        if matches!(self.state, SocraticState::Done) {
+            return Err(GuardError::AlreadyDone);
+        }
         self.state = SocraticState::AwaitStudent { deadline_epoch };
         self.push_history(format!("await deadline {deadline_epoch}"));
+        Ok(())
     }
 
-    /// Transiciona a rectificación explícita.
-    pub fn rectify(&mut self, misconception: String) {
-        self.state = SocraticState::Rectify {
-            misconception: misconception.clone(),
+    /// Transición por vencimiento de la espera (`AwaitStudent`).
+    ///
+    /// Con `now >= deadline_epoch` sale de `AwaitStudent`: `Summarize` si ya no
+    /// quedan intentos (`attempts >= 3`), si no `HeuristicQ` (re-pregunta).
+    /// En cualquier otro estado (o sin vencer) retorna `None` y no muta.
+    /// `Done` es terminal: jamás transiciona. Pura salvo el reloj inyectado.
+    pub fn on_deadline(&mut self, now: u64) -> Option<SocraticState> {
+        let deadline = match self.state {
+            SocraticState::AwaitStudent { deadline_epoch } if now >= deadline_epoch => {
+                deadline_epoch
+            }
+            _ => return None,
         };
-        self.push_history(format!("rectify {misconception}"));
+        let next = if self.attempts >= 3 {
+            SocraticState::Summarize
+        } else {
+            SocraticState::HeuristicQ
+        };
+        self.state = next.clone();
+        self.push_history(format!("deadline vencido {deadline}"));
+        Some(next)
+    }
+
+    /// Transiciona a rectificación explícita. `Done` → `AlreadyDone`.
+    ///
+    /// La misconception se acota a 64 chars (el string es display/debug del
+    /// estado; el nombre canónico se fija en [`Self::record_attempt`]).
+    pub fn rectify(&mut self, misconception: String) -> Result<(), GuardError> {
+        if matches!(self.state, SocraticState::Done) {
+            return Err(GuardError::AlreadyDone);
+        }
+        let acotada: String = misconception.chars().take(64).collect();
+        self.state = SocraticState::Rectify {
+            misconception: acotada.clone(),
+        };
+        self.push_history(format!("rectify {acotada}"));
+        Ok(())
     }
 
     /// Revela con guía solo si `can_reveal_answer` es verdadero.
@@ -294,7 +388,7 @@ impl SocraticFsm {
     pub fn state_label(&self) -> &'static str {
         match &self.state {
             SocraticState::Review { .. } => "Review",
-            SocraticState::HeuristicQ { .. } => "HeuristicQ",
+            SocraticState::HeuristicQ => "HeuristicQ",
             SocraticState::AwaitStudent { .. } => "AwaitStudent",
             SocraticState::Rectify { .. } => "Rectify",
             SocraticState::Summarize => "Summarize",
@@ -648,9 +742,9 @@ mod tests {
     fn can_reveal_requires_two_attempts() {
         let mut fsm = SocraticFsm::new("integral");
         assert!(!fsm.can_reveal_answer());
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         assert!(!fsm.can_reveal_answer());
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         assert!(fsm.can_reveal_answer());
         assert!(fsm.answer_with_guidance().is_ok());
     }
@@ -673,11 +767,14 @@ mod tests {
         let mut fsm = SocraticFsm::new("función");
         // primer ask debe dar HeuristicQ attempts 0
         let s = fsm.ask().expect("primer ask ok");
-        assert_eq!(s, SocraticState::HeuristicQ { attempts: 0 });
-        fsm.record_attempt(None);
+        assert_eq!(s, SocraticState::HeuristicQ);
+        fsm.record_attempt(None).expect("intento");
         assert_eq!(fsm.attempts, 1);
         let s2 = fsm.ask().expect("segundo ask ok");
-        assert_eq!(s2, SocraticState::HeuristicQ { attempts: 1 });
+        // El estado ya no duplica el contador: `HeuristicQ` es unit y el único
+        // `attempts` vive en `self.attempts`.
+        assert_eq!(s2, SocraticState::HeuristicQ);
+        assert_eq!(fsm.attempts, 1);
     }
 
     #[test]
@@ -687,7 +784,7 @@ mod tests {
             fsm.mark_success(true).unwrap_err(),
             GuardError::NotEnoughAttempts
         );
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         // Con intento pero sin remate correcto no hay éxito (R6e).
         assert_eq!(
             fsm.mark_success(false).unwrap_err(),
@@ -700,10 +797,11 @@ mod tests {
     #[test]
     fn max_three_attempts_then_summarize() {
         let mut fsm = SocraticFsm::new("vectores");
-        fsm.record_attempt(None); // 1 -> HeuristicQ 1
-        fsm.record_attempt(Some("sign".to_string())); // 2 -> Rectify
+        fsm.record_attempt(None).expect("intento"); // 1 -> HeuristicQ 1
+        fsm.record_attempt(Some("sign".to_string())) // 2 -> Rectify
+            .expect("intento");
         assert!(matches!(fsm.state, SocraticState::Rectify { .. }));
-        fsm.record_attempt(None); // 3 -> Summarize
+        fsm.record_attempt(None).expect("intento"); // 3 -> Summarize
         assert!(matches!(fsm.state, SocraticState::Summarize));
         // cuarto intento ya en summarize, ask debe dar TooManyAttempts
         let err = fsm.ask().unwrap_err();
@@ -714,7 +812,8 @@ mod tests {
     #[test]
     fn rectify_on_misconception() {
         let mut fsm = SocraticFsm::new("fracciones");
-        fsm.record_attempt(Some("fracción".to_string()));
+        fsm.record_attempt(Some("fracción".to_string()))
+            .expect("intento");
         assert!(
             matches!(fsm.state, SocraticState::Rectify { misconception } if misconception == "Fraction")
         );
@@ -730,7 +829,7 @@ mod tests {
     #[test]
     fn await_and_finish() {
         let mut fsm = SocraticFsm::new("probabilidad");
-        fsm.await_student(9999);
+        fsm.await_student(9999).expect("await");
         assert_eq!(
             fsm.state,
             SocraticState::AwaitStudent {
@@ -745,8 +844,8 @@ mod tests {
     #[test]
     fn answer_with_guidance_ok_after_two() {
         let mut fsm = SocraticFsm::new("series");
-        fsm.record_attempt(None);
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
+        fsm.record_attempt(None).expect("intento");
         let g = fsm.answer_with_guidance().expect("debe revelar con guía");
         assert!(g.contains("series") || g.contains("Guía"));
     }
@@ -763,7 +862,7 @@ mod tests {
     fn too_many_attempts_guard() {
         let mut fsm = SocraticFsm::new("taylor");
         for _ in 0..3 {
-            fsm.record_attempt(None);
+            fsm.record_attempt(None).expect("intento");
         }
         assert!(matches!(fsm.state, SocraticState::Summarize));
         // ask ahora debe fallar
@@ -773,7 +872,7 @@ mod tests {
     #[test]
     fn succeed_alias_works() {
         let mut fsm = SocraticFsm::new("edo");
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         assert!(fsm.succeed(true).is_ok());
     }
 
@@ -785,9 +884,9 @@ mod tests {
         assert!(matches!(fsm.state, SocraticState::Review { .. }));
         // 2. HeuristicQ.
         let s = fsm.ask().expect("ask inicial ok");
-        assert_eq!(s, SocraticState::HeuristicQ { attempts: 0 });
+        assert_eq!(s, SocraticState::HeuristicQ);
         // 3. Espera al estudiante.
-        fsm.await_student(9_999);
+        fsm.await_student(9_999).expect("await");
         assert_eq!(
             fsm.state,
             SocraticState::AwaitStudent {
@@ -796,9 +895,10 @@ mod tests {
         );
         // 4. Nueva pregunta heurística tras la espera.
         let s2 = fsm.ask().expect("ask tras espera ok");
-        assert_eq!(s2, SocraticState::HeuristicQ { attempts: 0 });
+        assert_eq!(s2, SocraticState::HeuristicQ);
         // 5. Intento con misconception → Rectify.
-        fsm.record_attempt(Some("fracción".to_string()));
+        fsm.record_attempt(Some("fracción".to_string()))
+            .expect("intento");
         assert!(
             matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception.as_str() == "Fraction")
         );
@@ -833,12 +933,12 @@ mod tests {
         let total = 20usize;
         // Intentos tempranos bloquean el telling.
         assert_eq!(fsm.try_reveal().unwrap_err(), GuardError::TellingTooEarly);
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         assert_eq!(
             fsm.answer_with_guidance().unwrap_err(),
             GuardError::TellingTooEarly
         );
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         // Tras 2 intentos se permite guía (no solución directa).
         let guia = fsm.answer_with_guidance().expect("guía tras 2 intentos");
         // La guía no revela la solución de golpe: lo dice explícitamente.
@@ -893,8 +993,8 @@ mod tests {
         assert!(asked.is_telling("resultado = -2.5"));
         assert!(!asked.is_telling("¿Cómo lo pensaste? Contame tu idea"));
         // Con attempts>=2 se puede revelar (umbral intacto).
-        asked.record_attempt(None);
-        asked.record_attempt(None);
+        asked.record_attempt(None).expect("intento");
+        asked.record_attempt(None).expect("intento");
         assert!(!asked.is_telling("Da x=2, fijate"));
         // Base intacta: framing explícito sigue siendo telling en Review.
         assert!(fresh.is_telling("la solución es x = 4"));
@@ -929,8 +1029,8 @@ mod tests {
             fsm.check_telling_guard("la solución es x = 4").unwrap_err(),
             GuardError::TellingTooEarly
         );
-        fsm.record_attempt(None);
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
+        fsm.record_attempt(None).expect("intento");
         assert!(!fsm.is_telling("la solución es x = 4"));
         assert!(fsm.check_telling_guard("la solución es x = 4").is_ok());
         // sin marcador nunca es telling
@@ -996,8 +1096,8 @@ mod tests {
         assert!(student.contains("Antes de mostrarte"), "{student}");
         // con attempts>=2 pasa
         let mut fsm2 = SocraticFsm::new("integral");
-        fsm2.record_attempt(None);
-        fsm2.record_attempt(None);
+        fsm2.record_attempt(None).expect("intento");
+        fsm2.record_attempt(None).expect("intento");
         assert!(fsm2.enforce_telling_guard(telling, &scaffold).is_ok());
     }
 
@@ -1036,7 +1136,7 @@ mod tests {
         use crate::level::PedagogicalLevel;
         use crate::scaffold::ScaffoldEngine;
         let mut fsm = SocraticFsm::new("derivada");
-        fsm.record_attempt(Some("sign".into()));
+        fsm.record_attempt(Some("sign".into())).expect("intento");
         let engine = ScaffoldEngine;
         let scaffold = engine.scaffold("derivada", PedagogicalLevel::Secondary, &[]);
         let seg1 = fsm.socratic_system_segment(&scaffold);
@@ -1086,8 +1186,8 @@ mod tests {
         ));
         // Tras 2 intentos se puede revelar (umbral intacto).
         let mut ok = SocraticFsm::new("derivada");
-        ok.record_attempt(None);
-        ok.record_attempt(None);
+        ok.record_attempt(None).expect("intento");
+        ok.record_attempt(None).expect("intento");
         assert!(!ok.is_telling("la derivada es dos"));
     }
 
@@ -1119,7 +1219,7 @@ mod tests {
             "contame cómo lo pensaste"
         ));
         // Fuera de Review no aplica (lo cubre `is_telling`).
-        let asked = SocraticState::HeuristicQ { attempts: 0 };
+        let asked = SocraticState::HeuristicQ;
         assert!(!SocraticFsm::requires_repair_in_review(
             &asked,
             "miralo: $x^2$"
@@ -1134,22 +1234,23 @@ mod tests {
     fn r6e_misconception_contra_enum_cerrado() {
         // Etiqueta conocida (es/en) → Rectify con nombre canónico.
         let mut fsm = SocraticFsm::new("fracciones");
-        fsm.record_attempt(Some("fracción".to_string()));
+        fsm.record_attempt(Some("fracción".to_string()))
+            .expect("intento");
         assert!(
             matches!(&fsm.state, SocraticState::Rectify { misconception } if misconception == "Fraction")
         );
         let mut fsm2 = SocraticFsm::new("derivada");
-        fsm2.record_attempt(Some("sign".to_string()));
+        fsm2.record_attempt(Some("sign".to_string()))
+            .expect("intento");
         assert!(
             matches!(&fsm2.state, SocraticState::Rectify { misconception } if misconception == "Sign")
         );
         // Etiqueta inventada: sin Rectify, a HeuristicQ, con traza honesta.
         let mut fsm3 = SocraticFsm::new("derivada");
-        fsm3.record_attempt(Some("typo-inventado".to_string()));
-        assert!(matches!(
-            fsm3.state,
-            SocraticState::HeuristicQ { attempts: 1 }
-        ));
+        fsm3.record_attempt(Some("typo-inventado".to_string()))
+            .expect("intento");
+        assert!(matches!(fsm3.state, SocraticState::HeuristicQ));
+        assert_eq!(fsm3.attempts, 1);
         assert!(
             fsm3.history
                 .iter()
@@ -1158,11 +1259,129 @@ mod tests {
         );
         // Vacía equivale a sin dato.
         let mut fsm4 = SocraticFsm::new("derivada");
-        fsm4.record_attempt(Some("   ".to_string()));
+        fsm4.record_attempt(Some("   ".to_string()))
+            .expect("intento");
+        assert!(matches!(fsm4.state, SocraticState::HeuristicQ));
+    }
+
+    #[test]
+    fn done_es_terminal_en_todas_las_transiciones() {
+        // Regresión FIX 3: `Done` era terminal solo para `ask`/`mark_success`;
+        // `record_attempt`, `rectify`, `await_student` y `summarize`
+        // resucitaban el FSM (lo sacaban de `Done` a HeuristicQ/Rectify/…).
+        let mut fsm = SocraticFsm::new("derivada");
+        fsm.record_attempt(None).expect("intento");
+        fsm.finish();
+        assert!(fsm.is_done());
+        assert_eq!(
+            fsm.record_attempt(None)
+                .expect_err("record_attempt resucitó"),
+            GuardError::AlreadyDone
+        );
+        assert_eq!(
+            fsm.record_attempt(Some("sign".to_string()))
+                .expect_err("record_attempt resucitó"),
+            GuardError::AlreadyDone
+        );
+        assert_eq!(
+            fsm.rectify("Fraction".to_string())
+                .expect_err("rectify resucitó"),
+            GuardError::AlreadyDone
+        );
+        assert_eq!(
+            fsm.await_student(500).expect_err("await_student resucitó"),
+            GuardError::AlreadyDone
+        );
+        assert_eq!(
+            fsm.summarize().expect_err("summarize resucitó"),
+            GuardError::AlreadyDone
+        );
+        // Las que ya guardaban también siguen fallando.
+        assert_eq!(
+            fsm.ask().expect_err("ask resucitó"),
+            GuardError::AlreadyDone
+        );
+        assert_eq!(
+            fsm.mark_success(true).expect_err("mark_success resucitó"),
+            GuardError::AlreadyDone
+        );
+        // Y el FSM sigue exactamente en Done, sin side effects.
+        assert!(matches!(fsm.state, SocraticState::Done));
+        assert_eq!(fsm.attempts, 1, "el contador no debe mutar desde Done");
+        assert_eq!(fsm.on_deadline(u64::MAX), None, "Done no transiciona");
+    }
+
+    #[test]
+    fn on_deadline_transiciona_al_vencer_await_student() {
+        // Regresión FIX 11: `AwaitStudent { deadline_epoch }` era decorativo
+        // (sin transición por vencimiento dentro del crate).
+        let mut fsm = SocraticFsm::new("derivada");
+        fsm.record_attempt(None).expect("intento");
+        fsm.await_student(1_000).expect("await");
+        // Antes del vencimiento: nada.
+        assert_eq!(fsm.on_deadline(999), None);
         assert!(matches!(
-            fsm4.state,
-            SocraticState::HeuristicQ { attempts: 1 }
+            fsm.state,
+            SocraticState::AwaitStudent {
+                deadline_epoch: 1_000
+            }
         ));
+        // Al vencer, con presupuesto de intentos: re-pregunta.
+        assert_eq!(fsm.on_deadline(1_000), Some(SocraticState::HeuristicQ));
+        // Con intentos agotados (>=3): vence a Summarize.
+        fsm.record_attempt(None).expect("intento");
+        fsm.record_attempt(None).expect("intento");
+        assert_eq!(fsm.attempts, 3);
+        fsm.await_student(2_000).expect("await");
+        assert_eq!(fsm.on_deadline(2_000), Some(SocraticState::Summarize));
+        // Fuera de AwaitStudent no transiciona nunca.
+        fsm.finish();
+        assert_eq!(fsm.on_deadline(u64::MAX), None);
+    }
+
+    #[test]
+    fn repair_de_mili_no_dispara_el_guard_ni_marcadores() {
+        // Regresión FIX 4: la voz de repair decía "Antes de mostrarte la
+        // solución…" y `contains_solution_marker` dispara con el marcador
+        // literal "la solución" → si el caller volvía a pasar el repair por el
+        // guard (attempts < 2) => TellingTooEarly otra vez => bucle infinito.
+        // Además la pista del scaffold trae ejemplos `x=1` que
+        // `contains_numeric_answer` detecta tras HeuristicQ: redactados también.
+        let mut fsm = SocraticFsm::new("derivadas");
+        fsm.ask().expect("ask");
+        let scaffold = crate::scaffold::Scaffold {
+            question: "¿Qué forma te imaginás que tiene la derivada?".into(),
+            hint: Some(
+                "Pista concreta: probá con un ejemplo numérico simple (x=1, x=2) y compará resultados."
+                    .into(),
+            ),
+            explanation: "Exp".into(),
+        };
+        let voz = fsm.repair_student_message(&scaffold);
+        assert!(
+            !SocraticFsm::contains_solution_marker(&voz),
+            "el repair se autodetecta como telling (framing): {voz}"
+        );
+        assert!(
+            !SocraticFsm::contains_numeric_answer(&voz),
+            "el repair se autodetecta como telling (= numérico): {voz}"
+        );
+        assert!(
+            !SocraticFsm::contains_verbal_answer(&voz),
+            "el repair se autodetecta como telling (valor verbal): {voz}"
+        );
+        // Cierre del bucle: el repair NO es telling para el guard en ningún
+        // estado (umbral attempts < 2 intacto para el resto).
+        assert!(!fsm.is_telling(&voz), "repair vuelve por el guard: {voz}");
+        assert!(fsm.check_telling_guard(&voz).is_ok());
+        // Variante sin pista: mismo resultado.
+        let sin_pista = super::SocraticRepair {
+            pregunta_humana: "¿Qué probaste?".into(),
+            pista: String::new(),
+        };
+        let voz2 = sin_pista.to_student_voice();
+        assert!(!SocraticFsm::contains_solution_marker(&voz2));
+        assert!(!fsm.is_telling(&voz2));
     }
 
     #[test]
@@ -1179,11 +1398,54 @@ mod tests {
         );
         // record_attempt también respeta el tope.
         for _ in 0..40 {
-            fsm.record_attempt(None);
+            fsm.record_attempt(None).expect("intento");
             if matches!(fsm.state, SocraticState::Summarize) {
                 break;
             }
         }
         assert!(fsm.history.len() <= super::MAX_HISTORY_ENTRIES);
+    }
+
+    #[test]
+    fn r6e_forma_serde_del_fsm_fijada() {
+        // Persistencia: verificado con grep 2026-09 que NADA en el workspace
+        // serializa `SocraticState`/`SocraticFsm` (el único consumidor externo,
+        // `SocraticGuardContext` de grafito-assistant, es `Debug + Clone` sin
+        // serde; la config de grafito-app solo persiste
+        // `assistant_socratic_enabled: bool`). Por eso no hay `#[serde(alias)]`
+        // ni migración que agregar. Este test fija la forma por si alguien lo
+        // persiste en el futuro: `HeuristicQ` es variante unit
+        // (`"HeuristicQ"`), NO `{"HeuristicQ":{"attempts":N}}` (payload
+        // eliminado a propósito: el contador vive solo en `SocraticFsm`).
+        let json = serde_json::to_string(&SocraticState::HeuristicQ).expect("serializa");
+        assert_eq!(json, "\"HeuristicQ\"");
+        let back: SocraticState = serde_json::from_str(&json).expect("deserializa");
+        assert_eq!(back, SocraticState::HeuristicQ);
+        // `Done` (terminal en las 4 transiciones + ask/record/await/rectify)
+        // también es unit.
+        let json_done = serde_json::to_string(&SocraticState::Done).expect("serializa");
+        assert_eq!(json_done, "\"Done\"");
+        // Las variantes con payload hacen round-trip sin pérdida.
+        for estado in [
+            SocraticState::Review {
+                lo_id: "am1-der".into(),
+            },
+            SocraticState::AwaitStudent { deadline_epoch: 7 },
+            SocraticState::Rectify {
+                misconception: "Sign".into(),
+            },
+            SocraticState::Summarize,
+        ] {
+            let s = serde_json::to_string(&estado).expect("serializa");
+            let back: SocraticState = serde_json::from_str(&s).expect("deserializa");
+            assert_eq!(back, estado);
+        }
+        // El FSM completo también sobrevive round-trip (por si se persiste).
+        let fsm = SocraticFsm::new("derivada");
+        let s = serde_json::to_string(&fsm).expect("serializa fsm");
+        let back: SocraticFsm = serde_json::from_str(&s).expect("deserializa fsm");
+        assert_eq!(back.state, fsm.state);
+        assert_eq!(back.topic, fsm.topic);
+        assert_eq!(back.attempts, fsm.attempts);
     }
 }

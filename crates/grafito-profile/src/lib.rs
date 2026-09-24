@@ -4,6 +4,10 @@
 //! el progreso. Crate de capa hoja: sin egui, testable headless, persistible.
 
 pub mod bkt;
+// Sin consumidor fuera del crate (verificado con grep 2026-09: solo se
+// re-exporta). Se oculta de la doc pública hasta cablearlo a la dificultad de
+// ítems del CAT (propuesta en el reporte de esta oleada; no se implementa aquí).
+#[doc(hidden)]
 pub mod elo;
 pub mod exam;
 pub mod long_memory;
@@ -15,8 +19,11 @@ pub mod working_memory;
 // Re-exportar tipos de avatar/mascota en la raíz
 pub use bkt::{
     bkt_params_for_branch, bkt_params_for_lo, bkt_params_for_lo_opt, bkt_posterior, bkt_update,
-    is_known_lo, mastery_from_bkt, BktParams, BktState, ALL_LO_IDS, BKT_DEFAULT_PARAMS,
+    is_known_lo, los_without_calibration, mastery_from_bkt, BktParams, BktState, ALL_LO_IDS,
+    BKT_DEFAULT_PARAMS,
 };
+// Ver nota en `pub mod elo` de `lib.rs`: sin consumidor, oculto de la doc.
+#[doc(hidden)]
 pub use elo::{
     elo_expected, elo_update, EloRating, EloState, ELO_DEFAULT_K, ELO_DEFAULT_RATING, ELO_MAX_K,
     ELO_MAX_RATING, ELO_MIN_K, ELO_MIN_RATING, ELO_SCALE,
@@ -255,8 +262,12 @@ impl StudentProfile {
             branch.mastery *= EMA_RETENTION as f32;
             self.streak = 0;
         }
-        // BKT: actualizar P(sabe) con evidencia
-        let params = bkt::bkt_params_for_branch(branch_id);
+        // BKT: actualizar P(sabe) con evidencia.
+        // FIX corrección pedagógica: `bkt_params_for_lo` (50 brazos por LO →
+        // legacy → default), NO `bkt_params_for_branch` (7 claves legacy). Con
+        // branch la calibración fina por LO (`bkt_params_for_lo_opt`) era
+        // código muerto: todo LO se actualizaba con los 4 parámetros genéricos.
+        let params = bkt::bkt_params_for_lo(branch_id);
         let next_p = bkt::bkt_update(branch.bkt_p_known, correct, &params);
         branch.bkt_p_known = next_p.clamp(0.0, 1.0);
         // Leitner: subir/bajar caja
@@ -284,7 +295,7 @@ impl StudentProfile {
             },
             detail: format!("{} {branch_id}", if correct { "acierto" } else { "fallo" }),
         });
-        self.level = (self.xp / 250).saturating_add(1) as u32;
+        self.level = u32::try_from((self.xp / 250).saturating_add(1)).unwrap_or(u32::MAX);
         // Sincronizar evolución de mascota si existe
         if let Some(m) = self.avatar.mascot.as_mut() {
             let covered = self.branches.iter().filter(|b| b.covered).count() as u32;
@@ -628,9 +639,16 @@ impl StudentProfile {
         if !long.is_empty() {
             base.push_str(&format!("\n[Memoria largo plazo]\n{long}"));
         }
-        if base.chars().count() > MAX_MEMORY_CHARS + 800 {
-            let cut: String = base.chars().take(MAX_MEMORY_CHARS + 800 - 20).collect();
-            format!("{cut}…\n[resumen recortado]")
+        // Presupuesto real en chars (no bytes): el recorte corta en
+        // MAX_MEMORY_CHARS contando el sufijo, para que la SALIDA completa
+        // respete el presupuesto declarado (antes se recortaba recién sobre
+        // 3200 y se devolvían ~3199 chars: 33 % sobre el presupuesto).
+        const SUFIJO_RECORTE: &str = "…\n[resumen recortado]";
+        let total = base.chars().count();
+        if total > MAX_MEMORY_CHARS {
+            let recorte = MAX_MEMORY_CHARS.saturating_sub(SUFIJO_RECORTE.chars().count());
+            let cut: String = base.chars().take(recorte).collect();
+            format!("{cut}{SUFIJO_RECORTE}")
         } else {
             base
         }
@@ -749,8 +767,72 @@ mod tests {
         let mut profile = StudentProfile::new("Mia");
         profile.record_outcome("linear", "Ecuaciones", 5, true);
         let memory = profile.memory();
-        assert!(memory.len() <= MAX_MEMORY_CHARS);
+        // Presupuesto en chars (igual que lo trata `memory()`), no en bytes.
+        assert!(memory.chars().count() <= MAX_MEMORY_CHARS);
         assert!(memory.contains("Ecuaciones"));
+    }
+
+    #[test]
+    fn record_outcome_aplica_calibracion_fina_por_lo() {
+        // Regresión FIX 1: `record_outcome` debe actualizar BKT con
+        // `bkt_params_for_lo` (am1-der: p_slip 0.14), NO con
+        // `bkt_params_for_branch` (caía al default genérico p_slip 0.1) —
+        // con eso los 45 brazos de `bkt_params_for_lo_opt` eran código muerto.
+        let por_lo = bkt_params_for_lo("am1-der");
+        assert!((por_lo.p_slip - 0.14).abs() < 1e-12, "am1-der p_slip=0.14");
+        let esperado = bkt_update(0.3, true, &por_lo);
+        let genérico = bkt_update(0.3, true, &BktParams::default());
+        assert_ne!(
+            esperado, genérico,
+            "el LO calibrado debe diferir del default genérico"
+        );
+        let mut p = StudentProfile::new("BKT-LO");
+        p.record_outcome("am1-der", "Derivadas", 0, true);
+        assert!(
+            (p.branches[0].bkt_p_known - esperado).abs() < 1e-12,
+            "p_known {} != esperado {}",
+            p.branches[0].bkt_p_known,
+            esperado
+        );
+        // Un LO con params distintos debe moverse distinto (calibración real).
+        let mut q = StudentProfile::new("BKT-LO-2");
+        q.record_outcome("pri-conteo", "Conteo", 0, true);
+        let pri = bkt_update(0.3, true, &bkt_params_for_lo("pri-conteo"));
+        assert!((q.branches[0].bkt_p_known - pri).abs() < 1e-12);
+        assert_ne!(p.branches[0].bkt_p_known, q.branches[0].bkt_p_known);
+    }
+
+    #[test]
+    fn memory_respeta_presupuesto_chars_con_fixture_multibyte() {
+        // Regresión FIX 7: el recorte debe actuar en MAX_MEMORY_CHARS (chars,
+        // no bytes) y la SALIDA completa —sufijo incluido— debe caber en el
+        // presupuesto. Antes se recortaba sobre 3200 y devolvía ~3199 chars.
+        let mut p = StudentProfile::new("Ñandú");
+        for i in 0..MAX_BRANCHES {
+            let id = format!("rama-{i}");
+            let name = format!("Tema ñ{} {}", i, "ñ".repeat(40));
+            assert!(p.ensure_branch(&id, &name).is_some());
+        }
+        p.record_outcome("rama-0", "Tema ñ0", 1, true);
+        let out = p.memory();
+        assert!(
+            out.chars().count() <= MAX_MEMORY_CHARS,
+            "memory() rompió el presupuesto: {} chars",
+            out.chars().count()
+        );
+        assert!(
+            out.contains("[resumen recortado]"),
+            "sin sufijo de recorte: la fixture no superaba el presupuesto"
+        );
+    }
+
+    #[test]
+    fn level_no_trunca_con_xp_enorme() {
+        // Regresión FIX 11: `as u32` truncaba si xp era enorme.
+        let mut p = StudentProfile::new("XP");
+        p.xp = u64::MAX;
+        p.record_outcome("algebra", "Álgebra", 0, false);
+        assert_eq!(p.level, u32::MAX, "nivel debe saturar, no truncar");
     }
 
     #[test]

@@ -28,13 +28,41 @@ pub enum TeachingTopic {
     Conica,
     Subespacio,
     Fractal,
+    /// Ecuaciones en derivadas parciales (LO `am2-edp`).
+    Edp,
+    /// Series de Fourier (LO `am2-fourier`).
+    Fourier,
+    /// Teorema de los residuos (LO `am3-residuos`).
+    Residuos,
+    /// Bases de Gröbner (LO `comp-groebner`).
+    Groebner,
+    /// Transformada de Laplace (LO `comp-laplace`).
+    Laplace,
     General(String),
 }
 
 impl TeachingTopic {
     pub fn from_text(text: &str) -> Self {
         let lower = text.to_lowercase();
-        if lower.contains("deriv") {
+        // Tópicos que el CAS ya resuelve pero se colaban en categorías
+        // genéricas ("fourier" caía en Serie; "laplace"/"groebner"/"residuos"
+        // no tenían variante). Se chequean ANTES de las ramas genéricas:
+        // "ecuación en derivadas parciales" contiene "deriv" y sin este orden
+        // caería en `Derivada`.
+        if lower.contains("edp") || lower.contains("derivadas parciales") || lower.contains("pde") {
+            Self::Edp
+        } else if lower.contains("fourier") {
+            Self::Fourier
+        } else if lower.contains("residuo") {
+            Self::Residuos
+        } else if lower.contains("groebner")
+            || lower.contains("gröbner")
+            || lower.contains("buchberger")
+        {
+            Self::Groebner
+        } else if lower.contains("laplace") {
+            Self::Laplace
+        } else if lower.contains("deriv") {
             Self::Derivada
         } else if lower.contains("integral") {
             Self::Integral
@@ -118,6 +146,11 @@ impl TeachingTopic {
             Self::Conica => "Cónicas".into(),
             Self::Subespacio => "Subespacios".into(),
             Self::Fractal => "Fractales".into(),
+            Self::Edp => "Ecuaciones en derivadas parciales".into(),
+            Self::Fourier => "Series de Fourier".into(),
+            Self::Residuos => "Teorema de los residuos".into(),
+            Self::Groebner => "Bases de Gröbner".into(),
+            Self::Laplace => "Transformada de Laplace".into(),
             Self::General(s) => s.clone(),
         }
     }
@@ -141,6 +174,11 @@ impl TeachingTopic {
             Self::Conica => Some("alg-conicas".into()),
             Self::Subespacio => Some("alg-subespacios".into()),
             Self::Fractal => Some("sec-fractales".into()),
+            Self::Edp => Some("am2-edp".into()),
+            Self::Fourier => Some("am2-fourier".into()),
+            Self::Residuos => Some("am3-residuos".into()),
+            Self::Groebner => Some("comp-groebner".into()),
+            Self::Laplace => Some("comp-laplace".into()),
             Self::General(_) => None,
         }
     }
@@ -274,15 +312,37 @@ impl TeachingStep {
 ///
 /// Valida vía geometry `prepare_function_ast` (mismo parser del canvas: la
 /// pizarra jamás muestra como verificada una expresión que el canvas no puede
-/// evaluar). Rechaza vacío, `=` (ecuaciones/derivadas tipo `f'(x)=2x`), prosa
-/// con espacios múltiples/símbolos de integral/suma (`∫`, `Σ`, `→`) y texto
-/// largo. Puro, sin I/O, sin `unwrap`.
+/// evaluar). Rechaza vacío, prosa con espacios múltiples/símbolos de
+/// integral/suma (`∫`, `Σ`, `→`) y texto largo.
+///
+/// **FIX 10 — ecuaciones**: se acepta UNA igualdad `lhs=rhs` validando **cada
+/// lado** como expresión simple (y se siguen rechazando derivadas tipo
+/// `f'(x)=2x`, enunciados con `∫`/`Σ`/`→` y prosa con varias igualdades como
+/// `c² = a² + b², c = √(a²+b²)`). Sin esto el gate no podía representar
+/// ecuaciones y `TeachingSession::new` borraba TODA la matemática de los
+/// topics Matriz, Probabilidad y Serie (justo los que más la necesitan).
 ///
 /// Para la UI (MathTex overlay): lo verificado se dibuja con
 /// `grafito_ui::assistant::draw_math` (fuente `$..$`); lo no verificado cae a
 /// texto honesto y `TeachingSession::new` lo descarta (`math_expr = None`).
 pub fn verify_math_expr(expr: &str) -> bool {
     let text = expr.trim();
+    if text.contains('=') {
+        // Ecuación: un solo `=`, ambos lados expresiones simples.
+        let Some((lhs, rhs)) = text.split_once('=') else {
+            return false;
+        };
+        if rhs.contains('=') {
+            return false;
+        }
+        return verify_expr_sencilla(lhs) && verify_expr_sencilla(rhs);
+    }
+    verify_expr_sencilla(text)
+}
+
+/// Expresión simple sin `=` (CAS-gate estricto, mismo parser del canvas).
+fn verify_expr_sencilla(text: &str) -> bool {
+    let text = text.trim();
     if text.is_empty() || text.len() > 200 {
         return false;
     }
@@ -511,22 +571,22 @@ impl TeachingSession {
                     .with_math("A = [[1,2],[3,4]]").with_whiteboard("Grilla 2x2").with_manim("matriz-anim"),
                 TeachingStep::new("m2", "Operaciones y Gauss", "Suma, multiplicación y eliminación de Gauss para resolver sistemas.")
                     .with_math("Ax=b → Gauss-Jordan").with_whiteboard("Matriz aumentada y pivotes").with_manim("matriz-anim"),
-                TeachingStep::new("m3", "Determinante e inversa", "El determinante dice si la matriz es invertible. Si det≠0, existe A⁻¹.")
-                    .with_math("det A, A⁻¹ = (1/det) adj(A)").with_whiteboard("Cálculo de determinante 2x2"),
+                TeachingStep::new("m3", "Determinante e inversa", "El determinante dice si la matriz es invertible. Si det≠0, existe A⁻¹. Abajo ves verificada la fórmula del determinante 2x2.")
+                    .with_math("detA = a*d-b*c").with_whiteboard("Cálculo de determinante 2x2"),
             ],
             TeachingTopic::Probabilidad => vec![
-                TeachingStep::new("pr1", "Espacio muestral", "Probabilidad mide chance de un evento: casos favorables sobre totales. Empezá listando todos los resultados posibles.")
-                    .with_math("P(A)=|A|/|Ω|").with_whiteboard("Diagrama de árbol").with_manim("prob-anim"),
-                TeachingStep::new("pr2", "Condicional y Bayes", "Probabilidad condicional: P(A|B)=P(A∩B)/P(B). Bayes invierte la condición.")
-                    .with_math("P(A|B)=P(B|A)P(A)/P(B)").with_whiteboard("Tabla de contingencia").with_manim("prob-anim"),
+                TeachingStep::new("pr1", "Espacio muestral", "Probabilidad mide chance de un evento: casos favorables sobre totales. Empezá listando todos los resultados posibles. Abajo ves verificada la fórmula básica.")
+                    .with_math("p = casos/total").with_whiteboard("Diagrama de árbol").with_manim("prob-anim"),
+                TeachingStep::new("pr2", "Condicional y Bayes", "Probabilidad condicional: P(A|B)=P(A∩B)/P(B). Bayes invierte la condición. Abajo ves verificada la regla.")
+                    .with_math("pab = pba*pa/pb").with_whiteboard("Tabla de contingencia").with_manim("prob-anim"),
                 TeachingStep::new("pr3", "Distribuciones", "Binomial, Poisson, Normal: cada una modela un tipo de fenómeno aleatorio.")
                     .with_math("X~N(μ,σ²)").with_whiteboard("Curva normal sombreada"),
             ],
             TeachingTopic::Serie => vec![
-                TeachingStep::new("ser1", "Sucesiones y series", "Una serie suma infinitos términos. Converge si sus sumas parciales se acercan a un límite.")
-                    .with_math("Σ aₙ, Sₙ = a₁+...+aₙ").with_whiteboard("Suma parcial que se aproxima").with_manim("serie-anim"),
-                TeachingStep::new("ser2", "Criterios", "Criterios de convergencia: D'Alembert, Cauchy, integral. Probá con la geométrica.")
-                    .with_math("Σ rⁿ converge si |r|<1").with_whiteboard("Serie geométrica en pizarra").with_manim("serie-anim"),
+                TeachingStep::new("ser1", "Sucesiones y series", "Una serie suma infinitos términos. Converge si sus sumas parciales se acercan a un límite. Abajo ves verificada la segunda suma parcial.")
+                    .with_math("S2 = a1+a2").with_whiteboard("Suma parcial que se aproxima").with_manim("serie-anim"),
+                TeachingStep::new("ser2", "Criterios", "Criterios de convergencia: D'Alembert, Cauchy, integral. Probá con la geométrica. Abajo ves verificada su suma.")
+                    .with_math("S = r/(1-r)").with_whiteboard("Serie geométrica en pizarra").with_manim("serie-anim"),
                 TeachingStep::new("ser3", "Taylor", "Taylor aproxima funciones con polinomios. Más términos, mejor aproximación local.")
                     .with_math("f(x)≈ Σ f⁽ⁿ⁾(a)/n! (x-a)ⁿ").with_whiteboard("Polinomios que se acercan a la curva"),
             ],
@@ -698,7 +758,8 @@ impl TeachingSession {
     /// Crea FSM con epoch para `AwaitStudent` inicial (útil para tests).
     pub fn socratic_fsm_awaiting(&self, deadline_epoch: u64) -> crate::socratic::SocraticFsm {
         let mut fsm = crate::socratic::SocraticFsm::new(self.topic.label());
-        fsm.await_student(deadline_epoch);
+        // FSM recién creado: `Done` es imposible (el `Err` no puede ocurrir).
+        let _ = fsm.await_student(deadline_epoch);
         fsm
     }
 
@@ -984,6 +1045,53 @@ mod tests {
         assert!((16..32).contains(&idx), "idx={idx}");
     }
     #[test]
+    fn matriz_probabilidad_serie_tienen_math_verificada() {
+        // Regresión FIX 10: `verify_math_expr` rechazaba `=` y
+        // `TeachingSession::new` borraba TODA la matemática de Matriz,
+        // Probabilidad y Serie — los 3 topics quedaban sin ninguna expresión
+        // verificada, justo los que más necesitan ecuaciones.
+        for (texto, topic) in [
+            ("matrices 2x2", TeachingTopic::Matriz),
+            ("probabilidad condicional", TeachingTopic::Probabilidad),
+            ("serie de Taylor", TeachingTopic::Serie),
+        ] {
+            let s = TeachingSession::for_topic(texto);
+            assert_eq!(s.topic, topic);
+            assert!(
+                s.steps
+                    .iter()
+                    .any(|st| st.verified && st.math_expr.is_some()),
+                "{topic:?} quedó sin ninguna math_expr verificada"
+            );
+        }
+    }
+
+    #[test]
+    fn cas_gate_acepta_ecuaciones_simples_y_rechaza_prosa_con_igualdades() {
+        // FIX 10: `lhs=rhs` con ambos lados computables SÍ es verificable.
+        for buena in [
+            "detA = a*d-b*c",
+            "p = casos/total",
+            "S2 = a1+a2",
+            "y = x^2",
+            "a = b",
+        ] {
+            assert!(verify_math_expr(buena), "debía aceptar: {buena}");
+        }
+        // Derivadas, prosa con `∫`/`Σ`/`→` y varias igualdades siguen afuera.
+        for mala in [
+            "f'(x)=2x",
+            "c² = a² + b², c = √(a²+b²)",
+            "m_sec = f'(x) cuando h→0",
+            "Σ aₙ = L",
+            "= 5",
+            "x^2 =",
+        ] {
+            assert!(!verify_math_expr(mala), "debía rechazar: {mala}");
+        }
+    }
+
+    #[test]
     fn r6e_mark_success_exige_remate_correcto() {
         // End-to-end: el éxito del FSM exige assess_final().correct.
         let paso = TeachingStep::new("d4", "Verificá en x=1", "calculá y escribí")
@@ -993,7 +1101,7 @@ mod tests {
         let mal = paso.assess_final("5").expect("assess");
         assert!(!mal.correct);
         let mut fsm = crate::socratic::SocraticFsm::new("derivada");
-        fsm.record_attempt(None);
+        fsm.record_attempt(None).expect("intento");
         assert_eq!(
             fsm.mark_success(mal.correct).unwrap_err(),
             crate::socratic::GuardError::CheckNotCorrect
@@ -1003,6 +1111,31 @@ mod tests {
             fsm.state,
             crate::socratic::SocraticState::Summarize
         ));
+        // Extensión Tarea 1: mismo circuito cerrado pero con una sesión
+        // derivada de la traza REAL del CAS (`CasStep → TeachingStep`, ver
+        // `cas_session.rs`): assess_final sobre el remate del último paso →
+        // `mark_success` cierra el loop.
+        use crate::cas_session::CasStepsASesion;
+        use grafito_geometry::cas_steps::{steps_for_op, CasOp};
+        let traza = steps_for_op(&CasOp::Derivative {
+            expr: "x^2".into(),
+            var: "x".into(),
+        })
+        .expect("traza CAS de x^2");
+        let s_cas =
+            traza.a_sesion_con_remate("derivada de x^2", "Si f(x)=x², ¿cuánto vale f'(1)?", "2");
+        let ultimo = s_cas.steps.last().expect("pasos CAS no vacíos");
+        let bien_cas = ultimo.assess_final("2").expect("assess");
+        let mal_cas = ultimo.assess_final("9").expect("assess");
+        assert!(bien_cas.correct);
+        assert!(!mal_cas.correct);
+        let mut fsm_cas = crate::socratic::SocraticFsm::new("derivada");
+        fsm_cas.record_attempt(None).expect("intento");
+        assert_eq!(
+            fsm_cas.mark_success(mal_cas.correct).unwrap_err(),
+            crate::socratic::GuardError::CheckNotCorrect
+        );
+        assert!(fsm_cas.mark_success(bien_cas.correct).is_ok());
     }
     #[test]
     fn subespacio_y_fractal_detectan_sesion_y_remate() {
@@ -1081,5 +1214,50 @@ mod tests {
         assert_eq!(fr4.check.as_ref().expect("fr4 tiene remate").expected, "12");
         assert!(fr4.assess_final("12").expect("assess").correct);
         assert!(!fr4.assess_final("16").expect("assess").correct);
+    }
+
+    #[test]
+    fn topics_del_cas_mapean_a_los_nuevos_los() {
+        // Huecos de currículum: el CAS resuelve EDP/Fourier/residuos/Gröbner/
+        // Laplace y `TeachingTopic` ahora los deriva a LOs reales (antes
+        // "fourier" caía en Serie y el resto no tenía variante).
+        for (texto, topic, lo) in [
+            (
+                "ecuación en derivadas parciales",
+                TeachingTopic::Edp,
+                "am2-edp",
+            ),
+            ("resolución de una EDP", TeachingTopic::Edp, "am2-edp"),
+            ("serie de Fourier", TeachingTopic::Fourier, "am2-fourier"),
+            (
+                "teorema de los residuos",
+                TeachingTopic::Residuos,
+                "am3-residuos",
+            ),
+            ("base de Gröbner", TeachingTopic::Groebner, "comp-groebner"),
+            (
+                "método de Buchberger",
+                TeachingTopic::Groebner,
+                "comp-groebner",
+            ),
+            (
+                "transformada de Laplace",
+                TeachingTopic::Laplace,
+                "comp-laplace",
+            ),
+        ] {
+            assert_eq!(TeachingTopic::from_text(texto), topic, "{texto}");
+            assert_eq!(topic.lo_id().as_deref(), Some(lo));
+            assert!(
+                crate::curriculum::Curriculum::get(lo).is_some(),
+                "el LO {lo} referenciado por {texto:?} debe existir"
+            );
+            assert!(!topic.label().is_empty());
+        }
+        // "fourier" ya no cae en `Serie`.
+        assert_eq!(
+            TeachingTopic::from_text("series de fourier"),
+            TeachingTopic::Fourier
+        );
     }
 }

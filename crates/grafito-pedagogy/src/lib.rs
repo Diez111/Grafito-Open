@@ -13,6 +13,7 @@
 //! ```
 
 pub mod bkt;
+pub mod cas_session;
 pub mod curriculum;
 pub mod exam;
 pub mod exercise;
@@ -23,6 +24,7 @@ pub mod scaffold;
 pub mod socratic;
 pub mod teaching;
 
+pub use cas_session::{CasStepAdapter, CasStepsASesion, CAS_CUE_STEP_MS};
 pub use curriculum::{Curriculum, LearningObjective};
 pub use exercise::{Exercise, ExerciseDifficulty, ExerciseGenerator, ExerciseKind, ValidatorKind};
 pub use feedback::{Feedback, FeedbackEngine, Misconception, Verdict};

@@ -30,7 +30,9 @@
 //! - `eap_monotono_y_se_decrece` verifica que aciertos suben θ y SE baja con n.
 //! - `selection_max_info` y `stopping_rule`.
 
+use crate::exercise::ValidatorKind;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Ítem IRT 3PL calibrado (demo).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -39,9 +41,15 @@ pub struct IrtItem {
     pub id: String,
     /// Rama asociada (`calculus`, `algebra`, …).
     pub branch_id: String,
+    /// LO del currículum que evalúa este ítem (FIX 2: la ponderación
+    /// BKT/scheduler es por ítem, vía el `p_known`/`due` del LO asociado).
+    /// Vacío en datos viejos (`#[serde(default)]`).
+    #[serde(default)]
+    pub lo_id: String,
     /// Discriminación `a` ∈ [0.5, 2.5] (típico 0.8..2.0).
     pub a: f64,
-    /// Dificultad `b` ∈ [-3,3] (esta demo: -2..+2).
+    /// Dificultad `b` ∈ [-3,3] (tabla razonada por pregunta desde FIX 6: `b`
+    /// refleja la dificultad percibida del enunciado, no el índice).
     pub b: f64,
     /// Adivinación `c` ∈ [0,0.35] (esta demo: 0.15..0.28).
     pub c: f64,
@@ -49,6 +57,10 @@ pub struct IrtItem {
     pub question: String,
     /// Respuesta canónica (corrección exacta/tolerante según `exam.rs` heredado).
     pub answer: String,
+    /// Validador de la respuesta del alumno (FIX 11: el ítem declara cómo se
+    /// corrige; antes había que delegar en `FeedbackEngine::assess` a ciegas).
+    #[serde(default)]
+    pub validator: ValidatorKind,
 }
 
 impl IrtItem {
@@ -74,7 +86,26 @@ impl IrtItem {
         if self.c >= 1.0 {
             return Err("c debe ser <1".into());
         }
+        match self.validator {
+            ValidatorKind::NumericTol(tol) => {
+                if !tol.is_finite() || tol <= 0.0 || tol > 1.0 {
+                    return Err("tolerancia del validador inválida".into());
+                }
+            }
+            ValidatorKind::Exact | ValidatorKind::Symbolic => {}
+        }
         Ok(())
+    }
+}
+
+/// Validador determinista para una respuesta canónica: `NumericTol(2 %)` si la
+/// respuesta es un número (acepta redondeos tipo `0.3333333333`), `Exact`
+/// para respuestas simbólicas o de texto.
+fn validator_for_answer(answer: &str) -> ValidatorKind {
+    let t = answer.trim().replace(',', ".");
+    match t.parse::<f64>() {
+        Ok(_) => ValidatorKind::NumericTol(0.02),
+        Err(_) => ValidatorKind::Exact,
     }
 }
 
@@ -260,192 +291,264 @@ fn det_c_for_index(idx: usize) -> f64 {
     0.15 + bucket * 0.03 // 0.15,0.18,0.21,0.24,0.27
 }
 
-fn question_for_branch(branch: &str, idx: usize, b: f64) -> (String, String) {
-    // Preguntas deterministas por rama, con dificultad b como pista (no expuesta al alumno)
-    match branch {
+/// Familia de banco (`BRANCHES`) que le corresponde a un LO del currículum.
+///
+/// Permite que `cat_bank("am1-der")` sirva preguntas del banco `calculus` en
+/// vez de caer al genérico ("Pregunta general N"). IDs no listados →
+/// `"general"` (mismo fallback que siempre). Pura, sin I/O.
+pub fn branch_family_for_lo(lo_id: &str) -> &'static str {
+    match lo_id {
+        // Cálculo / AM
+        "am1-lim" | "am1-cont" | "am1-der" | "am1-der-aplic" | "am1-int" | "am1-int-aplic"
+        | "am1-sucesiones" | "am2-edo" | "am2-series" | "am2-taylor" | "am2-multivariable"
+        | "am2-int-multi" | "am2-campos" | "am2-teoremas" => "calculus",
+        // Funciones y geometría analítica
+        "am1-func" | "sec-lineal" | "sec-pend" => "functions",
+        // Álgebra y aritmética/algebra básica
+        "sec-ec"
+        | "sec-cuad"
+        | "sec-prop"
+        | "sec-fracc"
+        | "pri-fracc-vis"
+        | "pri-proporciones"
+        | "pri-conteo"
+        | "alg-matrices"
+        | "alg-determinantes"
+        | "alg-transformaciones"
+        | "alg-vectores"
+        | "alg-rectas-planos"
+        | "alg-subespacios" => "algebra",
+        // Trigonometría
+        "sec-trig" => "trigonometry",
+        // Geometría
+        "pri-perim-area" | "sec-area" | "sec-pitagoras" | "alg-conicas" => "geometry",
+        // Probabilidad y estadística
+        "pri-datos"
+        | "sec-prob"
+        | "prob-basica"
+        | "prob-var"
+        | "prob-distribuciones"
+        | "prob-inferencia"
+        | "prob-regresion"
+        | "prob-muestreo" => "stats",
+        // Números complejos: solo ramas legacy (`complex`).
+        "complex" => "complex",
+        _ => "general",
+    }
+}
+
+/// Preguntas por familia: `(enunciado, respuesta, b razonado, lo_id)`.
+///
+/// **FIX 6 — tabla `pregunta → b`**: antes `cat_bank` asignaba
+/// `b = -2 + idx·(4/14)` uniforme por ÍNDICE mientras las preguntas se servían
+/// en orden fijo: "Derivá x^2 en x=2" (trivial) podía quedar en `b = +2` y
+/// "Tasa media de x² en [1,2]" en `b = -2`. El CAT selecciona por máxima
+/// información sobre `b`: con `b` sin relación con el ítem la medición de θ
+/// quedaba sesgada. Ahora cada enunciado lleva su dificultad PERCIBIDA
+/// razonada (ordenada fácil → difícil dentro de cada familia) y su LO.
+fn item_for_branch(branch: &str, idx: usize) -> (String, String, f64, &'static str) {
+    // Preguntas deterministas por familia, ordenadas por dificultad percibida.
+    let (q, a, b, lo) = match branch {
         "calculus" => {
             let qs = [
-                ("Derivá x^2 en x=2", "4"),
-                ("Derivá x^3 en x=1", "3"),
-                ("Derivá sin(x) en x=0", "1"),
-                ("Calculá ∫₀¹ x dx", "0.5"),
-                ("Calculá ∫₀¹ x^2 dx", "0.3333333333"),
-                ("Límite lim_{x→0} sin(x)/x", "1"),
-                ("Derivada de e^x en x=0", "1"),
-                ("Deriva (x^2+1)*(x-1) en x=1", "2"),
-                ("Segunda derivada de x^3 en x=2", "12"),
-                ("Integral de 2*x de 0 a 2", "4"),
-                ("Deriva ln(x) en x=1", "1"),
-                ("Área bajo y=x de 0 a 3", "4.5"),
-                ("Deriva cos(x) en x=0", "0"),
-                ("Primitiva de 3*x^2 en x=1", "1"),
-                ("Tasa media de x^2 en [1,2]", "3"),
+                ("Derivá x^2 en x=2", "4", -1.7, "am1-der"),
+                ("Derivada de e^x en x=0", "1", -1.5, "am1-der"),
+                ("Derivá x^3 en x=1", "3", -1.3, "am1-der"),
+                ("Derivá sin(x) en x=0", "1", -1.1, "am1-der"),
+                ("Derivá cos(x) en x=0", "0", -0.9, "am1-der"),
+                ("Deriva ln(x) en x=1", "1", -0.7, "am1-der"),
+                ("Integral de 2*x de 0 a 2", "4", -0.5, "am1-int"),
+                ("Calculá ∫₀¹ x dx", "0.5", -0.3, "am1-int"),
+                ("Primitiva de 3*x^2 en x=1", "1", -0.1, "am1-int"),
+                ("Calculá ∫₀¹ x^2 dx", "0.3333333333", 0.2, "am1-int"),
+                ("Área bajo y=x de 0 a 3", "4.5", 0.5, "am1-int-aplic"),
+                ("Segunda derivada de x^3 en x=2", "12", 0.8, "am1-der-aplic"),
+                ("Deriva (x^2+1)*(x-1) en x=1", "2", 1.1, "am1-der-aplic"),
+                ("Límite lim_{x→0} sin(x)/x", "1", 1.4, "am1-lim"),
+                ("Tasa media de x^2 en [1,2]", "3", 1.7, "am1-der-aplic"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "algebra" => {
             let qs = [
-                ("Resolvé 2*x+3=11", "4"),
-                ("Factorizá x^2-9", "(x-3)(x+3)"),
-                ("Raíces de x^2-5*x+6=0", "2 y 3"),
-                ("Determinante de [[2,0],[0,3]]", "6"),
-                ("Solución de 3*x=12", "4"),
-                ("Producto (x+1)*(x-1)", "x^2-1"),
-                ("Rango de [[1,2],[2,4]]", "1"),
-                ("Inversa de x+5 cuando x=2", "7"),
-                ("Resolvé x/2=3", "6"),
-                ("Suma de raíces de x^2-3*x+2", "3"),
-                ("Factorizá x^2+2*x+1", "(x+1)^2"),
-                ("Resolvé 5*x-10=0", "2"),
-                ("Determinante de [[1,1],[1,1]]", "0"),
-                ("Resolvé -x=5", "-5"),
-                ("Raíz de 2*x+4=0", "-2"),
+                ("Solución de 3*x=12", "4", -1.7, "sec-ec"),
+                ("Resolvé x/2=3", "6", -1.5, "sec-ec"),
+                ("Resolvé 2*x+3=11", "4", -1.3, "sec-ec"),
+                ("Raíz de 2*x+4=0", "-2", -1.1, "sec-ec"),
+                ("Resolvé 5*x-10=0", "2", -0.9, "sec-ec"),
+                ("Inversa de x+5 cuando x=2", "7", -0.7, "sec-ec"),
+                ("Resolvé -x=5", "-5", -0.5, "sec-ec"),
+                (
+                    "Determinante de [[2,0],[0,3]]",
+                    "6",
+                    -0.3,
+                    "alg-determinantes",
+                ),
+                ("Producto (x+1)*(x-1)", "x^2-1", -0.1, "sec-prop"),
+                ("Factorizá x^2+2*x+1", "(x+1)^2", 0.2, "sec-cuad"),
+                (
+                    "Determinante de [[1,1],[1,1]]",
+                    "0",
+                    0.5,
+                    "alg-determinantes",
+                ),
+                ("Factorizá x^2-9", "(x-3)(x+3)", 0.8, "sec-cuad"),
+                ("Suma de raíces de x^2-3*x+2", "3", 1.1, "sec-cuad"),
+                ("Raíces de x^2-5*x+6=0", "2 y 3", 1.3, "sec-cuad"),
+                ("Rango de [[1,2],[2,4]]", "1", 1.6, "alg-matrices"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "functions" => {
             let qs = [
-                ("Raíz de f(x)=x-4", "4"),
-                ("Pendiente de y=2*x+1", "2"),
-                ("Evaluá f(2) si f(x)=x^2+1", "5"),
-                ("Imagen de f(x)=x^2 en x=3", "9"),
-                ("¿f(x)=|x| es par?", "sí"),
-                ("Dominio de 1/x", "x≠0"),
-                ("f(0) si f(x)=3*x+2", "2"),
-                ("Corte de y=x+5 con x=0", "5"),
-                ("¿f(x)=x es creciente?", "sí"),
-                ("Composición f(g(1)) con f=x+1,g=2*x", "3"),
-                ("Inversa de f(x)=x+3 en y=5", "2"),
-                ("Evaluá f(-1) si f(x)=x^2", "1"),
-                ("¿f(x)=x^2 es par?", "sí"),
-                ("f(1) si f(x)=2^x", "2"),
-                ("Ceros de f(x)=x*(x-1)", "0 y 1"),
+                ("f(0) si f(x)=3*x+2", "2", -1.7, "am1-func"),
+                ("Evaluá f(-1) si f(x)=x^2", "1", -1.5, "am1-func"),
+                ("Evaluá f(2) si f(x)=x^2+1", "5", -1.3, "am1-func"),
+                ("Imagen de f(x)=x^2 en x=3", "9", -1.1, "am1-func"),
+                ("Raíz de f(x)=x-4", "4", -0.9, "am1-func"),
+                ("Corte de y=x+5 con x=0", "5", -0.7, "sec-pend"),
+                ("Pendiente de y=2*x+1", "2", -0.5, "sec-pend"),
+                ("f(1) si f(x)=2^x", "2", -0.3, "am1-func"),
+                ("¿f(x)=x es creciente?", "sí", -0.1, "am1-func"),
+                ("¿f(x)=|x| es par?", "sí", 0.2, "am1-func"),
+                ("¿f(x)=x^2 es par?", "sí", 0.5, "am1-func"),
+                ("Dominio de 1/x", "x≠0", 0.8, "am1-func"),
+                ("Ceros de f(x)=x*(x-1)", "0 y 1", 1.1, "am1-func"),
+                ("Composición f(g(1)) con f=x+1,g=2*x", "3", 1.4, "am1-func"),
+                ("Inversa de f(x)=x+3 en y=5", "2", 1.7, "am1-func"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "trigonometry" => {
             let qs = [
-                ("¿Cuánto vale sin(0)?", "0"),
-                ("¿Cuánto vale cos(0)?", "1"),
-                ("Amplitud de sin(2*x)", "1"),
-                ("Periodo de sin(x)", "2*pi"),
-                ("sin(π/2)", "1"),
-                ("cos(π)", "-1"),
-                ("sin(π)", "0"),
-                ("cos(π/2)", "0"),
-                ("Valor máximo de cos(x)", "1"),
-                ("sin(3*π/2)", "-1"),
-                ("Identidad sin^2+cos^2", "1"),
-                ("¿Cuánto vale tan(0)?", "0"),
-                ("Amplitud de 2*sin(x)", "2"),
-                ("cos(0)", "1"),
-                ("sin(π/6)", "0.5"),
+                ("¿Cuánto vale sin(0)?", "0", -1.8, "sec-trig"),
+                ("¿Cuánto vale cos(0)?", "1", -1.6, "sec-trig"),
+                ("cos(0)", "1", -1.4, "sec-trig"),
+                ("sin(π)", "0", -1.2, "sec-trig"),
+                ("cos(π/2)", "0", -1.0, "sec-trig"),
+                ("sin(π/2)", "1", -0.8, "sec-trig"),
+                ("¿Cuánto vale tan(0)?", "0", -0.6, "sec-trig"),
+                ("Valor máximo de cos(x)", "1", -0.4, "sec-trig"),
+                ("cos(π)", "-1", -0.2, "sec-trig"),
+                ("sin(3*π/2)", "-1", 0.1, "sec-trig"),
+                ("Periodo de sin(x)", "2*pi", 0.4, "sec-trig"),
+                ("sin(π/6)", "0.5", 0.7, "sec-trig"),
+                ("Amplitud de sin(2*x)", "1", 1.0, "sec-trig"),
+                ("Amplitud de 2*sin(x)", "2", 1.3, "sec-trig"),
+                ("Identidad sin^2+cos^2", "1", 1.6, "sec-trig"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "geometry" => {
             let qs = [
-                ("Área cuadrado lado 3", "9"),
-                ("Perímetro cuadrado lado 5", "20"),
-                ("Volumen cubo arista 2", "8"),
-                ("Área círculo radio 1", "3.14159"),
-                ("Hipotenusa catetos 3 y 4", "5"),
-                ("Área rectángulo 2x3", "6"),
-                ("Perímetro triángulo 3,4,5", "12"),
-                ("Volumen esfera radio 1", "4.18879"),
-                ("Área triángulo base 4 altura 3", "6"),
-                ("Diagonal cuadrado lado 1", "1.4142"),
-                ("Área trapecio bases 2,4 altura 3", "9"),
-                ("Perímetro círculo radio 2", "12.566"),
-                ("Volumen cilindro r=1 h=2", "6.283"),
-                ("Área cubo arista 1", "6"),
-                ("Hipotenusa isósceles cateto 1", "1.4142"),
+                ("Perímetro cuadrado lado 5", "20", -1.7, "pri-perim-area"),
+                ("Área rectángulo 2x3", "6", -1.5, "pri-perim-area"),
+                ("Área cuadrado lado 3", "9", -1.3, "pri-perim-area"),
+                ("Perímetro triángulo 3,4,5", "12", -1.1, "pri-perim-area"),
+                ("Hipotenusa catetos 3 y 4", "5", -0.9, "sec-pitagoras"),
+                ("Área triángulo base 4 altura 3", "6", -0.7, "sec-area"),
+                ("Volumen cubo arista 2", "8", -0.5, "sec-area"),
+                ("Área cubo arista 1", "6", -0.3, "sec-area"),
+                ("Perímetro círculo radio 2", "12.566", -0.1, "sec-area"),
+                ("Área círculo radio 1", "3.14159", 0.2, "sec-area"),
+                ("Área trapecio bases 2,4 altura 3", "9", 0.5, "sec-area"),
+                ("Diagonal cuadrado lado 1", "1.4142", 0.8, "sec-pitagoras"),
+                (
+                    "Hipotenusa isósceles cateto 1",
+                    "1.4142",
+                    1.1,
+                    "sec-pitagoras",
+                ),
+                ("Volumen cilindro r=1 h=2", "6.283", 1.4, "sec-area"),
+                ("Volumen esfera radio 1", "4.18879", 1.7, "sec-area"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "stats" => {
             let qs = [
-                ("Media de {2,4,6}", "4"),
-                ("Rango de {1,3,8}", "7"),
-                ("Mediana de {1,5,9}", "5"),
-                ("Media de {1,2,3,4}", "2.5"),
-                ("Moda de {1,2,2,3}", "2"),
-                ("Varianza de {1,1,1}", "0"),
-                ("Probabilidad de cara en moneda", "0.5"),
-                ("Probabilidad de 6 en dado", "0.1666667"),
-                ("Media de {10,20}", "15"),
-                ("Rango de {5,5,5}", "0"),
-                ("Mediana de {1,2,3,4}", "2.5"),
-                ("Probabilidad de no-6 en dado", "0.8333333"),
-                ("Esperanza de dado", "3.5"),
-                ("Desvío de {2,2}", "0"),
-                ("Prob. de dos caras", "0.25"),
+                ("Media de {10,20}", "15", -1.7, "pri-datos"),
+                ("Rango de {1,3,8}", "7", -1.5, "pri-datos"),
+                ("Media de {2,4,6}", "4", -1.3, "pri-datos"),
+                ("Mediana de {1,5,9}", "5", -1.1, "pri-datos"),
+                ("Moda de {1,2,2,3}", "2", -0.9, "pri-datos"),
+                ("Media de {1,2,3,4}", "2.5", -0.7, "pri-datos"),
+                ("Rango de {5,5,5}", "0", -0.5, "pri-datos"),
+                ("Probabilidad de cara en moneda", "0.5", -0.3, "sec-prob"),
+                ("Desvío de {2,2}", "0", -0.1, "prob-var"),
+                ("Varianza de {1,1,1}", "0", 0.2, "prob-var"),
+                ("Probabilidad de 6 en dado", "0.1666667", 0.5, "sec-prob"),
+                ("Probabilidad de no-6 en dado", "0.8333333", 0.8, "sec-prob"),
+                ("Mediana de {1,2,3,4}", "2.5", 1.1, "pri-datos"),
+                ("Esperanza de dado", "3.5", 1.4, "prob-var"),
+                ("Prob. de dos caras", "0.25", 1.7, "prob-basica"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         "complex" => {
             let qs = [
-                ("Parte real de 3+4i", "3"),
-                ("Módulo de 3+4i", "5"),
-                ("Conjugado de 2-3i", "2+3i"),
-                ("¿i^2?", "-1"),
-                ("Módulo de 1+i", "1.4142"),
-                ("Parte imaginaria de 2+5i", "5"),
-                ("¿i^4?", "1"),
-                ("Suma (1+i)+(1-i)", "2"),
-                ("Producto (1+i)*(1-i)", "2"),
-                ("¿Conjugado de i?", "-i"),
-                ("Módulo de 2i", "2"),
-                ("Argumento de 1+i (grados)", "45"),
-                ("Forma polar de 1 (módulo)", "1"),
-                ("¿Real de i?", "0"),
-                ("Módulo de 0+1i", "1"),
+                ("¿i^2?", "-1", -1.8, "complex"),
+                ("Parte real de 3+4i", "3", -1.6, "complex"),
+                ("Parte imaginaria de 2+5i", "5", -1.4, "complex"),
+                ("¿Real de i?", "0", -1.2, "complex"),
+                ("¿i^4?", "1", -1.0, "complex"),
+                ("Conjugado de 2-3i", "2+3i", -0.8, "complex"),
+                ("¿Conjugado de i?", "-i", -0.5, "complex"),
+                ("Módulo de 3+4i", "5", -0.2, "complex"),
+                ("Módulo de 2i", "2", 0.1, "complex"),
+                ("Suma (1+i)+(1-i)", "2", 0.4, "complex"),
+                ("Módulo de 0+1i", "1", 0.7, "complex"),
+                ("Producto (1+i)*(1-i)", "2", 1.0, "complex"),
+                ("Módulo de 1+i", "1.4142", 1.3, "complex"),
+                ("Forma polar de 1 (módulo)", "1", 1.5, "complex"),
+                ("Argumento de 1+i (grados)", "45", 1.8, "complex"),
             ];
-            let (q, a) = qs[idx % qs.len()];
-            (q.to_string(), a.to_string())
+            qs[idx % qs.len()]
         }
         _ => {
-            // general / desconocida
-            let base = format!("Pregunta general {} (b={b:.1})", idx + 1, b = b);
-            let ans = format!("{}", idx + 1);
-            (base, ans)
+            // general / desconocida: dificultad uniforme por índice (no hay
+            // enunciado real que calibrar).
+            let b = -2.0 + (idx as f64) * (4.0 / 14.0);
+            return (
+                format!("Pregunta general {} (b={b:.1})", idx + 1),
+                format!("{}", idx + 1),
+                b,
+                "general",
+            );
         }
-    }
+    };
+    (q.to_string(), a.to_string(), b, lo)
 }
 
 /// Banco calibrado demo — ≥15 ítems por rama con `a,b,c` no constantes.
 ///
-/// Generación determinista: `b` distribuido uniforme -2..+2, `a` y `c` con
-/// dispersión via hash para evitar constantes. Validado por `bank_has_fifteen_items_per_branch`.
+/// Generación determinista: `a` y `c` con dispersión via hash para evitar
+/// constantes; `b` desde la tabla razonada por pregunta (ver
+/// [`item_for_branch`], FIX 6). Validado por `bank_has_fifteen_items_per_branch`.
 pub fn cat_bank(branch_id: &str) -> Vec<IrtItem> {
     let norm = branch_id.trim().to_lowercase();
     let branch = if BRANCHES.contains(&norm.as_str()) {
         norm.as_str()
     } else {
-        "general"
+        // LO del currículum → familia con banco propio (antes caía al
+        // genérico: `cat_bank("am1-der")` servía "Pregunta general N").
+        branch_family_for_lo(&norm)
     };
     let mut items = Vec::with_capacity(16);
     for idx in 0..15usize {
-        // b uniforme -2..+2
-        let b = -2.0 + (idx as f64) * (4.0 / 14.0);
+        let (q, ans, b, lo) = item_for_branch(branch, idx);
         let a = det_a_for_index(idx);
         let c = det_c_for_index(idx.wrapping_add(branch.len()));
-        let (q, ans) = question_for_branch(branch, idx, b);
         let id = format!("{branch}-{idx:02}");
         items.push(IrtItem {
             id,
             branch_id: branch.to_string(),
+            lo_id: lo.to_string(),
             a,
             b,
             c,
             question: q,
-            answer: ans,
+            answer: ans.clone(),
+            validator: validator_for_answer(&ans),
         });
     }
     items
@@ -522,6 +625,7 @@ pub fn cat_select_next(
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CAT + BKT + scheduler (R5): selección por máxima información ponderada
+// POR ÍTEM (p_known/due del LO asociado al ítem)
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Boost multiplicativo cuando el scheduler marca la rama como vencida (due).
@@ -529,6 +633,30 @@ pub fn cat_select_next(
 /// Documentado y acotado: 1.5x prioriza el repaso sin ahogar la información
 /// del ítem (un ítem con info 0 sigue en 0).
 pub const CAT_DUE_BOOST: f64 = 1.5;
+
+/// Peso de un ítem cuyo LO no tiene datos BKT/scheduler: neutro (no favorece
+/// ni castiga frente a los ítems del LO con datos).
+pub const PESO_NEUTRO: f64 = 1.0;
+
+/// Boost neutro (sin repaso vencido / sin datos). Ver [`PESO_NEUTRO`].
+pub const BOOST_NEUTRO: f64 = 1.0;
+
+/// Contexto BKT/scheduler de un LO para la ponderación por ítem (R5).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BktItemCtx {
+    /// `P(sabe)` del LO según BKT. `None` o no finito → sin datos (peso neutro).
+    pub p_known: Option<f64>,
+    /// ¿El scheduler marca repaso vencido para ese LO?
+    pub due: bool,
+}
+
+impl BktItemCtx {
+    /// Crea el contexto por LO (`p_known: None` = sin datos).
+    #[must_use]
+    pub fn new(p_known: Option<f64>, due: bool) -> Self {
+        Self { p_known, due }
+    }
+}
 
 /// Entropía binaria normalizada de `p_known` en 0..=1 (0 = certeza, 1 = duda
 /// máxima en p=0.5). Pura, NaN-safe: no finitos → 1.0 (máxima duda, honesto).
@@ -547,21 +675,119 @@ pub fn entropia_bkt(p_known: f64) -> f64 {
     h.clamp(0.0, 1.0)
 }
 
-/// Selecciona el próximo ítem no administrado por máxima información CAT
-/// ponderada con BKT y scheduler (R5, puro, sin I/O).
+/// Contexto de un ítem: primero su `lo_id`, luego la rama del banco
+/// (`branch_id`) para bancos de un solo skill (ramas legacy).
+fn ctx_de_item(item: &IrtItem, ctx_por_lo: &BTreeMap<String, BktItemCtx>) -> Option<BktItemCtx> {
+    ctx_por_lo
+        .get(&item.lo_id)
+        .or_else(|| ctx_por_lo.get(&item.branch_id))
+        .copied()
+}
+
+/// Score R5 por ÍTEM: `Fisher(θ) × (0.5 + entropía(p_known del LO)) × boost`.
+///
+/// Sin datos del LO (o `p_known` no finito) el ítem pesa
+/// [`PESO_NEUTRO`] × [`BOOST_NEUTRO`]. La entropía pesa la duda BKT pero nunca
+/// anula Fisher (piso 0.5): con certeza total del LO sus ítems se pesan 0.5 y
+/// el selector prioriza LOs donde aún hay duda.
+fn score_ponderado(theta: f64, item: &IrtItem, ctx: Option<BktItemCtx>) -> f64 {
+    let info = irt_fisher(theta, item.a, item.b, item.c);
+    let (peso, boost) = match ctx.and_then(|c| c.p_known.map(|p| (p, c.due))) {
+        Some((p, due)) if p.is_finite() => (
+            0.5 + entropia_bkt(p),
+            if due { CAT_DUE_BOOST } else { BOOST_NEUTRO },
+        ),
+        _ => (PESO_NEUTRO, BOOST_NEUTRO),
+    };
+    info * peso * boost
+}
+
+/// Argmax del score ponderado sobre un pool de ítems (sin repetir administrados).
+fn seleccion_ponderada<'a>(
+    items: impl Iterator<Item = &'a IrtItem>,
+    administered_ids: &[String],
+    theta: f64,
+    ctx_por_lo: &BTreeMap<String, BktItemCtx>,
+) -> Option<IrtItem> {
+    let mut best: Option<(f64, IrtItem)> = None;
+    for item in items {
+        if administered_ids.contains(&item.id) {
+            continue;
+        }
+        let score = score_ponderado(theta, item, ctx_de_item(item, ctx_por_lo));
+        match &best {
+            None => best = Some((score, item.clone())),
+            Some((best_score, _)) if score > *best_score => best = Some((score, item.clone())),
+            _ => {}
+        }
+    }
+    best.map(|(_, it)| it)
+}
+
+/// Selecciona el próximo ítem por máxima información ponderada **por ítem**
+/// con el `p_known`/`due` del LO asociado a cada ítem (R5 real, puro, sin I/O).
 ///
 /// - `theta`: habilidad EAP actual (si no finita, usa 0.0 = prior).
-/// - `p_known`: `Some(P(sabe) BKT)` cuando hay datos de la rama; `None` si no
-///   hay datos → delega en `cat_select_next` puro (camino actual, sin regresión).
-/// - `due`: ¿el scheduler marca repaso vencido? Multiplica por `CAT_DUE_BOOST`.
+/// - `ctx_por_lo`: contexto por `lo_id` (ver [`BktItemCtx`]); los LOs sin
+///   entrada pesan neutro (1.0 × 1.0) frente a los que tienen datos.
 ///
-/// Peso: `Fisher(θ) × (0.5 + entropía(p_known)) × (due ? 1.5 : 1.0)`.
-/// La entropía pesa la duda BKT pero nunca anula Fisher (piso 0.5): con
-/// certeza total igual se elige el ítem más informativo del CAT.
+/// **Por qué por ítem**: `p_known` y `due` son por LO/rama. Si la selección es
+/// dentro de una sola rama y el peso es una constante para todos los ítems,
+/// multiplicar los scores por la misma constante positiva preserva el argmax:
+/// el ranking queda idéntico a [`cat_select_next`] y la ponderación es un
+/// NO-OP (era exactamente el bug de esta función). Con contexto por LO los
+/// pesos varían entre ítems y el ganador puede diferir del CAT puro (ver test
+/// `cat_bkt_ponderacion_por_item_cambia_el_ganador`).
 ///
 /// Retorna `None` si todo está administrado. Banco aún CAT-lite demo (ver
-/// encabezado): la ponderación es real, la calibración empírica N>200 sigue
-/// pendiente y se etiqueta vía `crate::bkt::etiqueta_calibracion`.
+/// encabezado): calibración empírica N>200 pendiente
+/// (`crate::bkt::etiqueta_calibracion`).
+pub fn cat_select_next_bkt_lo(
+    branch_id: &str,
+    administered_ids: &[String],
+    theta: f64,
+    ctx_por_lo: &BTreeMap<String, BktItemCtx>,
+) -> Option<IrtItem> {
+    let theta = if theta.is_finite() { theta } else { 0.0 };
+    let bank = cat_bank(branch_id);
+    seleccion_ponderada(bank.iter(), administered_ids, theta, ctx_por_lo)
+}
+
+/// Selección cross-rama (R5 con boost): pool de varios bancos, score ponderado
+/// por el `p_known`/`due` del LO de cada ítem. A diferencia de una selección
+/// dentro de una rama, acá los pesos varían entre candidatos y el boost del
+/// scheduler puede cambiar el ganador global (ver test
+/// `cat_bkt_multi_cross_rama_cambia_el_ganador`).
+///
+/// `banks` acepta ramas legacy (`calculus`) o LOs (`am1-der`); los LOs se
+/// enrutan a su familia ([`branch_family_for_lo`]).
+pub fn cat_select_next_bkt_multi(
+    banks: &[String],
+    administered_ids: &[String],
+    theta: f64,
+    ctx_por_lo: &BTreeMap<String, BktItemCtx>,
+) -> Option<IrtItem> {
+    let theta = if theta.is_finite() { theta } else { 0.0 };
+    let mut pool: Vec<IrtItem> = Vec::new();
+    for bank_id in banks {
+        pool.extend(cat_bank(bank_id));
+    }
+    seleccion_ponderada(pool.iter(), administered_ids, theta, ctx_por_lo)
+}
+
+/// Compatibilidad (camino vivo): selección ponderada con escalares.
+///
+/// `p_known`/`due` se aplican al skill pedido (`branch_id`, LO o rama
+/// legacy); los ítems de LOs vecinos del mismo banco familiar quedan neutros
+/// (sin datos). Con eso el peso varía POR ÍTEM y el ganador puede diferir de
+/// [`cat_select_next`] (p. ej. `branch_id = "am1-der"` con repaso vencido
+/// prioriza los ítems de `am1-der` sobre los de `am1-int`).
+///
+/// Salvedad honesta: si el banco es de un solo LO (rama legacy como
+/// `"calculus"`), todos los ítems pesan igual y el ranking equivale al CAT
+/// puro — un solo skill no da para reordenar (argmax invariante ante escala).
+/// Para ponderar entre skills usar [`cat_select_next_bkt_lo`] o
+/// [`cat_select_next_bkt_multi`] con contexto por LO.
 pub fn cat_select_next_bkt(
     branch_id: &str,
     administered_ids: &[String],
@@ -569,32 +795,9 @@ pub fn cat_select_next_bkt(
     p_known: Option<f64>,
     due: bool,
 ) -> Option<IrtItem> {
-    let Some(p) = p_known else {
-        return cat_select_next(branch_id, administered_ids, theta);
-    };
-    if !p.is_finite() {
-        return cat_select_next(branch_id, administered_ids, theta);
-    }
-    let theta = if theta.is_finite() { theta } else { 0.0 };
-    let peso_bkt = 0.5 + entropia_bkt(p);
-    let boost = if due { CAT_DUE_BOOST } else { 1.0 };
-    let bank = cat_bank(branch_id);
-    let mut best: Option<(f64, IrtItem)> = None;
-    for item in bank {
-        if administered_ids.contains(&item.id) {
-            continue;
-        }
-        let score = irt_fisher(theta, item.a, item.b, item.c) * peso_bkt * boost;
-        match &best {
-            None => best = Some((score, item)),
-            Some((best_score, _)) => {
-                if score > *best_score {
-                    best = Some((score, item));
-                }
-            }
-        }
-    }
-    best.map(|(_, it)| it)
+    let mut ctx = BTreeMap::new();
+    ctx.insert(branch_id.trim().to_lowercase(), BktItemCtx { p_known, due });
+    cat_select_next_bkt_lo(branch_id, administered_ids, theta, &ctx)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -804,6 +1007,228 @@ mod tests {
         assert!(cat_should_stop(0.2, 14, 15));
         // max_items 0 usa 15
         assert!(cat_should_stop(0.5, 15, 0));
+    }
+
+    #[test]
+    fn cat_bkt_ponderacion_por_item_cambia_el_ganador() {
+        // Regresión FIX 2 (camino vivo, mismo entry point que llama
+        // `grafito-app/assistant.rs`): antes `p_known`/`due` eran constantes
+        // para TODOS los ítems de la llamada y multiplicar todos los scores
+        // por la misma constante positiva preserva el argmax ⇒ el ranking era
+        // idéntico a `cat_select_next` (ponderación R5 = NO-OP). Ahora el peso
+        // va por ítem (LO asociado) y el ganador puede diferir del CAT puro.
+        let theta = 0.0;
+        let puro = cat_select_next("am1-der", &[], theta).expect("ítem puro");
+        // `am1-der` con duda máxima (p=0.5 → entropía 1 → peso 1.5) y repaso
+        // vencido (×1.5) = 2.25 para sus ítems; los de LOs vecinos pesan 1.0.
+        let ponderado =
+            cat_select_next_bkt("am1-der", &[], theta, Some(0.5), true).expect("ítem ponderado");
+        assert_ne!(
+            puro.id, ponderado.id,
+            "la ponderación por ítem no cambió el ganador: sigue siendo un NO-OP"
+        );
+        assert_eq!(ponderado.lo_id, "am1-der", "debe priorizar el LO pedido");
+        // Y con certeza total del LO (p=0 → entropía 0 → peso 0.5, sin due) el
+        // selector se va a un LO vecino con más duda: dirección contraria.
+        let con_certeza =
+            cat_select_next_bkt("am1-der", &[], theta, Some(0.0), false).expect("ítem");
+        assert_ne!(
+            con_certeza.lo_id, "am1-der",
+            "con el LO dominado no debe insistir en sus ítems"
+        );
+    }
+
+    #[test]
+    fn cat_bkt_lo_con_contexto_por_lo_pondera_de_verdad() {
+        let theta = 0.0;
+        let bank = cat_bank("calculus");
+        let puro = cat_select_next("calculus", &[], theta).expect("puro");
+        let mut ctx = BTreeMap::new();
+        ctx.insert("am1-der".to_string(), BktItemCtx::new(Some(0.5), true));
+        let ponderado = cat_select_next_bkt_lo("calculus", &[], theta, &ctx).expect("ponderado");
+        assert_eq!(ponderado.lo_id, "am1-der", "el LO con duda+due debe ganar");
+        assert_ne!(puro.id, ponderado.id, "ponderación por LO sin efecto");
+        // El elegido es el argmax del score ponderado POR ÍTEM (pesos distintos
+        // según el LO: 2.25 para `am1-der`, 1.0 neutro para el resto).
+        let score = |it: &IrtItem| -> f64 {
+            let (peso, boost) = if it.lo_id == "am1-der" {
+                (0.5 + entropia_bkt(0.5), CAT_DUE_BOOST)
+            } else {
+                (PESO_NEUTRO, BOOST_NEUTRO)
+            };
+            irt_fisher(theta, it.a, it.b, it.c) * peso * boost
+        };
+        let mejor = bank.iter().map(score).fold(0.0_f64, f64::max);
+        assert!(
+            (score(&ponderado) - mejor).abs() < 1e-12,
+            "debe ser el argmax ponderado por ítem"
+        );
+        // Sin datos para ningún LO: delega en el CAT puro (peso neutro uniforme).
+        let sin_datos =
+            cat_select_next_bkt_lo("calculus", &[], theta, &BTreeMap::new()).expect("sin datos");
+        assert_eq!(sin_datos.id, puro.id, "sin contexto debe ser el CAT puro");
+    }
+
+    #[test]
+    fn cat_bkt_multi_cross_rama_cambia_el_ganador() {
+        // Regresión FIX 2 (variante cross-rama con boost): con candidatos de
+        // varias ramas el `p_known`/`due` de cada LO varía entre candidatos y
+        // el boost del scheduler cambia el ganador global.
+        let theta = 0.0;
+        let banks = ["algebra".to_string(), "calculus".to_string()];
+        let mut ctx = BTreeMap::new();
+        let los_algebra = [
+            "sec-ec",
+            "sec-cuad",
+            "sec-prop",
+            "alg-matrices",
+            "alg-determinantes",
+        ];
+        let los_calculus = [
+            "am1-der",
+            "am1-int",
+            "am1-der-aplic",
+            "am1-lim",
+            "am1-int-aplic",
+        ];
+        for lo in los_algebra {
+            ctx.insert(lo.to_string(), BktItemCtx::new(Some(0.0), false));
+        }
+        for lo in los_calculus {
+            ctx.insert(lo.to_string(), BktItemCtx::new(Some(0.5), true));
+        }
+        let elegido = cat_select_next_bkt_multi(&banks, &[], theta, &ctx).expect("multi");
+        assert_eq!(
+            elegido.branch_id, "calculus",
+            "duda + due en calculus debe inclinar el pool"
+        );
+        // Con los contextos invertidos gana algebra: el boost decide, no el
+        // argmax de Fisher puro.
+        let mut ctx_inv = BTreeMap::new();
+        for lo in los_algebra {
+            ctx_inv.insert(lo.to_string(), BktItemCtx::new(Some(0.5), true));
+        }
+        for lo in los_calculus {
+            ctx_inv.insert(lo.to_string(), BktItemCtx::new(Some(0.0), false));
+        }
+        let invertido =
+            cat_select_next_bkt_multi(&banks, &[], theta, &ctx_inv).expect("multi invertido");
+        assert_eq!(invertido.branch_id, "algebra");
+        // Y el ganador difiere del CAT puro del pool (máxima Fisher sin pesos).
+        let mut puro_pool: Option<IrtItem> = None;
+        for bank in &banks {
+            for it in cat_bank(bank) {
+                let mejor = irt_fisher(theta, it.a, it.b, it.c)
+                    > puro_pool
+                        .as_ref()
+                        .map_or(0.0, |m| irt_fisher(theta, m.a, m.b, m.c));
+                if mejor {
+                    puro_pool = Some(it);
+                }
+            }
+        }
+        let puro = puro_pool.expect("pool no vacío");
+        assert_ne!(
+            elegido.id, puro.id,
+            "el cross-rama ponderado coincide con el CAT puro: NO-OP"
+        );
+    }
+
+    #[test]
+    fn b_del_banco_ordena_dificultad_percibida() {
+        // Regresión FIX 6: `b` debe corresponder a la dificultad del enunciado
+        // (antes: `b = -2 + idx·(4/14)` uniforme por ÍNDICE con las preguntas
+        // en orden fijo ⇒ lo trivial podía quedar en b alto y viceversa).
+        let bank = cat_bank("calculus");
+        let b_de = |q: &str| -> f64 {
+            bank.iter()
+                .find(|it| it.question == q)
+                .unwrap_or_else(|| panic!("pregunta ausente: {q}"))
+                .b
+        };
+        // El caso del informe (guarda): lo trivial abajo, lo difícil arriba.
+        assert!(b_de("Derivá x^2 en x=2") < b_de("Tasa media de x^2 en [1,2]"));
+        // Pares que el orden por índice invertía (rojo-hoy): un derivado
+        // directo no puede ser más difícil que un límite clásico, ni una
+        // primitiva polinómica que una regla del producto.
+        assert!(
+            b_de("Derivá cos(x) en x=0") < b_de("Límite lim_{x→0} sin(x)/x"),
+            "cos'(0) más difícil que el límite de sin(x)/x: b invertido"
+        );
+        assert!(
+            b_de("Primitiva de 3*x^2 en x=1") < b_de("Deriva (x^2+1)*(x-1) en x=1"),
+            "primitiva polinómica más difícil que la regla del producto: b invertido"
+        );
+        assert!(
+            b_de("Integral de 2*x de 0 a 2") < b_de("Segunda derivada de x^3 en x=2"),
+            "integral directa más difícil que la segunda derivada: b invertido"
+        );
+        // En todos los bancos: los enunciados están ordenados fácil → difícil.
+        for branch in [
+            "calculus",
+            "algebra",
+            "functions",
+            "trigonometry",
+            "geometry",
+            "stats",
+            "complex",
+        ] {
+            let bank = cat_bank(branch);
+            for w in bank.windows(2) {
+                assert!(
+                    w[0].b < w[1].b,
+                    "{branch}: b desordenado '{}' ({}) >= '{}' ({})",
+                    w[0].question,
+                    w[0].b,
+                    w[1].question,
+                    w[1].b
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn eap_recupera_rasgo_conocido() {
+        // Simulación de rasgo conocido: las respuestas se generan con la
+        // dificultad PERCIBIDA de cada enunciado (tabla del test, independiente
+        // del banco) y el EAP del banco debe recuperar θ. Con `b` sin relación
+        // con el enunciado (pre-FIX 6) la recuperación se sesga.
+        const PERCIBIDA: &[(&str, f64)] = &[
+            ("Derivá x^2 en x=2", -1.7),
+            ("Derivada de e^x en x=0", -1.5),
+            ("Derivá x^3 en x=1", -1.3),
+            ("Derivá sin(x) en x=0", -1.1),
+            ("Derivá cos(x) en x=0", -0.9),
+            ("Deriva ln(x) en x=1", -0.7),
+            ("Integral de 2*x de 0 a 2", -0.5),
+            ("Calculá ∫₀¹ x dx", -0.3),
+            ("Primitiva de 3*x^2 en x=1", -0.1),
+            ("Calculá ∫₀¹ x^2 dx", 0.2),
+            ("Área bajo y=x de 0 a 3", 0.5),
+            ("Segunda derivada de x^3 en x=2", 0.8),
+            ("Deriva (x^2+1)*(x-1) en x=1", 1.1),
+            ("Límite lim_{x→0} sin(x)/x", 1.4),
+            ("Tasa media de x^2 en [1,2]", 1.7),
+        ];
+        let bank = cat_bank("calculus");
+        assert_eq!(bank.len(), PERCIBIDA.len());
+        for theta_true in [-1.2_f64, 0.0, 1.2] {
+            let mut responses: Vec<(IrtItem, bool)> = Vec::new();
+            for (q, d) in PERCIBIDA {
+                let item = bank
+                    .iter()
+                    .find(|it| it.question == *q)
+                    .unwrap_or_else(|| panic!("pregunta ausente: {q}"))
+                    .clone();
+                let p = irt_prob(theta_true, item.a, *d, item.c);
+                responses.push((item, p > 0.5));
+            }
+            let (theta_hat, se) = eap_estimate(&responses);
+            assert!(
+                (theta_hat - theta_true).abs() <= 0.5,
+                "EAP no recuperó el rasgo: θ={theta_true} → θ̂={theta_hat} (se={se})"
+            );
+        }
     }
 
     #[test]

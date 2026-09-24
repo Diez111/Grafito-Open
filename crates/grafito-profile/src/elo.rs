@@ -1,5 +1,11 @@
 //! Elo mínimo funcional para dificultad adaptativa (S, puro, sin I/O).
 //!
+//! **Estado 2026-09**: sin consumidor fuera de este crate (grep verificado en
+//! `grafito-app`/`ui`/`command`/`assistant`/`classroom`). Oculto de la doc
+//! pública (`#[doc(hidden)]`) en vez de fingir integración. Propuesta (no
+//! implementada): cablear `EloRating` de ítem a la dificultad `b` del banco
+//! CAT en `grafito-pedagogy/src/exam.rs` cuando haya respuestas reales.
+//!
 //! Mantiene un rating por alumno y por ítem (`R_alumno`, `R_item`) con
 //! `K` acotado. Fórmula clásica:
 //! `E = 1 / (1 + 10^((R_item - R_alumno) / 400))`,
