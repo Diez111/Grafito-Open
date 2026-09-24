@@ -88,6 +88,19 @@ const OP_NE: u32 = 49u;
 
 const STACK_SIZE: i32 = 32;
 
+// Paridad CPU (`grafito_geometry::expr::trig_reduce`, `rem_euclid(TAU)`):
+// reduce a [0, TAU) en f32 antes de sin/cos/tan. Sin esto, con |x| > 2π la
+// GPU y la CPU discrepan y el campo se dibuja en otro lugar.
+fn trig_reduce_arg(v: f32) -> f32 {
+    if abs(v) < 6.283185307179586 {
+        return v;
+    }
+    if abs(v) >= 3.40282347e+38f {
+        return v;
+    }
+    return v - floor(v / 6.283185307179586) * 6.283185307179586;
+}
+
 struct EvalResult {
     u: f32,
     v: f32,
@@ -182,17 +195,17 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
             }
             case OP_SIN: {
                 sp = sp - 1;
-                stack[sp] = sin(stack[sp]);
+                stack[sp] = sin(trig_reduce_arg(stack[sp]));
                 sp = sp + 1;
             }
             case OP_COS: {
                 sp = sp - 1;
-                stack[sp] = cos(stack[sp]);
+                stack[sp] = cos(trig_reduce_arg(stack[sp]));
                 sp = sp + 1;
             }
             case OP_TAN: {
                 sp = sp - 1;
-                stack[sp] = tan(stack[sp]);
+                stack[sp] = tan(trig_reduce_arg(stack[sp]));
                 sp = sp + 1;
             }
             case OP_EXP: {
@@ -314,21 +327,21 @@ fn eval_bytecode(x: f32, y: f32) -> EvalResult {
             }
             case OP_SEC: {
                 sp = sp - 1;
-                let v = stack[sp];
+                let v = trig_reduce_arg(stack[sp]);
                 let c = cos(v);
                 if abs(c) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / c; }
                 sp = sp + 1;
             }
             case OP_CSC: {
                 sp = sp - 1;
-                let v = stack[sp];
+                let v = trig_reduce_arg(stack[sp]);
                 let s = sin(v);
                 if abs(s) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / s; }
                 sp = sp + 1;
             }
             case OP_COT: {
                 sp = sp - 1;
-                let v = stack[sp];
+                let v = trig_reduce_arg(stack[sp]);
                 let t = tan(v);
                 if abs(t) < 1e-10 { var z = 0.0; stack[sp] = z / z; } else { stack[sp] = 1.0 / t; }
                 sp = sp + 1;

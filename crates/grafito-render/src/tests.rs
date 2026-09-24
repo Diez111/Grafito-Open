@@ -704,6 +704,7 @@ mod tests {
         // regresión silenciosa (GIF 64/8M/5MB + nativo 48/64MiB viven en
         // app/anim, fuera de scope render; se verifican por lectura).
         assert_eq!(crate::TRANSFORMED_CACHE_CAP, 64);
+        assert_eq!(crate::TRANSFORMED_CACHE_SIZE.get(), 64);
         assert_eq!(crate::MAX_GEOMETRY_VERTICES, 1_000_000);
         assert_eq!(crate::MAX_GEOMETRY_INDICES, 3_000_000);
         assert_eq!(crate::MAX_PRISM_BASE_VERTICES, 64);
@@ -899,4 +900,16 @@ mod coverage_sweep_pure {
         let (v, i) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
         assert!(!v.is_empty() && !i.is_empty());
     }
+}
+
+#[test]
+fn complex_grid_geometry_budget_caps_rect_emission() {
+    // FIX 2: 1 rect = 4 vértices + 6 índices por celda; res 300 en High
+    // eran 90k rects = 360k vértices por rebuild. El helper es el origen
+    // único del chequeo en los paths CPU y GPU.
+    assert!(crate::complex_grid_geometry_within_budget(200));
+    assert!(crate::complex_grid_geometry_within_budget(256));
+    assert!(!crate::complex_grid_geometry_within_budget(257));
+    assert!(!crate::complex_grid_geometry_within_budget(300));
+    assert!(!crate::complex_grid_geometry_within_budget(usize::MAX));
 }

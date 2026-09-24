@@ -32,7 +32,7 @@ const CLAMP_FORCE_INVALID_OPERAND: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-#[allow(dead_code)] // TODO P2: variantes Nop/Pi/E/Log2/Exp2 reservadas para bytecode extendido (usadas en shaders/fuzz)
+#[allow(dead_code)] // TODO P2: variantes Nop/Pi/E reservadas para bytecode extendido (usadas en shaders/fuzz)
 pub(crate) enum Op {
     Nop = 0,
     PushConst = 1,
@@ -75,8 +75,9 @@ pub(crate) enum Op {
     Mod = 37,
     Round = 38,
     Log10 = 39,
-    Log2 = 40,
-    Exp2 = 41,
+    // 40/41 (`Log2`/`Exp2`) eliminados del compilador: el AST no tiene esos
+    // nodos y nada los codifica (los brazos WGSL quedan como defensivos).
+    // Los discriminantes explícitos de acá en más no se renumeran.
     Atan2 = 42,
     Clamp = 43,
     Lt = 44,
@@ -100,11 +101,17 @@ pub(crate) struct BytecodeProgram {
     pub(crate) constants: Vec<f32>,
 }
 
+/// Fracción del paso de grilla que se tolera como error de estrechamiento
+/// f64→f32 en los bounds (`f32_bounds_have_precision`): con grillas que
+/// cubren `[x_min, x_max]` en `n` pasos, el peor desvío representable en f32
+/// debe ser chico frente al paso para que cada thread caiga en su celda.
+pub(crate) const F32_NARROW_FRACTION: f64 = 0.25;
+
 pub(crate) fn f32_bounds_have_precision(values: &[f64], min_step: f64) -> bool {
     if !min_step.is_finite() || min_step <= 0.0 {
         return false;
     }
-    let max_error = min_step * 0.25;
+    let max_error = min_step * F32_NARROW_FRACTION;
     values.iter().all(|v| {
         if !v.is_finite() {
             return false;
@@ -434,7 +441,7 @@ pub(crate) fn compile_expr_with_mapping(
             // Abs(15), Floor(18), Ceil(19), Asin(22), Acos(23), Atan(24),
             // Sinh(25), Cosh(26), Tanh(27), Asinh(28), Acosh(29), Atanh(30),
             // Sec(31), Csc(32), Cot(33), Sign(34), Heaviside(35), Cbrt(36),
-            // Round(38), Log10(39), Log2(40), Exp2(41)
+            // Round(38), Log10(39)
             _ => {}
         }
     }
@@ -503,7 +510,10 @@ fn nonfinite_gpu_field_matches_cpu(
 /// GPU resources needed to evaluate one implicit curve per dispatch.
 pub struct ImplicitComputePipeline {
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    /// FIX 3: los buffers son persistentes y nunca se reasignan, así que el
+    /// `BindGroup` se crea una vez en `new` y se reusa en cada dispatch (antes
+    /// se reconstruía por dispatch en `submit_buffers`).
+    bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     bytecode_buffer: wgpu::Buffer,
     constants_buffer: wgpu::Buffer,
@@ -512,6 +522,8 @@ pub struct ImplicitComputePipeline {
     max_grid: usize,
     /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
     timing: crate::gpu_timing::GpuTimingHandle,
+    /// Caché de uploads de bytecode/constants (ver `UploadCache`).
+    uploads: crate::gpu_readback::UploadCache,
 }
 
 #[repr(C)]
@@ -771,9 +783,33 @@ impl ImplicitComputePipeline {
             mapped_at_creation: false,
         });
 
+        // FIX 3: BindGroup persistente (los buffers nunca se reasignan).
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Implicit Compute Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bytecode_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: values_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         Self {
             pipeline,
-            bind_group_layout,
+            bind_group,
             params_buffer,
             bytecode_buffer,
             constants_buffer,
@@ -781,6 +817,7 @@ impl ImplicitComputePipeline {
             values_readback,
             max_grid,
             timing: crate::gpu_timing::create(device, queue, "Implicit Compute", 1),
+            uploads: crate::gpu_readback::UploadCache::new(),
         }
     }
 
@@ -842,35 +879,24 @@ impl ImplicitComputePipeline {
             0,
             bytemuck::cast_slice(&[submit.params]),
         );
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
-        queue.write_buffer(
-            &self.constants_buffer,
-            0,
-            bytemuck::cast_slice(&submit.constants),
-        );
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Implicit Compute Bind Group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.bytecode_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.constants_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.values_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        // Los params cambian por viewport: siempre se suben. Bytecode y
+        // constants se saltean si el programa no cambió (ver `UploadCache`).
+        if self
+            .uploads
+            .code_changed(bytemuck::cast_slice(&submit.code))
+        {
+            queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
+        }
+        if self
+            .uploads
+            .constants_changed(bytemuck::cast_slice(&submit.constants))
+        {
+            queue.write_buffer(
+                &self.constants_buffer,
+                0,
+                bytemuck::cast_slice(&submit.constants),
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Implicit Compute Encoder"),
@@ -883,7 +909,7 @@ impl ImplicitComputePipeline {
                 timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_bind_group(0, &self.bind_group, &[]);
             let wg = (submit.sample_axis as u32).div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg, wg, 1);
         }
@@ -1348,5 +1374,24 @@ mod tests {
             compile_expr(&expression, &BTreeMap::new(), &mut program),
             Err(CompileError::PrecisionLoss)
         ));
+    }
+
+    #[test]
+    fn removed_log2_exp2_opcodes_keep_later_discriminants_stable() {
+        // FIX 5: `Log2`/`Exp2` se eliminaron del enum (el AST no tiene esos
+        // nodos); los discriminantes explícitos no se renumeran para no
+        // romper la paridad con los `OP_*` de los shaders WGSL.
+        assert_eq!(Op::Log10 as u32, 39);
+        assert_eq!(Op::Atan2 as u32, 42);
+        assert_eq!(Op::Clamp as u32, 43);
+        assert_eq!(Op::Ne as u32, 49);
+    }
+
+    #[test]
+    fn f32_narrow_fraction_is_pinned() {
+        // FIX 5: la tolerancia de estrechamiento f64→f32 es 1/4 del paso.
+        assert_eq!(F32_NARROW_FRACTION, 0.25);
+        assert!(f32_bounds_have_precision(&[0.0, 10.0], 1.0));
+        assert!(!f32_bounds_have_precision(&[0.0, 10.0], 0.0));
     }
 }

@@ -64,13 +64,13 @@ fn c_pow(base: mat2x2<f32>, exponent: mat2x2<f32>) -> mat2x2<f32> {
 }
 
 fn c_sin(z: mat2x2<f32>) -> mat2x2<f32> {
-    let x = c_real(z);
+    let x = trig_reduce_arg(c_real(z));
     let y = c_imag(z);
     return c_new(sin(x)*cosh(y), cos(x)*sinh(y));
 }
 
 fn c_cos(z: mat2x2<f32>) -> mat2x2<f32> {
-    let x = c_real(z);
+    let x = trig_reduce_arg(c_real(z));
     let y = c_imag(z);
     return c_new(cos(x)*cosh(y), -sin(x)*sinh(y));
 }
@@ -247,6 +247,19 @@ const OP_ZETA: u32 = 108u;
 const OP_BESSELY: u32 = 109u;
 
 const STACK_SIZE: i32 = 32;
+
+// Paridad CPU (`grafito_geometry::expr::trig_reduce`, `rem_euclid(TAU)`):
+// `c_sin`/`c_cos` reducen la parte real a [0, TAU) en f32. Sin esto, con
+// |Re(z)| > 2π la GPU y la CPU discrepan.
+fn trig_reduce_arg(v: f32) -> f32 {
+    if abs(v) < 6.283185307179586 {
+        return v;
+    }
+    if abs(v) >= 3.40282347e+38f {
+        return v;
+    }
+    return v - floor(v / 6.283185307179586) * 6.283185307179586;
+}
 
 fn c_add(a: mat2x2<f32>, b: mat2x2<f32>) -> mat2x2<f32> {
     return a + b;

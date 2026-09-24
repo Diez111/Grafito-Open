@@ -47,7 +47,9 @@ fn grid_side_u32(grid_size: usize) -> Option<u32> {
 /// GPU resources needed to evaluate one 2D vector field per dispatch.
 pub struct VectorComputePipeline {
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    /// FIX 3: `BindGroup` persistente creado en `new` (los buffers nunca se
+    /// reasignan); se reusa en cada dispatch.
+    bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     bytecode_buffer: wgpu::Buffer,
     constants_buffer: wgpu::Buffer,
@@ -56,6 +58,8 @@ pub struct VectorComputePipeline {
     max_grid: usize,
     /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
     timing: crate::gpu_timing::GpuTimingHandle,
+    /// Caché de uploads de bytecode/constants (ver `UploadCache`).
+    uploads: crate::gpu_readback::UploadCache,
 }
 
 #[repr(C)]
@@ -221,9 +225,33 @@ impl VectorComputePipeline {
             mapped_at_creation: false,
         });
 
+        // FIX 3: BindGroup persistente (los buffers nunca se reasignan).
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Vector Compute Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bytecode_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: values_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         Some(Self {
             pipeline,
-            bind_group_layout,
+            bind_group,
             params_buffer,
             bytecode_buffer,
             constants_buffer,
@@ -231,6 +259,7 @@ impl VectorComputePipeline {
             values_readback,
             max_grid,
             timing: crate::gpu_timing::create(device, queue, "Vector Compute", 1),
+            uploads: crate::gpu_readback::UploadCache::new(),
         })
     }
 
@@ -299,35 +328,24 @@ impl VectorComputePipeline {
             0,
             bytemuck::cast_slice(&[submit.params]),
         );
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
-        queue.write_buffer(
-            &self.constants_buffer,
-            0,
-            bytemuck::cast_slice(&submit.constants),
-        );
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Vector Compute Bind Group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.bytecode_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.constants_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.values_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        // Los params cambian por viewport: siempre se suben. Bytecode y
+        // constants se saltean si el programa no cambió (ver `UploadCache`).
+        if self
+            .uploads
+            .code_changed(bytemuck::cast_slice(&submit.code))
+        {
+            queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
+        }
+        if self
+            .uploads
+            .constants_changed(bytemuck::cast_slice(&submit.constants))
+        {
+            queue.write_buffer(
+                &self.constants_buffer,
+                0,
+                bytemuck::cast_slice(&submit.constants),
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Vector Compute Encoder"),
@@ -340,7 +358,7 @@ impl VectorComputePipeline {
                 timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
+            cpass.set_bind_group(0, &self.bind_group, &[]);
             let wg_x = submit.params.nx.div_ceil(16).max(1);
             let wg_y = submit.params.ny.div_ceil(16).max(1);
             cpass.dispatch_workgroups(wg_x, wg_y, 1);

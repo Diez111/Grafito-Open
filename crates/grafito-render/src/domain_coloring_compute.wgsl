@@ -62,13 +62,13 @@ fn dc_pow(base: mat2x2<f32>, exponent: mat2x2<f32>) -> mat2x2<f32> {
 }
 
 fn dc_sin(z: mat2x2<f32>) -> mat2x2<f32> {
-    let x = dc_real(z);
+    let x = trig_reduce_arg(dc_real(z));
     let y = dc_imag(z);
     return dc_new(sin(x)*cosh(y), cos(x)*sinh(y));
 }
 
 fn dc_cos(z: mat2x2<f32>) -> mat2x2<f32> {
-    let x = dc_real(z);
+    let x = trig_reduce_arg(dc_real(z));
     let y = dc_imag(z);
     return dc_new(cos(x)*cosh(y), -sin(x)*sinh(y));
 }
@@ -210,6 +210,19 @@ const OP_IMAG_PART: u32 = 104u;
 const OP_ARG: u32 = 105u;
 
 const STACK_SIZE: i32 = 32;
+
+// Paridad CPU (`grafito_geometry::expr::trig_reduce`, `rem_euclid(TAU)`):
+// `dc_sin`/`dc_cos` reducen la parte real a [0, TAU) en f32. Sin esto, con
+// |Re(z)| > 2π la GPU y la CPU discrepan.
+fn trig_reduce_arg(v: f32) -> f32 {
+    if abs(v) < 6.283185307179586 {
+        return v;
+    }
+    if abs(v) >= 3.40282347e+38f {
+        return v;
+    }
+    return v - floor(v / 6.283185307179586) * 6.283185307179586;
+}
 
 fn eval_bytecode_dc(z: mat2x2<f32>) -> mat2x2<f32> {
     var stack: array<mat2x2<f32>, STACK_SIZE>;

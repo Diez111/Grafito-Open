@@ -175,6 +175,54 @@ impl PendingGpuReadback {
     }
 }
 
+/// Caché de uploads de bytecode/constants por pipeline (FIX 3, opcional).
+///
+/// Los buffers de bytecode/constants son persistentes y de tamaño fijo; subir
+/// el mismo programa dos veces es un `memcpy` inútil. Cada pipeline guarda el
+/// hash del último contenido subido y `submit_buffers` saltea el
+/// `write_buffer` cuando no cambió (los params sí se suben siempre: el
+/// viewport cambia por frame). Sin lock: dos `AtomicU64` (`Send + Sync`, el
+/// `Renderer` lo sigue siendo). Colisión de hash (2^-64, SipHash) dejaría un
+/// programa rancio: documentado, no observado.
+pub(crate) struct UploadCache {
+    code_hash: std::sync::atomic::AtomicU64,
+    constants_hash: std::sync::atomic::AtomicU64,
+}
+
+impl UploadCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            code_hash: std::sync::atomic::AtomicU64::new(0),
+            constants_hash: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn hash_bytes(bytes: &[u8]) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        bytes.hash(&mut hasher);
+        let hash = hasher.finish();
+        // 0 es el centinela "nada subido": forzar upload en ese caso.
+        if hash == 0 {
+            1
+        } else {
+            hash
+        }
+    }
+
+    /// `true` si `code` cambió desde el último upload (y lo registra).
+    pub(crate) fn code_changed(&self, code: &[u8]) -> bool {
+        let hash = Self::hash_bytes(code);
+        self.code_hash.swap(hash, Ordering::SeqCst) != hash
+    }
+
+    /// `true` si `constants` cambió desde el último upload (y lo registra).
+    pub(crate) fn constants_changed(&self, constants: &[u8]) -> bool {
+        let hash = Self::hash_bytes(constants);
+        self.constants_hash.swap(hash, Ordering::SeqCst) != hash
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +397,20 @@ mod tests {
             ],
             || assert_eq!(effective_readback_timeout(), Duration::from_secs(10)),
         );
+    }
+
+    /// FIX 3: el primer upload siempre sube; el segundo idéntico se saltea;
+    /// un cambio vuelve a subir. Bytecode y constants trackean hashes
+    /// independientes.
+    #[test]
+    fn upload_cache_skips_identical_programs_and_reuploads_on_change() {
+        let cache = UploadCache::new();
+        assert!(cache.code_changed(&[1u8, 2, 3]));
+        assert!(!cache.code_changed(&[1u8, 2, 3]));
+        assert!(cache.code_changed(&[1u8, 2, 4]));
+        assert!(!cache.code_changed(&[1u8, 2, 4]));
+        assert!(cache.constants_changed(&[9u8]));
+        assert!(!cache.constants_changed(&[9u8]));
+        assert!(!cache.code_changed(&[1u8, 2, 4]));
     }
 }

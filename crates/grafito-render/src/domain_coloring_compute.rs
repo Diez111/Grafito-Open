@@ -15,12 +15,37 @@ use grafito_complex::math::complex_opcode::{compile_complex_expr, ComplexBytecod
 /// Presupuesto de celdas por dispatch de domain coloring (500×500 = 250k).
 /// Ver `docs/architecture.md:8` — GPU domain_coloring_compute 250k cells/dispatch.
 const MAX_CELLS: usize = 250_000;
+pub(crate) const DOMAIN_COLORING_WORKGROUP_SIZE: u32 = 64;
 const MAX_COMPLEX_CODE: usize = 4096;
 const GPU_COMPLEX_STACK_SIZE: usize = 32;
 
 /// Rechaza grids por encima del presupuesto [`MAX_CELLS`] antes de tocar la GPU.
 pub(crate) fn domain_cells_within_budget(cells: usize) -> bool {
     cells <= MAX_CELLS
+}
+
+/// Bandas de filas para grids sobre [`MAX_CELLS`] (FIX 4): cada banda cubre
+/// filas consecutivas del índice externo del shader (`fi = gid.x / res`, que
+/// deriva la coordenada X) con ≤250k celdas. Como la banda lleva su propio
+/// origen en X (`x_min + inicio*dx`) y el mismo paso y ancho, el shader
+/// deriva los centros globales sin cambios: no hay costura.
+/// Pura, sin GPU. `None` si una sola fila ya supera el presupuesto.
+pub(crate) fn domain_coloring_bands(res: usize) -> Option<Vec<(usize, usize)>> {
+    if res == 0 {
+        return Some(Vec::new());
+    }
+    let rows_per_band = MAX_CELLS / res;
+    if rows_per_band == 0 {
+        return None;
+    }
+    let mut bands = Vec::new();
+    let mut start = 0;
+    while start < res {
+        let count = (res - start).min(rows_per_band);
+        bands.push((start, count));
+        start += count;
+    }
+    Some(bands)
 }
 
 pub(crate) fn gpu_program_is_supported(code: &[u32]) -> bool {
@@ -76,11 +101,43 @@ mod tests {
         assert!(super::domain_cells_within_budget(0));
         assert!(!super::domain_cells_within_budget(250_001));
     }
+
+    #[test]
+    fn domain_bands_tile_over_budget_grids_without_clamping() {
+        // FIX 4: res 600 → 360k celdas en bandas de ≤250k que cubren las 600
+        // filas sin recorte (cada banda lleva su propio origen en X, que es
+        // el índice externo del shader: sin costura).
+        let bands = super::domain_coloring_bands(600).expect("res 600 debe tilar");
+        assert!(bands.len() > 1);
+        assert_eq!(bands.iter().map(|(_, count)| count).sum::<usize>(), 600);
+        assert!(bands
+            .iter()
+            .all(|(_, count)| 600 * count <= super::MAX_CELLS));
+        // Bajo presupuesto: una sola banda completa.
+        assert_eq!(super::domain_coloring_bands(500), Some(vec![(0, 500)]));
+        assert_eq!(super::domain_coloring_bands(1), Some(vec![(0, 1)]));
+        assert_eq!(
+            super::domain_coloring_bands(0),
+            Some(Vec::new()),
+            "res 0 no tiene filas que tilar"
+        );
+        // Una fila más ancha que el presupuesto no tilea (fallback honesto).
+        assert_eq!(super::domain_coloring_bands(super::MAX_CELLS + 1), None);
+    }
+
+    #[test]
+    fn domain_workgroup_size_matches_the_wgsl_annotation() {
+        // FIX 5: el `div_ceil` del dispatch debe igualar
+        // `@workgroup_size(64)` del shader.
+        assert_eq!(super::DOMAIN_COLORING_WORKGROUP_SIZE, 64);
+    }
 }
 
 pub struct DomainColoringComputePipeline {
     pipeline: wgpu::ComputePipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
+    /// FIX 3: `BindGroup` persistente creado en `new` (los buffers nunca se
+    /// reasignan); se reusa en cada dispatch.
+    bind_group: wgpu::BindGroup,
     params_buffer: wgpu::Buffer,
     bytecode_buffer: wgpu::Buffer,
     constants_buffer: wgpu::Buffer,
@@ -88,6 +145,8 @@ pub struct DomainColoringComputePipeline {
     out_readback: wgpu::Buffer,
     /// GPU timestamp queries (feature `profiling`); no-op sin la feature.
     timing: crate::gpu_timing::GpuTimingHandle,
+    /// Caché de uploads de bytecode/constants (ver `UploadCache`).
+    uploads: crate::gpu_readback::UploadCache,
 }
 
 #[repr(C)]
@@ -274,16 +333,103 @@ impl DomainColoringComputePipeline {
             mapped_at_creation: false,
         });
 
+        // FIX 3: BindGroup persistente (los buffers nunca se reasignan).
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Domain Coloring Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bytecode_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: constants_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: out_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
         Self {
             pipeline,
-            bind_group_layout,
+            bind_group,
             params_buffer,
             bytecode_buffer,
             constants_buffer,
             out_buffer,
             out_readback,
             timing: crate::gpu_timing::create(device, queue, "Domain Coloring", 1),
+            uploads: crate::gpu_readback::UploadCache::new(),
         }
+    }
+
+    /// Compila el programa complejo una vez (origen único del path simple y
+    /// del tildado por bandas): bytecode + constantes en f32.
+    fn compile_domain_program(
+        expr: &ComplexExpr,
+        variables: &BTreeMap<String, f64>,
+    ) -> Option<(Vec<u32>, Vec<[f32; 2]>)> {
+        let mut prog = ComplexBytecodeProgram::default();
+        if compile_complex_expr(expr, variables, &[("z", 0), ("x", 1), ("y", 2)], &mut prog)
+            .is_err()
+        {
+            return None;
+        }
+
+        if prog.code.len() > MAX_COMPLEX_CODE || !gpu_program_is_supported(&prog.code) {
+            return None;
+        }
+        let f32_constants = crate::complex_compute::pack_complex_constants(&prog.constants)?;
+        Some((prog.code, f32_constants))
+    }
+
+    /// Arma el submit para `rows` filas de ancho completo sobre `grid` (la
+    /// banda ya trae su origen en Y ajustado). `None` si excede el
+    /// presupuesto por dispatch o si el origen/paso no es finito.
+    fn submit_for_rows(
+        code: Vec<u32>,
+        constants: Vec<[f32; 2]>,
+        dc_mode: u32,
+        grid: &DomainGrid,
+        rows: usize,
+    ) -> Option<DomainColoringSubmit> {
+        let cells = grid.res.checked_mul(rows)?;
+        if cells == 0 || cells > MAX_CELLS {
+            return None;
+        }
+        let grid_size = u32::try_from(cells).ok()?;
+        let grid_res = u32::try_from(grid.res).ok()?;
+        // Origen y paso en f32 (igual que antes por punto): no finitos
+        // rechazan el submit en vez de subir basura a la GPU.
+        let origin = [grid.x_min as f32, grid.y_min as f32];
+        let step = [grid.dx as f32, grid.dy as f32];
+        if !origin.iter().chain(step.iter()).all(|v| v.is_finite()) {
+            return None;
+        }
+
+        let params = GridParamsUniform {
+            grid_size,
+            code_len: u32::try_from(code.len()).ok()?,
+            dc_mode,
+            _pad1: 0,
+            grid_origin: origin,
+            grid_step: step,
+            grid_res,
+            _pad2: 0,
+        };
+        Some(DomainColoringSubmit {
+            params,
+            code,
+            constants,
+            cells,
+        })
     }
 
     /// Compila y valida un submit sin tocar la GPU: origen único para el path
@@ -316,44 +462,30 @@ impl DomainColoringComputePipeline {
             return None;
         }
 
-        let mut prog = ComplexBytecodeProgram::default();
-        if compile_complex_expr(expr, variables, &[("z", 0), ("x", 1), ("y", 2)], &mut prog)
-            .is_err()
-        {
-            return None;
-        }
+        let (code, constants) = Self::compile_domain_program(expr, variables)?;
+        Self::submit_for_rows(code, constants, dc_mode, grid, grid.res)
+    }
 
-        if prog.code.len() > MAX_COMPLEX_CODE || !gpu_program_is_supported(&prog.code) {
-            return None;
-        }
-        let f32_constants = crate::complex_compute::pack_complex_constants(&prog.constants)?;
-
-        let grid_size = u32::try_from(cells).ok()?;
-        let grid_res = u32::try_from(grid.res).ok()?;
-        // Origen y paso en f32 (igual que antes por punto): no finitos
-        // rechazan el submit en vez de subir basura a la GPU.
-        let origin = [grid.x_min as f32, grid.y_min as f32];
-        let step = [grid.dx as f32, grid.dy as f32];
-        if !origin.iter().chain(step.iter()).all(|v| v.is_finite()) {
-            return None;
-        }
-
-        let params = GridParamsUniform {
-            grid_size,
-            code_len: u32::try_from(prog.code.len()).ok()?,
-            dc_mode,
-            _pad1: 0,
-            grid_origin: origin,
-            grid_step: step,
-            grid_res,
-            _pad2: 0,
+    /// Submit de una banda `[start_row, start_row + row_count)` de ancho
+    /// completo (FIX 4): mismo programa, origen en X desplazado (la fila
+    /// externa del shader es `fi = gid.x / res`, que deriva la coordenada X).
+    fn plan_band_submit(
+        expr: &ComplexExpr,
+        variables: &BTreeMap<String, f64>,
+        dc_mode: u32,
+        grid: &DomainGrid,
+        start_row: usize,
+        row_count: usize,
+    ) -> Option<DomainColoringSubmit> {
+        let (code, constants) = Self::compile_domain_program(expr, variables)?;
+        let band = DomainGrid {
+            x_min: grid.x_min + start_row as f64 * grid.dx,
+            y_min: grid.y_min,
+            dx: grid.dx,
+            dy: grid.dy,
+            res: grid.res,
         };
-        Some(DomainColoringSubmit {
-            params,
-            code: prog.code,
-            constants: f32_constants,
-            cells,
-        })
+        Self::submit_for_rows(code, constants, dc_mode, &band, row_count)
     }
 
     /// Escribe uniformes, hace submit del dispatch y arma el `map_async`.
@@ -370,35 +502,24 @@ impl DomainColoringComputePipeline {
             0,
             bytemuck::cast_slice(&[submit.params]),
         );
-        queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
-        queue.write_buffer(
-            &self.constants_buffer,
-            0,
-            bytemuck::cast_slice(&submit.constants),
-        );
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Domain Coloring Bind Group"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: self.bytecode_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: self.constants_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: self.out_buffer.as_entire_binding(),
-                },
-            ],
-        });
+        // Los params cambian por viewport: siempre se suben. Bytecode y
+        // constants se saltean si el programa no cambió (ver `UploadCache`).
+        if self
+            .uploads
+            .code_changed(bytemuck::cast_slice(&submit.code))
+        {
+            queue.write_buffer(&self.bytecode_buffer, 0, bytemuck::cast_slice(&submit.code));
+        }
+        if self
+            .uploads
+            .constants_changed(bytemuck::cast_slice(&submit.constants))
+        {
+            queue.write_buffer(
+                &self.constants_buffer,
+                0,
+                bytemuck::cast_slice(&submit.constants),
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Domain Coloring Encoder"),
@@ -411,8 +532,11 @@ impl DomainColoringComputePipeline {
                 timestamp_writes: crate::gpu_timing::timestamp_writes(&self.timing, 0),
             });
             cpass.set_pipeline(&self.pipeline);
-            cpass.set_bind_group(0, &bind_group, &[]);
-            let wg = (submit.params.grid_size).div_ceil(64).max(1);
+            cpass.set_bind_group(0, &self.bind_group, &[]);
+            // Debe igualar `@workgroup_size(64)` del shader.
+            let wg = (submit.params.grid_size)
+                .div_ceil(DOMAIN_COLORING_WORKGROUP_SIZE)
+                .max(1);
             cpass.dispatch_workgroups(wg, 1, 1);
         }
 
@@ -512,6 +636,13 @@ impl DomainColoringComputePipeline {
     ///
     /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
     /// background. El prepare usa `dispatch` + `resolve_eval`.
+    ///
+    /// FIX 4: grids sobre [`MAX_CELLS`] se tilan en bandas de ≤250k celdas
+    /// (loop secuencial: cada banda hace submit + poll + copia antes de la
+    /// siguiente, seguro con los buffers compartidos) en vez de devolver
+    /// `None` hacia un fallback CPU silencioso de 360k celdas. El `dispatch`
+    /// asíncrono sigue simple-submit (`None` sobre presupuesto): con un solo
+    /// buffer de salida no puede encadenar bandas entre frames.
     pub fn evaluate(
         &self,
         device: &wgpu::Device,
@@ -521,12 +652,38 @@ impl DomainColoringComputePipeline {
         variables: &BTreeMap<String, f64>,
         dc_mode: u32,
     ) -> Option<GridColors> {
-        let submit = Self::plan_submit(expr, variables, dc_mode, grid)?;
-        if submit.cells == 0 {
+        let cells = grid.cell_count()?;
+        if cells == 0 {
             return Some(Vec::new());
         }
+        if domain_cells_within_budget(cells) {
+            let submit = Self::plan_submit(expr, variables, dc_mode, grid)?;
+            if submit.cells == 0 {
+                return Some(Vec::new());
+            }
+            return self.evaluate_submit(device, queue, &submit);
+        }
+        let bands = domain_coloring_bands(grid.res)?;
+        let mut all = Vec::new();
+        all.try_reserve_exact(cells).ok()?;
+        for (start_row, row_count) in bands {
+            let submit =
+                Self::plan_band_submit(expr, variables, dc_mode, grid, start_row, row_count)?;
+            all.extend(self.evaluate_submit(device, queue, &submit)?);
+        }
+        Some(all)
+    }
+
+    /// Ejecuta un submit ya planeado (sync, con poll acotado) y copia los
+    /// colores. Origen único del path simple y del tildado por bandas.
+    fn evaluate_submit(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        submit: &DomainColoringSubmit,
+    ) -> Option<GridColors> {
         let cell_count = submit.cells;
-        let map_ok = self.submit_buffers(device, queue, &submit);
+        let map_ok = self.submit_buffers(device, queue, submit);
         log::trace!("Domain coloring sync readback (bounded poll) — 1 intento por frame");
         let mapped = crate::sync_readback_with_timeout(device, &map_ok);
         crate::gpu_timing::read_and_log(&self.timing, device, "Domain Coloring");

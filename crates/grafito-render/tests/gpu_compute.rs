@@ -5,10 +5,11 @@ use grafito_core::{
         marching_squares_from_grid as cpu_marching_squares, MAX_IMPLICIT_GRID_SIZE,
         MAX_MARCHING_SQUARES_SEGMENTS, MAX_MARCHING_SQUARES_WORK_UNITS,
     },
-    Cube3DObj, Document, GeoObject, ImplicitCurveObj, ParametricCurve2DObj, ParametricCurve3DObj,
-    PolarCurveObj, RelationOperator, Surface3DObj, VectorField2DObj,
+    ComplexGridObj, Cube3DObj, Document, GeoObject, ImplicitCurveObj, ParametricCurve2DObj,
+    ParametricCurve3DObj, PolarCurveObj, RelationOperator, RenderQuality, Surface3DObj,
+    VectorField2DObj,
 };
-use grafito_geometry::{Camera3D, Color, Point3D};
+use grafito_geometry::{Camera3D, Color, Point3D, ViewTransform};
 use grafito_render::{
     complex_compute::ComplexComputePipeline,
     domain_coloring_compute::DomainColoringComputePipeline,
@@ -1289,26 +1290,33 @@ fn maybe_compute_batched_3d_and_polar_populate_caches_in_one_submit() {
 }
 
 #[test]
-fn domain_coloring_rejects_over_250k_cells_before_dispatch() {
+fn domain_coloring_sync_tiles_over_250k_while_async_rejects() {
     use grafito_render::domain_coloring_compute::DomainGrid;
     let Some(gpu) = gpu_context_or_skip() else {
         return;
     };
     let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
     let expr = grafito_complex::math::complex_expr::parse("z").expect("test expression must parse");
-    // 501² = 251001 > 250k: la malla regular se rechaza sin tocar la GPU.
+    // 600² = 360_000 > 250k: el path síncrono tila en bandas (FIX 4) en vez
+    // del fallback CPU silencioso; el dispatch asíncrono sigue simple-submit
+    // (None honesto: un solo buffer de salida no encadena bandas).
     let grid = DomainGrid {
         x_min: 0.0,
         y_min: 0.0,
         dx: 1e-6,
         dy: 1.0,
-        res: 501,
+        res: 600,
     };
 
-    let result = compute.evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0);
+    let colors = compute
+        .evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+        .expect("evaluate tila grids sobre 250k celdas");
+    assert_eq!(colors.len(), 600 * 600);
     assert!(
-        result.is_none(),
-        "MAX_CELLS 250k es un presupuesto duro: 251_001 celdas se rechazan"
+        compute
+            .dispatch(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+            .is_none(),
+        "MAX_CELLS 250k sigue siendo presupuesto duro por dispatch"
     );
 }
 
@@ -1538,5 +1546,269 @@ fn assert_close(actual: f64, expected: f64, context: &str) {
     assert!(
         (actual - expected).abs() <= EPSILON,
         "{context}: expected {expected}, got {actual}"
+    );
+}
+
+/// Referencia del mecanismo `trig_reduce` en f32: replica bit a bit la
+/// aritmética que ve el shader (`x` en f32 por la grilla, `arg` en f32,
+/// reducción `rem_euclid(TAU)` en f32) y evalúa el trig en f64.
+///
+/// Aísla el mecanismo de reducción del redondeo f32 del argumento: si la GPU
+/// no reduce (sin crudo del driver), diverge de esta referencia en cuanto
+/// `|arg| > 2π`; si reduce igual que la CPU, coincide a precisión del `sin`
+/// del driver.
+fn trig_reduce_f32_reference(arg: f32, op: &str) -> f64 {
+    let tau = std::f32::consts::TAU;
+    let reduced = if arg.abs() < tau || arg.abs() >= f32::MAX {
+        arg
+    } else {
+        arg - (arg / tau).floor() * tau
+    };
+    let r = reduced as f64;
+    match op {
+        "sin" => r.sin(),
+        "cos" => r.cos(),
+        _ => r.tan(),
+    }
+}
+
+#[test]
+fn implicit_gpu_trig_reduce_matches_cpu_at_large_args() {
+    // FIX 1 — paridad `trig_reduce` (`grafito_geometry::expr::trig_reduce`):
+    // con `|arg| > 2π` el `sin` crudo del driver diverge de la CPU. Antes del
+    // fix este test falla (error ≈ 5e-3 en `sin(10000·x)` sobre RADV);
+    // con la reducción en el shader pasa (tol 1e-5 sobre el mecanismo).
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ImplicitComputePipeline::new(&gpu.device, &gpu.queue, 16);
+    let bounds = (0.0, 10.0, 0.0, 1.0);
+    let grid = 8usize;
+    let gs = grid as f32;
+
+    for (expr, op) in [("sin(10000*x)", "sin"), ("cos(10000*x)", "cos")] {
+        let curve = ImplicitCurveObj::new(expr, "0", RelationOperator::Eq);
+        let rows = compute
+            .evaluate(
+                &gpu.device,
+                &gpu.queue,
+                &curve,
+                bounds,
+                grid,
+                &BTreeMap::new(),
+            )
+            .expect("supported implicit expression must execute on the GPU");
+        assert_eq!(rows.len(), grid + 1);
+        let mut worst = 0.0f64;
+        for (j, row) in rows.iter().enumerate() {
+            assert_eq!(row.len(), grid + 1);
+            for (i, value) in row.iter().enumerate() {
+                let x = i as f32 * (10.0f32 - 0.0f32) / gs;
+                let arg = 10000.0f32 * x;
+                let expected = trig_reduce_f32_reference(arg, op);
+                assert!(
+                    value.is_finite(),
+                    "{expr}: GPU devolvió no-finito en celda ({i},{j})"
+                );
+                let err = (value - expected).abs();
+                worst = worst.max(err);
+                assert!(
+                    err <= 1e-5,
+                    "{expr}: celda ({i},{j}) x={x}: GPU {value} vs CPU-reducida {expected} (err {err})"
+                );
+            }
+        }
+        eprintln!("trig_reduce {expr}: peor err GPU vs CPU-reducida = {worst:.2e}");
+    }
+}
+
+#[test]
+fn implicit_gpu_large_arg_field_matches_cpu_f64_within_f32() {
+    // FIX 1, extremo a extremo: `sin(1000·x)` en x∈[0,10] (args hasta 1e4)
+    // coincide GPU≈CPU-f64 con tol 1e-3. El contorno sale del mismo campo vía
+    // `marching_squares_from_grid` (CPU compartido), así que paridad de campo
+    // implica paridad de contorno.
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = ImplicitComputePipeline::new(&gpu.device, &gpu.queue, 16);
+    let bounds = (0.0, 10.0, 0.0, 1.0);
+    let grid = 8usize;
+    let expr = "sin(1000*x)";
+    let curve = ImplicitCurveObj::new(expr, "0", RelationOperator::Eq);
+    let rows = compute
+        .evaluate(
+            &gpu.device,
+            &gpu.queue,
+            &curve,
+            bounds,
+            grid,
+            &BTreeMap::new(),
+        )
+        .expect("supported implicit expression must execute on the GPU");
+    for (j, row) in rows.iter().enumerate() {
+        for (i, value) in row.iter().enumerate() {
+            let x = i as f64 / grid as f64 * 10.0;
+            let y = j as f64 / grid as f64;
+            let expected = cpu_scalar(expr, x, y);
+            assert!(
+                (value - expected).abs() <= 1e-3,
+                "{expr}: celda ({i},{j}): GPU {value} vs CPU {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn complex_grid_gpu_path_skips_rects_above_geometry_budget() {
+    // FIX 2: con `ComplexGrid{res 300}` en High el path GPU emitía 90k rects
+    // (360k vértices + 540k índices por rebuild). Sobre el presupuesto de
+    // 65_536 celdas no se emite geometría: la textura de domain coloring en
+    // `render_2d` queda como owner (paridad con el path CPU).
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let renderer = Renderer::new(
+        &gpu.device,
+        &gpu.queue,
+        wgpu::TextureFormat::Bgra8UnormSrgb,
+        1,
+    );
+    assert!(
+        renderer.domain_coloring_compute.is_some(),
+        "el test necesita el pipeline de domain coloring"
+    );
+    let mut doc = Document::new();
+    doc.render_quality = RenderQuality::High;
+    let mut cg = ComplexGridObj::new("z", -2.0, 2.0, -2.0, 2.0);
+    cg.render_mode = 1;
+    cg.density = 300;
+    let view = ViewTransform::new(800.0, 600.0);
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    renderer.add_complex_grid_geometry_gpu(
+        &mut vertices,
+        &mut indices,
+        &doc,
+        &view,
+        &cg,
+        Some(&gpu.device),
+        Some(&gpu.queue),
+    );
+    eprintln!(
+        "FIX2 res300-High GPU: {} vértices, {} índices",
+        vertices.len(),
+        indices.len()
+    );
+    assert!(
+        vertices.len() <= 65_536 * 4,
+        "sobre el presupuesto no hay rects por celda: {} vértices",
+        vertices.len()
+    );
+    assert!(
+        indices.len() <= 65_536 * 6,
+        "sobre el presupuesto no hay rects por celda: {} índices",
+        indices.len()
+    );
+}
+
+fn cpu_1d(expr: &str, x: f64) -> f64 {
+    grafito_geometry::expr::prepare_function_ast(expr, &BTreeMap::new(), &["x"])
+        .expect("test expression must parse")
+        .eval_at("x", x)
+}
+
+#[test]
+fn function_shared_bind_group_serves_repeated_and_changed_exprs() {
+    // FIX 3: un `BindGroup` persistente + caché de uploads por pipeline.
+    // Mismo programa dos veces (ejercita el skip de upload) + cambio de
+    // programa (ejercita la re-subida): ningún dispatch ve bytecode rancio.
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = FunctionComputePipeline::new(&gpu.device, &gpu.queue, 64);
+    let domain = (0.0, 1.0);
+    for expr in ["sin(x)", "sin(x)", "cos(x)"] {
+        let values = compute
+            .evaluate_expr(&gpu.device, &gpu.queue, expr, domain, 8, &BTreeMap::new())
+            .expect("supported function expression must execute on the GPU");
+        assert_eq!(values.len(), 9);
+        for (index, value) in values.iter().enumerate() {
+            let expected = cpu_1d(expr, index as f64 / 8.0);
+            let tolerance = 1e-5_f64.max(expected.abs() * 1e-6);
+            assert!(
+                (value - expected).abs() <= tolerance,
+                "{expr}: muestra {index}: GPU {value} vs CPU {expected}"
+            );
+        }
+    }
+}
+
+#[test]
+fn domain_coloring_sync_tiles_512x512_with_correct_colors() {
+    // FIX 4 — red-first: res 512 → 262_144 celdas en 2 bandas de ≤250k;
+    // antes `evaluate` devolvía `None` (fallback CPU silencioso).
+    // Correctitud sin duplicar el HSL del shader: lightness = (max+min)/2
+    // del RGB depende solo de |f| (f(z) = z²+1, coefs reales): celdas
+    // conjugadas comparten lightness, y la costura entre bandas (filas
+    // 487/488, campo suave lejos de los ceros en x=0) es continua.
+    // res 512 sobre [-2,2]² da dx = 2^-7 exacto en f32: los centros
+    // conjugados son negaciones exactas y la simetría es bit a bit.
+    use grafito_render::domain_coloring_compute::DomainGrid;
+    let Some(gpu) = gpu_context_or_skip() else {
+        return;
+    };
+    let compute = DomainColoringComputePipeline::new(&gpu.device, &gpu.queue);
+    let expr =
+        grafito_complex::math::complex_expr::parse("z^2+1").expect("test expression must parse");
+    let res = 512usize;
+    let grid = DomainGrid {
+        x_min: -2.0,
+        y_min: -2.0,
+        dx: 4.0 / res as f64,
+        dy: 4.0 / res as f64,
+        res,
+    };
+    let colors = compute
+        .evaluate(&gpu.device, &gpu.queue, &expr, &grid, &BTreeMap::new(), 0)
+        .expect("evaluate tila 512x512 en bandas de ≤250k celdas");
+    assert_eq!(colors.len(), res * res);
+    let light = |i: usize, j: usize| {
+        let c = colors[i * res + j];
+        assert!(
+            c.iter().all(|v| v.is_finite()),
+            "celda ({i},{j}) finita debe colorear: {c:?}"
+        );
+        (c.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            + c.iter().copied().fold(f32::INFINITY, f32::min))
+            * 0.5
+    };
+    // Simetría conjugada a ambos lados de la costura (banda 0: filas 0..488,
+    // banda 1: filas 488..512).
+    for i in [0, 100, 256, 487, 488, 500, 511] {
+        for j in [0, 128, 255] {
+            let a = light(i, j);
+            let b = light(i, res - 1 - j);
+            assert!(
+                (a - b).abs() < 1e-2,
+                "simetría conjugada ({i},{j}): {a} vs {b}"
+            );
+        }
+    }
+    // Continuidad en la costura entre bandas (campo suave, lejos de z=±i).
+    for j in [0, 128, 256, 384, 511] {
+        let a = light(487, j);
+        let b = light(488, j);
+        assert!(
+            (a - b).abs() < 5e-2,
+            "costura entre bandas (487,{j}) vs (488,{j}): {a} vs {b}"
+        );
+    }
+    // Centro (|f| chico) más oscuro que la esquina (|f| grande).
+    assert!(
+        light(256, 256) < light(0, 0),
+        "centro más oscuro que esquina: {} vs {}",
+        light(256, 256),
+        light(0, 0)
     );
 }

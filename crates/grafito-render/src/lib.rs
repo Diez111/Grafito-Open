@@ -68,9 +68,11 @@ thread_local! {
         RefCell::new(lru::LruCache::new(TRANSFORMED_CACHE_SIZE));
 }
 const TRANSFORMED_CACHE_CAP: usize = 64;
-#[allow(clippy::useless_nonzero_new_unchecked)]
 const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
-    unsafe { std::num::NonZeroUsize::new_unchecked(TRANSFORMED_CACHE_CAP) };
+    match std::num::NonZeroUsize::new(TRANSFORMED_CACHE_CAP) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
 
 /// Bounded synchronous readback: wraps `map_async` + `poll` in
 /// `pollster::block_on` with a timeout. Uses `wgpu::Maintain::Poll` (non
@@ -1568,6 +1570,21 @@ fn thermal_colormap(t: f64) -> Color {
     let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0);
     let b = (1.5 - t * 3.0).clamp(0.0, 1.0);
     Color::new(r, g, b, 1.0)
+}
+
+/// Presupuesto de celdas para emitir geometría de grilla compleja: 1 rect =
+/// 4 vértices + 6 índices por celda, así que 65_536 celdas son 262k vértices.
+/// Por encima se omite la malla y la textura de domain coloring en `render_2d`
+/// queda como owner (el path GPU antes generaba 90k rects = 360k vértices por
+/// rebuild en High/res 300).
+pub(crate) const MAX_COMPLEX_GRID_GEOMETRY_CELLS: usize = 65_536;
+
+/// `true` si una grilla cuadrada de lado `res` cabe en el presupuesto de
+/// geometría ([`MAX_COMPLEX_GRID_GEOMETRY_CELLS`]). Pura, sin GPU: origen
+/// único del chequeo en los paths CPU y GPU.
+pub(crate) fn complex_grid_geometry_within_budget(res: usize) -> bool {
+    res.checked_mul(res)
+        .is_some_and(|cells| cells <= MAX_COMPLEX_GRID_GEOMETRY_CELLS)
 }
 
 fn complex_grid_resolution(cg: &ComplexGridObj, quality: RenderQuality) -> usize {
@@ -4915,6 +4932,12 @@ impl Renderer {
                 (device, queue, &self.domain_coloring_compute)
             {
                 let res = complex_grid_resolution(cg, document.render_quality);
+                if !complex_grid_geometry_within_budget(res) {
+                    // Paridad con el path CPU: no emitir 90k rects (360k
+                    // vértices) por rebuild; la textura de domain coloring en
+                    // `render_2d` queda como owner.
+                    return;
+                }
                 let dx = (cg.x_max - cg.x_min) / res as f64;
                 let dy = (cg.y_max - cg.y_min) / res as f64;
 
@@ -4974,7 +4997,7 @@ impl Renderer {
         // y se deja la textura como owner (evita OOM y 250k draws).
         if cg.render_mode == 1 {
             let res = complex_grid_resolution(cg, document.render_quality);
-            if res * res > 65_536 {
+            if !complex_grid_geometry_within_budget(res) {
                 // Evita 250k rect_filled en CPU: usa textura en `render_2d`
                 return;
             }
