@@ -87,6 +87,35 @@ fn tool_defs() -> Vec<Value> {
             "annotations": {"readOnlyHint": false, "destructiveHint": false}
         }),
         json!({
+            "name": "chromatic_solve",
+            "description": "Resuelve la k-coloración del grafo unit-distance de puntos con kissat/cadical y verifica el modelo arista por arista (model_checked). UNSAT = no k-coloreable según el solver (sin proof-checking).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "points": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "k": {"type": "integer", "minimum": 1, "maximum": 16},
+                    "solver": {"type": "string", "enum": ["kissat", "cadical"]},
+                    "timeout_ms": {"type": "integer", "minimum": 0}
+                },
+                "required": ["points", "k"]
+            },
+            "annotations": {"readOnlyHint": false, "destructiveHint": false}
+        }),
+        json!({
+            "name": "verify_coloring",
+            "description": "Doble puerta sin solver: verifica un coloreo candidato del grafo unit-distance arista por arista (valid, violations, first_violation).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "points": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "coloring": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+                    "k": {"type": "integer", "minimum": 1, "maximum": 16}
+                },
+                "required": ["points", "coloring"]
+            },
+            "annotations": {"readOnlyHint": true, "destructiveHint": false}
+        }),
+        json!({
             "name": "check_bounds",
             "description": "Cotas conocidas y topes efectivos del laboratorio (con guía honesta de lo que no escala).",
             "inputSchema": {
@@ -110,7 +139,7 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-/// Todas las tools: 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+/// Todas las tools: 8 lab + execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
 pub fn all_tool_defs() -> Vec<Value> {
     let mut defs = tool_defs();
     defs.extend(crate::bridge::proxied_tool_defs());
@@ -365,6 +394,8 @@ fn call_tool(name: &str, args: &Value, limits: &LabLimits) -> Result<Value, Stri
         "verify_search_run" => tools::verify_search_run(args, limits),
         "topp39_best_of" => tools::topp39_best_of(args, limits),
         "sat_check" => tools::sat_check(args),
+        "chromatic_solve" => tools::chromatic_solve(args, limits),
+        "verify_coloring" => tools::verify_coloring(args, limits),
         "check_bounds" => tools::check_bounds(args, limits),
         "execute_command" => crate::bridge::execute_command(args),
         "lean_check" => crate::lean::lean_check(args),
@@ -413,8 +444,8 @@ mod tests {
             .and_then(|r| r.get("tools"))
             .and_then(Value::as_array)
             .unwrap();
-        // 7 lab + execute + 21 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
-        assert_eq!(tools.len(), 35);
+        // 8 lab + execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+        assert_eq!(tools.len(), 46);
         // Notificaciones no responden.
         assert!(dispatch(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),

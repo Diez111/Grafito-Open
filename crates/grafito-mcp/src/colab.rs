@@ -991,6 +991,11 @@ mod tests {
 
     #[test]
     fn params_string_y_cnf_hash_tolerados() {
+        // store_cnf/load_cnf resuelven el dir vía GRAFITO_LAB_LEDGER (ledger.rs:102):
+        // sin el lock, el test que muta esa env en paralelo parte el roundtrip.
+        let _guard = crate::ledger::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         // params como string JSON (los modelos lo mandan así a veces).
         let out = export_colab_job(
             &json!({"kind": "cas_crosscheck", "params": r#"{"expression": "x**2", "claim": "2*x", "check": "derivative_of"}"#}),

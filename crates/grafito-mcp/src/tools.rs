@@ -144,26 +144,26 @@ pub fn search_topp39(args: &Value, limits: &LabLimits) -> Result<Value, String> 
 
 // ── export_dimacs ────────────────────────────────────────────────────
 
-fn parse_points(raw: &[Value]) -> Result<Vec<Point2>, String> {
+fn parse_points(raw: &[Value], tool: &str) -> Result<Vec<Point2>, String> {
     if raw.is_empty() {
-        return Err("export_dimacs: 'points' vacío".into());
+        return Err(format!("{tool}: 'points' vacío"));
     }
     let mut out = Vec::with_capacity(raw.len().min(500_001));
     for (idx, item) in raw.iter().enumerate() {
         let pair = item
             .as_array()
-            .ok_or(format!("export_dimacs: punto {idx} debe ser [x, y]"))?;
+            .ok_or(format!("{tool}: punto {idx} debe ser [x, y]"))?;
         if pair.len() != 2 {
-            return Err(format!("export_dimacs: punto {idx} debe ser [x, y]"));
+            return Err(format!("{tool}: punto {idx} debe ser [x, y]"));
         }
         let x = pair[0]
             .as_f64()
-            .ok_or(format!("export_dimacs: punto {idx} x no numérico"))?;
+            .ok_or(format!("{tool}: punto {idx} x no numérico"))?;
         let y = pair[1]
             .as_f64()
-            .ok_or(format!("export_dimacs: punto {idx} y no numérico"))?;
+            .ok_or(format!("{tool}: punto {idx} y no numérico"))?;
         if !x.is_finite() || !y.is_finite() {
-            return Err(format!("export_dimacs: punto {idx} no finito"));
+            return Err(format!("{tool}: punto {idx} no finito"));
         }
         out.push(Point2::new(x, y));
     }
@@ -182,7 +182,7 @@ pub fn export_dimacs(args: &Value, limits: &LabLimits) -> Result<Value, String> 
             limits.max_points
         ));
     }
-    let points = parse_points(raw)?;
+    let points = parse_points(raw, "export_dimacs")?;
     let k = args
         .get("k")
         .and_then(Value::as_u64)
@@ -406,6 +406,266 @@ pub fn sat_check(args: &Value) -> Result<Value, String> {
     Ok(payload)
 }
 
+// ── chromatic_solve ──────────────────────────────────────────────────
+
+/// Decodifica un modelo SAT (literales `v`) a coloreo por vértice.
+/// Codificación: var(v, c) = v * k + c + 1 (la de `export_dimacs_kcoloring`).
+/// `None` si algún vértice queda sin color en el modelo.
+fn model_to_coloring(model: &[i64], n: usize, k: usize) -> Option<Vec<usize>> {
+    let mut coloring = vec![usize::MAX; n];
+    for &lit in model {
+        if lit <= 0 {
+            continue;
+        }
+        let var = lit as usize - 1;
+        let v = var / k;
+        let c = var % k;
+        if v < n {
+            coloring[v] = c;
+        }
+    }
+    if coloring.iter().all(|&c| c < k) {
+        Some(coloring)
+    } else {
+        None
+    }
+}
+
+/// Cuenta violaciones de un coloreo sobre las aristas y devuelve la primera
+/// arista en conflicto (doble puerta anti-alucinación, sin solver).
+fn coloring_violations(
+    edges: &[(usize, usize)],
+    coloring: &[usize],
+) -> Result<(usize, Option<(usize, usize)>), String> {
+    let mut violations = 0usize;
+    let mut first: Option<(usize, usize)> = None;
+    for &(a, b) in edges {
+        let ca = *coloring
+            .get(a)
+            .ok_or("verify_coloring: 'coloring' más corto que los vértices")?;
+        let cb = *coloring
+            .get(b)
+            .ok_or("verify_coloring: 'coloring' más corto que los vértices")?;
+        if ca == cb {
+            violations += 1;
+            if first.is_none() {
+                first = Some((a, b));
+            }
+        }
+    }
+    Ok((violations, first))
+}
+
+/// Etapa compartida: puntos + k + solver + timeout con validación honesta.
+fn chromatic_args(
+    args: &Value,
+    tool: &str,
+    limits: &LabLimits,
+) -> Result<(Vec<Point2>, usize, crate::sat::Solver, u64), String> {
+    let raw = args
+        .get("points")
+        .and_then(Value::as_array)
+        .ok_or(format!("{tool}: 'points' debe ser [[x, y], ...]"))?;
+    if raw.len() > limits.max_points {
+        return Err(format!(
+            "{tool}: puntos fuera de [1, {}]",
+            limits.max_points
+        ));
+    }
+    let points = parse_points(raw, tool)?;
+    let k = args
+        .get("k")
+        .and_then(Value::as_u64)
+        .ok_or(format!("{tool}: 'k' debe ser un entero [1, 16]"))?;
+    if !(1..=16).contains(&k) {
+        return Err(format!("{tool}: 'k' fuera de [1, 16]"));
+    }
+    let solver = crate::sat::Solver::parse(
+        args.get("solver")
+            .and_then(Value::as_str)
+            .unwrap_or("kissat"),
+    )
+    .map_err(|e| format!("{tool}: {e}"))?;
+    let timeout_ms = match args.get("timeout_ms").and_then(Value::as_u64) {
+        Some(v) if v <= MAX_SAT_TIMEOUT_MS => v,
+        Some(v) => {
+            return Err(format!(
+                "{tool}: 'timeout_ms' {v} excede el máximo {MAX_SAT_TIMEOUT_MS} (24 h); 0 = sin timeout explícito"
+            ))
+        }
+        None => crate::DEFAULT_SAT_TIMEOUT_MS,
+    };
+    Ok((points, k as usize, solver, timeout_ms))
+}
+
+/// `chromatic_solve(points, k, solver?, timeout_ms?)`: resuelve la
+/// k-coloración del grafo unit-distance con kissat/cadical y VERIFICA el
+/// modelo arista por arista. `model_checked: true` = coloreo válido; jamás se
+/// declara coloreabilidad sin ese chequeo. UNSAT = no k-coloreable según el
+/// solver (sin proof-checking; `cnf_hash` queda para repro).
+pub fn chromatic_solve(args: &Value, limits: &LabLimits) -> Result<Value, String> {
+    let tool = "chromatic_solve";
+    let (points, k, solver, timeout_ms) = chromatic_args(args, tool, limits)?;
+    let edges =
+        unit_edges_spatial(&points, 1e-9, limits.max_edges).map_err(|e| format!("{tool}: {e}"))?;
+    let vars = points
+        .len()
+        .checked_mul(k)
+        .ok_or(format!("{tool}: desborde en n * k"))?;
+    if vars > limits.max_dimacs_vars {
+        return Err(format!(
+            "{tool}: {vars} variables exceden el máximo {}; probá con menos vértices o colores",
+            limits.max_dimacs_vars
+        ));
+    }
+    let cnf = grafito_geometry::search::export_dimacs_kcoloring(points.len(), &edges, k)
+        .map_err(|e| format!("{tool}: {e}"))?;
+    if cnf.len() > limits.max_cnf_bytes {
+        return Err(format!(
+            "{tool}: CNF de {} bytes excede {} bytes; probá con menos puntos o menor k",
+            cnf.len(),
+            limits.max_cnf_bytes
+        ));
+    }
+    let cnf_hash = sha256_hex(&cnf);
+    ledger::store_cnf(&cnf_hash, &cnf).map_err(|e| format!("{tool}: {e}"))?;
+    let mut tmp = std::env::temp_dir();
+    tmp.push(format!("grafito-{cnf_hash}.cnf"));
+    std::fs::write(&tmp, &cnf).map_err(|e| format!("{tool}: no se pudo staging: {e}"))?;
+    let outcome =
+        crate::sat::run_solver(solver, &tmp, timeout_ms).map_err(|e| format!("{tool}: {e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    let payload = if outcome.status == "SAT" {
+        let model = outcome.model.clone().unwrap_or_default();
+        let coloring = model_to_coloring(&model, points.len(), k);
+        match coloring {
+            Some(ref col) => {
+                let (violations, first) = coloring_violations(&edges, col)?;
+                json!({
+                    "tool": tool,
+                    "status": "SAT",
+                    "k": k,
+                    "n": points.len(),
+                    "edges": edges.len(),
+                    "solver": outcome.solver,
+                    "time_ms": outcome.time_ms,
+                    "cnf_hash": cnf_hash,
+                    "coloring": col,
+                    "model_checked": violations == 0,
+                    "violations": violations,
+                    "first_violation": first,
+                    "note": if violations == 0 {
+                        "coloreo verificado arista por arista"
+                    } else {
+                        "modelo SAT con violaciones: NO declarar coloreabilidad (bug de codificación o solver)"
+                    },
+                })
+            }
+            None => json!({
+                "tool": tool,
+                "status": "SAT",
+                "k": k,
+                "n": points.len(),
+                "edges": edges.len(),
+                "solver": outcome.solver,
+                "time_ms": outcome.time_ms,
+                "cnf_hash": cnf_hash,
+                "model_checked": false,
+                "note": "modelo SAT sin coloreo completo: NO declarar coloreabilidad",
+            }),
+        }
+    } else if outcome.status == "UNSAT" {
+        json!({
+            "tool": tool,
+            "status": "UNSAT",
+            "k": k,
+            "n": points.len(),
+            "edges": edges.len(),
+            "solver": outcome.solver,
+            "time_ms": outcome.time_ms,
+            "cnf_hash": cnf_hash,
+            "note": "no k-coloreable según el solver (sin proof-checking); reproducí con sat_check(cnf_hash) u otro solver",
+        })
+    } else {
+        json!({
+            "tool": tool,
+            "status": outcome.status,
+            "k": k,
+            "n": points.len(),
+            "edges": edges.len(),
+            "solver": outcome.solver,
+            "time_ms": outcome.time_ms,
+            "cnf_hash": cnf_hash,
+            "note": "sin veredicto; probá con más timeout_ms u otro solver",
+        })
+    };
+    let _ = ledger::store_result(&cnf_hash, &payload);
+    Ok(payload)
+}
+
+/// `verify_coloring(points, coloring, k?)`: doble puerta pura, sin solver.
+/// Cuenta violaciones del coloreo candidato sobre el grafo unit-distance y
+/// señala la primera arista en conflicto. `valid: true` = coloreo propio.
+pub fn verify_coloring(args: &Value, limits: &LabLimits) -> Result<Value, String> {
+    let tool = "verify_coloring";
+    let raw = args
+        .get("points")
+        .and_then(Value::as_array)
+        .ok_or("verify_coloring: 'points' debe ser [[x, y], ...]")?;
+    if raw.len() > limits.max_points {
+        return Err(format!(
+            "verify_coloring: puntos fuera de [1, {}]",
+            limits.max_points
+        ));
+    }
+    let points = parse_points(raw, tool)?;
+    let raw_col = args
+        .get("coloring")
+        .and_then(Value::as_array)
+        .ok_or("verify_coloring: 'coloring' debe ser [c0, c1, ...]")?;
+    if raw_col.len() != points.len() {
+        return Err(format!(
+            "verify_coloring: 'coloring' tiene {} entradas y hay {} puntos",
+            raw_col.len(),
+            points.len()
+        ));
+    }
+    let k = match args.get("k").and_then(Value::as_u64) {
+        Some(v) if (1..=16).contains(&v) => v as usize,
+        Some(_) => return Err("verify_coloring: 'k' fuera de [1, 16]".into()),
+        None => 16,
+    };
+    let mut coloring = Vec::with_capacity(raw_col.len());
+    for (idx, item) in raw_col.iter().enumerate() {
+        let c = item
+            .as_u64()
+            .ok_or(format!("verify_coloring: color {idx} no entero"))?;
+        if c as usize >= k {
+            return Err(format!(
+                "verify_coloring: color {idx} = {c} fuera de [0, {k})"
+            ));
+        }
+        coloring.push(c as usize);
+    }
+    let edges = unit_edges_spatial(&points, 1e-9, limits.max_edges)
+        .map_err(|e| format!("verify_coloring: {e}"))?;
+    let (violations, first) = coloring_violations(&edges, &coloring)?;
+    Ok(json!({
+        "tool": tool,
+        "n": points.len(),
+        "edges": edges.len(),
+        "k": k,
+        "valid": violations == 0,
+        "violations": violations,
+        "first_violation": first,
+        "note": if violations == 0 {
+            "coloreo verificado arista por arista (doble puerta, sin solver)"
+        } else {
+            "coloreo inválido: mirá first_violation"
+        },
+    }))
+}
+
 // ── check_bounds ─────────────────────────────────────────────────────
 
 /// `check_bounds(problem?)`: cotas efectivas + guía honesta.
@@ -435,6 +695,30 @@ pub fn check_bounds(args: &Value, limits: &LabLimits) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_to_coloring_decodifica_var_v_k_c() {
+        // triángulo k=3: var(v, c) = v*k + c + 1 → positivos 1, 5, 9
+        let model = vec![1, -2, -3, -4, 5, -6, -7, -8, 9];
+        let col = model_to_coloring(&model, 3, 3).unwrap();
+        assert_eq!(col, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn model_incompleto_devuelve_none() {
+        assert!(model_to_coloring(&[1, -2, -3], 3, 3).is_none());
+    }
+
+    #[test]
+    fn coloring_violations_cuenta_y_senal_a() {
+        let edges = vec![(0, 1), (1, 2), (0, 2)];
+        let (v, first) = coloring_violations(&edges, &[0, 0, 1]).unwrap();
+        assert_eq!(v, 1);
+        assert_eq!(first, Some((0, 1)));
+        let (v2, first2) = coloring_violations(&edges, &[0, 1, 2]).unwrap();
+        assert_eq!(v2, 0);
+        assert!(first2.is_none());
+    }
 
     #[test]
     fn search_y_verify_roundtrip() {

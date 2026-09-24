@@ -5,14 +5,19 @@
 //! producen resultados acotados para el modelo. El Apply de propuestas gráficas
 //! sigue siendo una decisión explícita del usuario en la capa de UI.
 //!
-//! F3.2 — PedagogyDispatcher: 6 tools pedagógicas puras (scaffold, generate_exercise,
-//! assess_answer, get_curriculum, suggest_next, generate_animation) orquestables
+//! F3.2 — PedagogyDispatcher: 8 tools pedagógicas puras (scaffold,
+//! generate_exercise, assess_answer, get_curriculum, suggest_next,
+//! generate_animation, generate_guion, generate_short_script) orquestables
 //! vía OpenCode Go sin salir del chat. Todas son puras, sin I/O ni mutación de Document.
 //!
-//! F2 — harness experto: 8 tools matemáticas puras (`math_tool_schemas`:
+//! F2 — harness experto: 13 tools matemáticas puras (`math_tool_schemas`:
 //! verify_step, diff, integrate, limit, solve_poly, solve_system,
-//! interval_check, groebner_gate) sobre el CAS tipado nativo con segunda
+//! interval_check, groebner_gate, residue, principal_part, poly_gcd,
+//! resultant, steps) sobre el CAS tipado nativo con segunda
 //! opinión `cas_nativo` (alkahest-cas 3 tras el feature `cas-nativo`).
+//! `steps` cubre las 12 variantes de `CasOp` (derivada/integral/límite/
+//! Taylor/Solve + ODE orden-n y Euler, Frobenius, Laplace derivada/integral,
+//! Gröbner ordenado y Eliminate): ver `STEPS_OPERATIONS`.
 
 use crate::ProviderSettings;
 use grafito_agent::ledger::{JSpaceLedger, MAX_LEDGER_RENDER_BYTES};
@@ -22,6 +27,7 @@ use grafito_agent::loop_engine::{
 };
 use grafito_agent::schema::{ToolCall, ToolResult, ToolSchema};
 use grafito_agent::AgentEvent;
+use grafito_geometry::cas_steps::{CasOp, MAX_CAS_STEPS, MAX_STEP_BYTES};
 use serde_json::{json, Value};
 use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
@@ -258,6 +264,17 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "solve_system" => solve_system_tool(call),
         "interval_check" => interval_check_tool(call),
         "groebner_gate" => groebner_gate_tool(call),
+        // Math tools (F2+) — Laurent, subresultante/Sylvester y stepper paso a paso
+        "residue" => residue_tool(call),
+        "principal_part" => principal_part_tool(call),
+        "poly_gcd" => poly_gcd_tool(call),
+        "resultant" => resultant_tool(call),
+        "steps" => steps_tool(call),
+        // Math tools (G1) — contrato grafito-geometry, puras y sin I/O
+        "fourier" => fourier_tool(call),
+        "nth_derivative" => nth_derivative_tool(call),
+        "partial" => partial_tool(call),
+        "lambert_w" => lambert_w_tool(call),
         // Harness-1 — puras, sin Document, sin I/O, sin red
         "run_command" => run_command_tool(call),
         "solid_measure_3d" => solid_measure_3d_tool(call),
@@ -347,15 +364,11 @@ fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
                 }
             }
         } else if let Some(array) = value.as_array() {
+            // Recursa también DENTRO de los elementos: `{"a":[{"b":"<5000>"}]}`
+            // no debe evadir el filtro (mismo caso que `grafito-agent`).
             for element in array {
-                if let Some(text) = element.as_str() {
-                    if text.len() > cap {
-                        return Some(ToolResult::text(
-                            call_id,
-                            false,
-                            format!("argument '{key}' array element exceeds 2000 byte limit"),
-                        ));
-                    }
+                if let Some(rejected) = check_value(call_id, key, element, cap) {
+                    return Some(rejected);
                 }
             }
         }
@@ -464,41 +477,64 @@ fn grafito_docs_tool(call: &ToolCall) -> ToolResult {
 
 // ── Tools matemáticas F2 (puras, sin Document, sin I/O) ─────────────────────
 
+/// Expresión obligatoria no vacía de hasta 2000 bytes (string ya extraído).
+///
+/// Núcleo reutilizable para args simples (`math_expr_arg`) y elementos de
+/// arrays (`math_string_vector`).
+fn checked_expr(raw: &str, key: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return Err(format!("tool requires a non-empty '{key}' string"));
+    }
+    if raw.len() > grafito_geometry::expr::MAX_EXPR_LENGTH {
+        return Err(format!(
+            "argument '{key}' exceeds {} byte limit",
+            grafito_geometry::expr::MAX_EXPR_LENGTH
+        ));
+    }
+    Ok(raw.to_owned())
+}
+
 /// Expresión obligatoria no vacía de hasta 2000 bytes.
 fn math_expr_arg(call: &ToolCall, key: &str) -> Result<String, String> {
     match call.arguments.get(key).and_then(Value::as_str) {
-        Some(raw) if !raw.trim().is_empty() => {
-            if raw.len() > grafito_geometry::expr::MAX_EXPR_LENGTH {
-                Err(format!(
-                    "argument '{key}' exceeds {} byte limit",
-                    grafito_geometry::expr::MAX_EXPR_LENGTH
-                ))
-            } else {
-                Ok(raw.to_owned())
-            }
-        }
-        _ => Err(format!("tool requires a non-empty '{key}' string")),
+        Some(raw) => checked_expr(raw, key),
+        None => Err(format!("tool requires a non-empty '{key}' string")),
     }
+}
+
+/// Identificador ASCII corto (≤64, `[A-Za-z_][A-Za-z0-9_]*`), trimmeado.
+///
+/// Reutilizable por `math_ident_arg` y por los arrays de variables
+/// (`vars`, `elim`) de `steps`.
+fn checked_ident(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let mut chars = trimmed.chars();
+    let head_ok = chars
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+    if trimmed.len() <= 64 && head_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        Ok(trimmed.to_owned())
+    } else {
+        Err("variable must be a short ASCII identifier".into())
+    }
+}
+
+/// Identificador opcional con default (`variable`, `y`, `t`, `s`, …): error
+/// sólo si está presente y no es identificador válido.
+fn math_ident_arg(call: &ToolCall, key: &str, default: &str) -> Result<String, String> {
+    let raw = call
+        .arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default);
+    checked_ident(raw)
 }
 
 /// Variable opcional (default `x`): identificador ASCII corto.
 fn math_var_arg(call: &ToolCall) -> Result<String, String> {
-    let raw = call
-        .arguments
-        .get("variable")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("x");
-    let mut chars = raw.chars();
-    let head_ok = chars
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
-    if raw.len() <= 64 && head_ok && chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-        Ok(raw.to_owned())
-    } else {
-        Err("variable must be a short ASCII identifier".into())
-    }
+    math_ident_arg(call, "variable", "x")
 }
 
 /// Número finito obligatorio.
@@ -506,6 +542,48 @@ fn math_finite_arg(call: &ToolCall, key: &str) -> Result<f64, String> {
     match call.arguments.get(key).and_then(Value::as_f64) {
         Some(value) if value.is_finite() => Ok(value),
         _ => Err(format!("tool requires a finite '{key}' number")),
+    }
+}
+
+/// Número finito opcional con default (error sólo si está presente y no es finito).
+fn math_optional_finite(call: &ToolCall, key: &str, default: f64) -> Result<f64, String> {
+    match call.arguments.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(_) => math_finite_arg(call, key),
+    }
+}
+
+/// Entero obligatorio en `[min..=max]`.
+fn math_int_arg(call: &ToolCall, key: &str, min: usize, max: usize) -> Result<usize, String> {
+    match call.arguments.get(key).and_then(Value::as_u64) {
+        Some(value) => usize::try_from(value)
+            .ok()
+            .filter(|number| *number >= min && *number <= max)
+            .ok_or_else(|| format!("'{key}' debe estar en {min}..={max}")),
+        None => Err(format!("tool requires a '{key}' integer in {min}..={max}")),
+    }
+}
+
+/// Entero opcional en `[min..=max]` con default (error sólo si está presente y
+/// no entra en la cota).
+fn math_optional_int(
+    call: &ToolCall,
+    key: &str,
+    min: usize,
+    max: usize,
+    default: usize,
+) -> Result<usize, String> {
+    match call.arguments.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(_) => math_int_arg(call, key, min, max),
+    }
+}
+
+/// Expresión opcional con default (error sólo si está presente e inválida).
+fn math_optional_expr(call: &ToolCall, key: &str, default: &str) -> Result<String, String> {
+    match call.arguments.get(key) {
+        None | Some(Value::Null) => Ok(default.to_owned()),
+        Some(_) => math_expr_arg(call, key),
     }
 }
 
@@ -883,6 +961,898 @@ fn groebner_gate_tool(call: &ToolCall) -> ToolResult {
         ),
         Err(error) => math_err(call, format!("groebner_gate: {error}")),
     }
+}
+
+/// residue(expression, variable?, at?) — residuo de Laurent en un polo.
+///
+/// `laurent_residue` con orden máximo `MAX_LAURENT_ORDER` 16: devuelve
+/// residuo, orden del polo y método (`AnalyticZero` / `SimplePole` /
+/// `HigherPole`). Error honesto si hay singularidad esencial u orden mayor.
+fn residue_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let at = match math_optional_finite(call, "at", 0.0) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::cas::laurent_residue(
+        &expression,
+        &variable,
+        at,
+        grafito_geometry::cas::MAX_LAURENT_ORDER,
+    ) {
+        Ok(outcome) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "residue": crate::format_number(outcome.residue),
+                "pole_order": outcome.pole_order,
+                "method": format!("{:?}", outcome.method),
+                "point": crate::format_number(at),
+            })
+            .to_string(),
+        ),
+        Err(error) => math_err(call, format!("residue: {error}")),
+    }
+}
+
+/// principal_part(expression, variable?, at?) — parte principal de Laurent.
+///
+/// `laurent_principal_part`: términos `[(power, coefficient)]` con
+/// `power < 0`, acotados a `MAX_SERIES_TERMS` 64. Vacía si la expresión es
+/// analítica (o con singularidad evitable) en el punto.
+fn principal_part_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let at = match math_optional_finite(call, "at", 0.0) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::cas::laurent_principal_part(
+        &expression,
+        &variable,
+        at,
+        grafito_geometry::cas::MAX_LAURENT_ORDER,
+    ) {
+        Ok(terms) => {
+            let entries: Vec<Value> = terms
+                .iter()
+                .map(|(power, coefficient)| {
+                    json!({
+                        "power": power,
+                        "coefficient": crate::format_number(*coefficient),
+                    })
+                })
+                .collect();
+            ToolResult::text(
+                &call.id,
+                true,
+                json!({
+                    "terms": entries,
+                    "count": terms.len(),
+                    "point": crate::format_number(at),
+                })
+                .to_string(),
+            )
+        }
+        Err(error) => math_err(call, format!("principal_part: {error}")),
+    }
+}
+
+// ── Tools matemáticas G1 (contrato grafito-geometry) ─────────────────────────
+//
+// Espejo puro de los handlers `geo_*` de `grafito-command`: mismos motores y
+// mismas cotas que los comandos FourierSeries/NDerivativeSym/Partial/LambertW,
+// sin Document, sin I/O. Las tools del contrato que todavía no tienen motor en
+// `grafito-geometry` (`improper_integral`, `substitute_int`, `parse_latex`,
+// `to_latex`, `sum_closed`, `pde_heat`, `pde_wave`) NO se exponen: mejor tool
+// ausente que una tool que solo devuelve "motor no disponible". Cuando salgan
+// los motores se suman acá + dispatch + schema + pin numérico.
+
+/// Desempaqueta `MathResult` de valor: éxito (`Exact`/`Approximate`) → `Ok`,
+/// error tipado → `Err` ya formateado por `math_outcome_to_tool`.
+fn math_value_or_fail<T: std::fmt::Display>(
+    call: &ToolCall,
+    operation: &str,
+    outcome: grafito_geometry::outcome::MathResult<T>,
+) -> Result<T, ToolResult> {
+    match outcome {
+        grafito_geometry::outcome::MathResult::Exact(value)
+        | grafito_geometry::outcome::MathResult::Approximate { value, .. } => Ok(value),
+        other => Err(math_outcome_to_tool(call, operation, other)),
+    }
+}
+
+/// fourier(expression, variable?, L, n) — coeficientes + serie truncada.
+///
+/// `L` es el período completo `T` (fin y > 0), `n` los armónicos 1..=32
+/// (misma cota que `FourierSeries`). `fourier_coefficients` ya trae `a0`,
+/// `an`, `bn`, origen y estimación de error; la serie se arma desde los
+/// mismos coeficientes (`series_string`) sin recalcular la cuadratura.
+fn fourier_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let period = match math_finite_arg(call, "L") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    if period <= 0.0 {
+        return math_err(call, "fourier: 'L' debe ser finito y > 0".into());
+    }
+    let terms = match math_int_arg(call, "n", 1, 32) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::fourier::fourier_coefficients(&expression, &variable, period, terms) {
+        Ok(coeffs) => {
+            let lista = |xs: &[f64]| -> Vec<String> {
+                xs.iter()
+                    .map(|value| crate::format_number(*value))
+                    .collect()
+            };
+            ToolResult::text(
+                &call.id,
+                true,
+                json!({
+                    "a0": crate::format_number(coeffs.a0),
+                    "an": lista(&coeffs.an),
+                    "bn": lista(&coeffs.bn),
+                    "terms": coeffs.terms,
+                    "source": format!("{:?}", coeffs.source),
+                    "error_estimate": crate::format_number(coeffs.error_estimate),
+                    "series": coeffs.series_string(&variable),
+                })
+                .to_string(),
+            )
+        }
+        Err(error) => math_err(call, format!("fourier: {error}")),
+    }
+}
+
+/// nth_derivative(expression, variable?, n) — derivada simbólica n-ésima.
+///
+/// Itera `symbolic::derivative_typed` (no hay `derivative_nth` en el motor);
+/// `n` en 1..=16 por el crecimiento factorial del árbol, misma cota que
+/// `NDerivativeSym`.
+fn nth_derivative_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let n = match math_int_arg(call, "n", 1, 16) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let mut actual = expression;
+    for _ in 0..n {
+        actual = match math_value_or_fail(
+            call,
+            "nth_derivative",
+            grafito_geometry::symbolic::derivative_typed(&actual, &variable),
+        ) {
+            Ok(value) => value,
+            Err(failed) => return failed,
+        };
+    }
+    ToolResult::text(&call.id, true, actual)
+}
+
+/// partial(expression, variable?) — derivada parcial simbólica respecto de
+/// `variable` (las demás variables son constantes para `derivative_typed`).
+fn partial_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match math_value_or_fail(
+        call,
+        "partial",
+        grafito_geometry::symbolic::derivative_typed(&expression, &variable),
+    ) {
+        Ok(parcial) => ToolResult::text(&call.id, true, parcial),
+        Err(failed) => failed,
+    }
+}
+
+/// lambert_w(a) — rama principal `W0` de `W·e^W = a`.
+///
+/// Dominio real `a ≥ -1/e` (punto de ramificación `W0 = W-1 = -1`); la rama
+/// `W-1` vive en `(−∞, −1]` y queda fuera de la ventana a propósito. El
+/// método de búsqueda vive en `grafito-geometry` (`cas::find_root`), acá solo
+/// se fija el problema y la ventana: mismo camino que el comando `LambertW`.
+fn lambert_w_tool(call: &ToolCall) -> ToolResult {
+    let a = match math_finite_arg(call, "a") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let branch_point = -1.0 / std::f64::consts::E;
+    if a < branch_point {
+        return math_err(
+            call,
+            format!(
+                "lambert_w: fuera de dominio (a = {} < -1/e = {})",
+                crate::format_number(a),
+                crate::format_number(branch_point)
+            ),
+        );
+    }
+    let f = |w: f64| w * w.exp() - a;
+    match grafito_geometry::cas::find_root(f, (-1.0, a.max(0.0) + 1.0)) {
+        Some(w) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "branch": "W0",
+                "a": crate::format_number(a),
+                "w": crate::format_number(w),
+            })
+            .to_string(),
+        ),
+        None => math_err(
+            call,
+            format!(
+                "lambert_w: sin convergencia para a = {}",
+                crate::format_number(a)
+            ),
+        ),
+    }
+}
+
+/// Vector de coeficientes finitos en orden ASCENDENTE (grado ≤ 64).
+fn math_coeff_vector(value: Option<&Value>, key: &str) -> Result<Vec<f64>, String> {
+    const MAX_POLY_COEFFS: usize = 65;
+    let items = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("tool requiere '{key}' como array de coeficientes finitos"))?;
+    if items.is_empty() || items.len() > MAX_POLY_COEFFS {
+        return Err(format!(
+            "'{key}' debe tener 1..={MAX_POLY_COEFFS} coeficientes (grado ≤ 64)"
+        ));
+    }
+    items
+        .iter()
+        .map(|item| {
+            item.as_f64()
+                .filter(|number| number.is_finite())
+                .ok_or_else(|| format!("coeficientes de '{key}' deben ser números finitos"))
+        })
+        .collect()
+}
+
+/// Array de strings validados elemento a elemento, presupuesto `[min..=max]`.
+///
+/// Reutiliza los chequeos de elemento (`checked_expr` para expresiones,
+/// `checked_ident` para variables) con mensaje que nombra el índice.
+fn math_string_vector<F>(
+    value: Option<&Value>,
+    key: &str,
+    min: usize,
+    max: usize,
+    check: F,
+) -> Result<Vec<String>, String>
+where
+    F: Fn(&str) -> Result<String, String>,
+{
+    let items = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("tool requiere '{key}' como array de strings"))?;
+    if items.len() < min || items.len() > max {
+        return Err(format!("'{key}' debe tener {min}..={max} elementos"));
+    }
+    let mut out = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let raw = item
+            .as_str()
+            .ok_or_else(|| format!("'{key}[{index}]' debe ser un string no vacío"))?;
+        out.push(check(raw)?);
+    }
+    Ok(out)
+}
+
+/// poly_gcd(p, q) — MCD mónico por PRS subresultante (`poly_gcd_subresultant`).
+///
+/// Coeficientes ascendentes: `p[i]` multiplica `x^i` (`[-1, 0, 1]` = x²−1).
+fn poly_gcd_tool(call: &ToolCall) -> ToolResult {
+    let p = match math_coeff_vector(call.arguments.get("p"), "p") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let q = match math_coeff_vector(call.arguments.get("q"), "q") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let gcd = grafito_geometry::symbolic::poly_gcd_subresultant(p, q);
+    ToolResult::text(
+        &call.id,
+        true,
+        json!({
+            "gcd": gcd.iter().map(|c| crate::format_number(*c)).collect::<Vec<_>>(),
+            "degree": gcd.len().saturating_sub(1),
+            "ordering": "ascendente: gcd[i] multiplica x^i",
+        })
+        .to_string(),
+    )
+}
+
+/// Monomios `[ix, iy, c]` (c·x^ix·y^iy) a `BiPoly` + grados en x e y.
+///
+/// Exponentes 0..=32 (los `powi` del motor son i32 y la resultante exige
+/// `m·deg_x(g) + n·deg_x(f) ≤ 32`); términos nulos se descartan y el grado en
+/// y se toma de los exponentes efectivamente no nulos. Máx 64 monomios.
+fn math_bipoly_arg(
+    value: Option<&Value>,
+    key: &str,
+) -> Result<(grafito_geometry::solve::BiPoly, usize, usize), String> {
+    const MAX_BIPOLY_TERMS: usize = 64;
+    const MAX_BIPOLY_EXP: u64 = 32;
+    let items = value
+        .and_then(Value::as_array)
+        .ok_or_else(|| format!("tool requiere '{key}' como array de monomios [ix, iy, c]"))?;
+    if items.is_empty() || items.len() > MAX_BIPOLY_TERMS {
+        return Err(format!(
+            "'{key}' debe tener 1..={MAX_BIPOLY_TERMS} monomios [ix, iy, c]"
+        ));
+    }
+    let mut poly = grafito_geometry::solve::BiPoly::new();
+    for item in items {
+        let monomial = item
+            .as_array()
+            .filter(|parts| parts.len() == 3)
+            .ok_or_else(|| format!("cada monomio de '{key}' debe ser [ix, iy, c]"))?;
+        let ix = monomial[0]
+            .as_u64()
+            .filter(|exp| *exp <= MAX_BIPOLY_EXP)
+            .ok_or_else(|| format!("exponente x de '{key}' debe ser 0..={MAX_BIPOLY_EXP}"))?;
+        let iy = monomial[1]
+            .as_u64()
+            .filter(|exp| *exp <= MAX_BIPOLY_EXP)
+            .ok_or_else(|| format!("exponente y de '{key}' debe ser 0..={MAX_BIPOLY_EXP}"))?;
+        let coefficient = monomial[2]
+            .as_f64()
+            .filter(|number| number.is_finite())
+            .ok_or_else(|| format!("coeficiente de '{key}' debe ser finito"))?;
+        if coefficient.abs() > 1e-12 {
+            *poly.entry((ix as u32, iy as u32)).or_insert(0.0) += coefficient;
+        }
+    }
+    if poly.is_empty() {
+        return Err(format!("'{key}' no puede ser el polinomio nulo"));
+    }
+    let x_degree = poly.keys().map(|(ix, _)| *ix as usize).max().unwrap_or(0);
+    let y_degree = poly.keys().map(|(_, iy)| *iy as usize).max().unwrap_or(0);
+    Ok((poly, x_degree, y_degree))
+}
+
+/// Grado en y declarado (opcional): default calculado; si se pasa debe
+/// coincidir con el mayor exponente y no nulo (Sylvester asume grados exactos).
+fn math_degree_arg(call: &ToolCall, key: &str, computed: usize) -> Result<usize, String> {
+    match call.arguments.get(key) {
+        None | Some(Value::Null) => Ok(computed),
+        Some(_) => {
+            let raw = call
+                .arguments
+                .get(key)
+                .and_then(Value::as_u64)
+                .filter(|value| *value <= 32)
+                .ok_or_else(|| format!("'{key}' debe ser un entero 0..=32"))?
+                as usize;
+            if raw != computed {
+                return Err(format!(
+                    "'{key}' = {raw} no coincide con el grado en y calculado ({computed})"
+                ));
+            }
+            Ok(raw)
+        }
+    }
+}
+
+/// resultant(f, g, m?, n?) — `Res_y(f, g)(x)` por matriz de Sylvester.
+///
+/// `sylvester_resultant` interpola el determinante en la base monomial de x
+/// (coeficientes ascendentes). Cotas del motor: `m + n` en 1..=8 y
+/// `m·deg_x(g) + n·deg_x(f) ≤ 32`.
+fn resultant_tool(call: &ToolCall) -> ToolResult {
+    let (f1, f_x_deg, f_y_deg) = match math_bipoly_arg(call.arguments.get("f"), "f") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let (f2, g_x_deg, g_y_deg) = match math_bipoly_arg(call.arguments.get("g"), "g") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let m = match math_degree_arg(call, "m", f_y_deg) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let n = match math_degree_arg(call, "n", g_y_deg) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let size = m + n;
+    if size == 0 || size > 8 {
+        return math_err(
+            call,
+            format!("resultant: deg_y(f)+deg_y(g) = {size} fuera de 1..=8"),
+        );
+    }
+    let deg_bound = m * g_x_deg + n * f_x_deg;
+    if deg_bound > 32 {
+        return math_err(
+            call,
+            format!("resultant: m·deg_x(g)+n·deg_x(f) = {deg_bound} excede 32"),
+        );
+    }
+    match grafito_geometry::solve::sylvester_resultant(&f1, &f2, m, n) {
+        Some(coeffs) => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "coeffs": coeffs.iter().map(|c| crate::format_number(*c)).collect::<Vec<_>>(),
+                "degree": coeffs.len().saturating_sub(1),
+                "m": m,
+                "n": n,
+                "ordering": "ascendente: coeffs[i] multiplica x^i",
+            })
+            .to_string(),
+        ),
+        None => math_err(
+            call,
+            "resultant: sin resultante utilizable (idénticamente nula: f y g dependientes en y, o determinantes no finitos)".into(),
+        ),
+    }
+}
+
+// ── steps: traza paso a paso (12/12 variantes de CasOp) ─────────────────────
+
+/// Catálogo honesto de `steps`: una entrada por variante de `CasOp`
+/// (`grafito_geometry::cas_steps::CasOp`, cubierto 12/12) con sus argumentos
+/// (`?` = opcional con default, `[a..=b]` = cota de array) y sus sinónimos.
+/// Fuente única del error honesto (qué falta + catálogo) y de la pin de
+/// cobertura `steps_cubre_las_doce_variantes_de_cas_op`.
+const STEPS_OPERATIONS: &[(&str, &str, &[&str])] = &[
+    ("derivative", "expression, variable?", &["derivada", "diff"]),
+    (
+        "integral",
+        "expression, variable?",
+        &["integrate", "integra"],
+    ),
+    (
+        "limit",
+        "expression, variable?, at?",
+        &["lim", "limite", "límite"],
+    ),
+    ("taylor", "expression, variable?, center?, order?", &[]),
+    ("solve", "expression, variable?", &["resolver"]),
+    (
+        "ode_nth_order",
+        "coeffs[2..=9] [aₙ..a₀], rhs?, variable?",
+        &["edo_orden_n"],
+    ),
+    ("ode_euler", "a, b, rhs?, variable?", &["euler"]),
+    ("frobenius", "p, q, variable?, center?, terms?", &[]),
+    (
+        "laplace_derivative",
+        "order, initials[order], y?, t?, s?",
+        &["laplace_derivada"],
+    ),
+    ("laplace_integral", "f, t?, s?", &[]),
+    (
+        "groebner",
+        "polys[1..=12], vars[1..=6], monomial_order?",
+        &["groebner_ordered", "gröbner"],
+    ),
+    (
+        "eliminate",
+        "polys[1..=12], vars[1..=6], elim[1..=6]",
+        &["eliminar"],
+    ),
+];
+
+/// Catálogo renderizado para el error honesto.
+fn steps_operation_catalog() -> String {
+    STEPS_OPERATIONS
+        .iter()
+        .map(|(operation, args, _)| format!("{operation} ({args})"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Resuelve la operación pedida (con sinónimos) a su nombre canónico.
+fn steps_canonical(lowered: &str) -> Option<&'static str> {
+    STEPS_OPERATIONS
+        .iter()
+        .find(|(canonical, _, aliases)| *canonical == lowered || aliases.contains(&lowered))
+        .map(|(canonical, _, _)| *canonical)
+}
+
+/// Presencia de un argumento de `steps`: null/blanco/vacío no cuenta.
+fn steps_arg_present(call: &ToolCall, key: &str) -> bool {
+    match call.arguments.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// Exige los argumentos obligatorios de la variante: lista TODOS los
+/// faltantes en un solo error honesto (qué falta).
+fn steps_require(call: &ToolCall, operation: &str, keys: &[&str]) -> Result<(), String> {
+    let faltan: Vec<&str> = keys
+        .iter()
+        .copied()
+        .filter(|key| !steps_arg_present(call, key))
+        .collect();
+    if faltan.is_empty() {
+        return Ok(());
+    }
+    let listado = faltan
+        .iter()
+        .map(|key| format!("'{key}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let verbo = if faltan.len() == 1 { "falta" } else { "faltan" };
+    Err(format!("{verbo} {listado} para '{operation}'"))
+}
+
+/// Error honesto de `steps`: qué falta/qué está mal + el catálogo de las 12
+/// operaciones soportadas con sus argumentos.
+fn steps_err(call: &ToolCall, detail: impl std::fmt::Display) -> ToolResult {
+    math_err(
+        call,
+        format!(
+            "steps: {detail}. Operaciones soportadas: {}",
+            steps_operation_catalog()
+        ),
+    )
+}
+
+/// Segundo miembro opcional de las EDO (default `0`: caso homogéneo).
+fn steps_rhs_arg(call: &ToolCall) -> Result<String, String> {
+    math_optional_expr(call, "rhs", "0")
+}
+
+/// Orden monomial de Gröbner (default `lex`), validado en el borde.
+fn steps_monomial_order(call: &ToolCall) -> Result<String, String> {
+    match call.arguments.get("monomial_order") {
+        None | Some(Value::Null) => Ok("lex".to_string()),
+        Some(value) => {
+            let clean = value
+                .as_str()
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase();
+            match clean.as_str() {
+                "lex" | "grlex" | "grevlex" => Ok(clean),
+                _ => Err(format!(
+                    "'monomial_order' debe ser lex|grlex|grevlex (llegó {value})"
+                )),
+            }
+        }
+    }
+}
+
+/// Construye la `CasOp` de la variante pedida (1:1 con las 12 variantes de
+/// `grafito_geometry::cas_steps::CasOp`) y devuelve la operación normalizada
+/// para el eco del resultado. `Err` = qué falta o qué está mal, sin catálogo
+/// (lo agrega [`steps_err`]).
+fn steps_cas_op(call: &ToolCall) -> Result<(CasOp, String), String> {
+    let operation =
+        string_arg(call, "operation").ok_or_else(|| String::from("falta 'operation' no vacía"))?;
+    let lowered = operation.to_lowercase();
+    let canonical =
+        steps_canonical(&lowered).ok_or_else(|| format!("operación '{operation}' no soportada"))?;
+    let op = match canonical {
+        // ── variantes de una expresión (5 históricas) ─────────────────────
+        "derivative" => {
+            steps_require(call, &lowered, &["expression"])?;
+            CasOp::Derivative {
+                expr: math_expr_arg(call, "expression")?,
+                var: math_var_arg(call)?,
+            }
+        }
+        "integral" => {
+            steps_require(call, &lowered, &["expression"])?;
+            CasOp::Integral {
+                expr: math_expr_arg(call, "expression")?,
+                var: math_var_arg(call)?,
+            }
+        }
+        "limit" => {
+            steps_require(call, &lowered, &["expression"])?;
+            CasOp::Limit {
+                expr: math_expr_arg(call, "expression")?,
+                var: math_var_arg(call)?,
+                at: math_optional_finite(call, "at", 0.0)?,
+            }
+        }
+        "taylor" => {
+            steps_require(call, &lowered, &["expression"])?;
+            CasOp::Taylor {
+                expr: math_expr_arg(call, "expression")?,
+                var: math_var_arg(call)?,
+                center: math_optional_finite(call, "center", 0.0)?,
+                order: math_optional_int(
+                    call,
+                    "order",
+                    1,
+                    grafito_geometry::analysis::MAX_TAYLOR_ORDER,
+                    4,
+                )?,
+            }
+        }
+        "solve" => {
+            steps_require(call, &lowered, &["expression"])?;
+            CasOp::Solve {
+                expr: math_expr_arg(call, "expression")?,
+                var: math_var_arg(call)?,
+            }
+        }
+        // ── 7 variantes con args extra (frente B2 del motor) ──────────────
+        "ode_nth_order" => {
+            steps_require(call, &lowered, &["coeffs"])?;
+            let max_coeffs = grafito_geometry::ode::MAX_ODE_NTH_ORDER + 1;
+            let count = call
+                .arguments
+                .get("coeffs")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            if !(2..=max_coeffs).contains(&count) {
+                return Err(format!(
+                    "'coeffs' debe tener 2..={max_coeffs} números [aₙ..a₀] descendentes (orden 1..={})",
+                    grafito_geometry::ode::MAX_ODE_NTH_ORDER
+                ));
+            }
+            // `CasOp` los quiere strings constantes: se reutiliza el parser de
+            // `math_coeff_vector` (el orden lo define esta tool: descendente).
+            let coeffs = math_coeff_vector(call.arguments.get("coeffs"), "coeffs")?
+                .iter()
+                .map(|coefficient| crate::format_number(*coefficient))
+                .collect();
+            CasOp::OdeNthOrder {
+                coeffs,
+                rhs: steps_rhs_arg(call)?,
+                x: math_var_arg(call)?,
+            }
+        }
+        "ode_euler" => {
+            steps_require(call, &lowered, &["a", "b"])?;
+            CasOp::OdeEuler {
+                a: math_expr_arg(call, "a")?,
+                b: math_expr_arg(call, "b")?,
+                rhs: steps_rhs_arg(call)?,
+                x: math_var_arg(call)?,
+            }
+        }
+        "frobenius" => {
+            steps_require(call, &lowered, &["p", "q"])?;
+            CasOp::Frobenius {
+                p: math_expr_arg(call, "p")?,
+                q: math_expr_arg(call, "q")?,
+                x: math_var_arg(call)?,
+                center: math_optional_finite(call, "center", 0.0)?,
+                terms: math_optional_int(
+                    call,
+                    "terms",
+                    2,
+                    grafito_geometry::ode::MAX_FROBENIUS_TERMS,
+                    4,
+                )?,
+            }
+        }
+        "laplace_derivative" => {
+            steps_require(call, &lowered, &["order", "initials"])?;
+            let order = math_int_arg(
+                call,
+                "order",
+                1,
+                grafito_geometry::ode::MAX_LAPLACE_DERIV_ORDER,
+            )?;
+            let initials = math_string_vector(
+                call.arguments.get("initials"),
+                "initials",
+                1,
+                grafito_geometry::ode::MAX_LAPLACE_DERIV_ORDER,
+                |raw| checked_expr(raw, "initials"),
+            )?;
+            if initials.len() != order {
+                return Err(format!(
+                    "'order' = {order} e 'initials' con {} valores son incompatibles: hacen falta {order} iniciales y(0)..y^({})",
+                    initials.len(),
+                    order.saturating_sub(1)
+                ));
+            }
+            CasOp::LaplaceDerivative {
+                order: u32::try_from(order).map_err(|_| String::from("'order' fuera de rango"))?,
+                y: math_ident_arg(call, "y", "y")?,
+                t: math_ident_arg(call, "t", "t")?,
+                s: math_ident_arg(call, "s", "s")?,
+                initials,
+            }
+        }
+        "laplace_integral" => {
+            steps_require(call, &lowered, &["f"])?;
+            CasOp::LaplaceIntegral {
+                f: math_expr_arg(call, "f")?,
+                t: math_ident_arg(call, "t", "t")?,
+                s: math_ident_arg(call, "s", "s")?,
+            }
+        }
+        "groebner" => {
+            steps_require(call, &lowered, &["polys", "vars"])?;
+            CasOp::GroebnerOrdered {
+                polys: math_string_vector(
+                    call.arguments.get("polys"),
+                    "polys",
+                    1,
+                    grafito_geometry::cas::MAX_GROEBNER_POLYS,
+                    |raw| checked_expr(raw, "polys"),
+                )?,
+                vars: math_string_vector(
+                    call.arguments.get("vars"),
+                    "vars",
+                    1,
+                    grafito_geometry::cas::MAX_GROEBNER_VARS,
+                    checked_ident,
+                )?,
+                order: steps_monomial_order(call)?,
+            }
+        }
+        "eliminate" => {
+            steps_require(call, &lowered, &["polys", "vars", "elim"])?;
+            let vars = math_string_vector(
+                call.arguments.get("vars"),
+                "vars",
+                1,
+                grafito_geometry::cas::MAX_GROEBNER_VARS,
+                checked_ident,
+            )?;
+            let elim = math_string_vector(
+                call.arguments.get("elim"),
+                "elim",
+                1,
+                grafito_geometry::cas::MAX_GROEBNER_VARS,
+                checked_ident,
+            )?;
+            for variable in &elim {
+                if !vars.contains(variable) {
+                    return Err(format!(
+                        "'elim' y 'vars' son incompatibles: '{variable}' no está en el sistema"
+                    ));
+                }
+            }
+            CasOp::Eliminate {
+                polys: math_string_vector(
+                    call.arguments.get("polys"),
+                    "polys",
+                    1,
+                    grafito_geometry::cas::MAX_GROEBNER_POLYS,
+                    |raw| checked_expr(raw, "polys"),
+                )?,
+                vars,
+                elim,
+            }
+        }
+        // Brazo inalcanzable: `canonical` viene de `STEPS_OPERATIONS`.
+        other => return Err(format!("operación '{other}' sin implementar")),
+    };
+    Ok((op, lowered))
+}
+
+/// steps(expression, operation, ...) — traza paso a paso del stepper CAS.
+///
+/// Feature estrella de MathHook ("Step-by-Step Learning"): delega en
+/// `cas_steps::steps_for_op`, que ya respeta `MAX_CAS_STEPS` 32 pasos y
+/// `MAX_STEP_BYTES` 4 KiB por campo (acá se re-aplica el tope de pasos como
+/// defensa en profundidad). Las 12 variantes de `CasOp` quedan expuestas vía
+/// `STEPS_OPERATIONS` (5 de una expresión + 7 con args extra: ODE orden-n y
+/// Euler, Frobenius, Laplace derivada/integral, Gröbner ordenado y
+/// Eliminate). Compatibilidad hacia atrás: `steps(expression, operation)`
+/// sigue siendo válida para derivative/integral/limit/taylor/solve.
+///
+/// Presupuesto doble: el motor corta en 32 pasos × 4 KiB por campo, y el
+/// transporte (`MAX_TOOL_RESULT_CHARS` 2048 chars) lleva los pasos completos
+/// que entren, con `truncated`/`total` honestos en el payload.
+fn steps_tool(call: &ToolCall) -> ToolResult {
+    let (op, lowered) = match steps_cas_op(call) {
+        Ok(built) => built,
+        Err(detail) => return steps_err(call, detail),
+    };
+    match grafito_geometry::cas_steps::steps_for_op(&op) {
+        Ok(mut steps) => {
+            // Defensa en profundidad: el motor ya trunca, pero el tope viaja
+            // también en el borde de la tool.
+            steps.truncate(MAX_CAS_STEPS);
+            if steps.is_empty() {
+                return math_err(
+                    call,
+                    "steps: el motor no generó pasos para esta operación".into(),
+                );
+            }
+            // Presupuesto del transporte (`MAX_TOOL_RESULT_CHARS` 2048 chars):
+            // sólo viajan pasos completos y `truncated` marca el resto. Antes
+            // el clip de `ToolResult::text` cortaba el JSON a la mitad.
+            let budget = grafito_agent::schema::MAX_TOOL_RESULT_CHARS;
+            let total = steps.len();
+            let mut entries: Vec<Value> = Vec::with_capacity(total);
+            let mut truncated = false;
+            for step in &steps {
+                entries.push(json!({
+                    "index": step.index,
+                    "rule": step.rule.to_string(),
+                    "before": step.before,
+                    "after": step.after,
+                    "description": step.description,
+                }));
+                // Probe conservador (`truncated: false` es el más largo).
+                if steps_result_json(&lowered, &entries, total, false)
+                    .chars()
+                    .count()
+                    > budget
+                {
+                    entries.pop();
+                    truncated = true;
+                    break;
+                }
+            }
+            if entries.is_empty() {
+                return math_err(
+                    call,
+                    format!(
+                        "steps: el primer paso no entra en el presupuesto de la tool ({budget} chars); acotá la expresión u operación"
+                    ),
+                );
+            }
+            ToolResult::text(
+                &call.id,
+                true,
+                steps_result_json(&lowered, &entries, total, truncated),
+            )
+        }
+        Err(error) => math_err(call, format!("steps: {error}")),
+    }
+}
+
+/// Payload JSON de `steps`. Lo empaqueta `steps_tool` pasito a paso para que
+/// siempre entre en `MAX_TOOL_RESULT_CHARS` (jamás JSON roto por truncado).
+fn steps_result_json(operation: &str, entries: &[Value], total: usize, truncated: bool) -> String {
+    json!({
+        "operation": operation,
+        "steps": entries,
+        "count": entries.len(),
+        "total": total,
+        "truncated": truncated,
+        "max_steps": MAX_CAS_STEPS,
+        "max_step_bytes": MAX_STEP_BYTES,
+    })
+    .to_string()
 }
 
 // ── Tools pedagógicas F3.2 ──────────────────────────────────────────────────
@@ -2274,9 +3244,14 @@ pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
 /// `cas_nativo`, con fallback local), `diff`/`integrate`/`limit`
 /// (`symbolic::*_typed`), `solve_poly` (`solve_all_real`),
 /// `solve_system` (`solve_linear_system` + `ValidatedMatrix`),
-/// `interval_check` (`safe_sample`, n ≤ 100k) y `groebner_gate`
-/// (Buchberger acotado 2×2 hoy; F4 después). Todas exigen expresiones de
-/// hasta 2000 bytes, valores finitos y dominio válido.
+/// `interval_check` (`safe_sample`, n ≤ 100k), `groebner_gate`
+/// (Buchberger acotado 2×2 hoy; F4 después), `residue`/`principal_part`
+/// (Laurent acotado, orden ≤ 16), `poly_gcd` (PRS subresultante),
+/// `resultant` (Sylvester bivariado) y `steps` (stepper paso a paso con las
+/// 12 variantes de `CasOp`: derivative/integral/limit/taylor/solve +
+/// ode_nth_order, ode_euler, frobenius, laplace_derivative, laplace_integral,
+/// groebner y eliminate; 32 pasos máx). Todas exigen expresiones de hasta
+/// 2000 bytes, valores finitos y dominio válido.
 pub fn math_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema::new(
@@ -2379,6 +3354,140 @@ pub fn math_tool_schemas() -> Vec<ToolSchema> {
                     "vars": {"type": "array", "description": "Variables", "items": {"type": "string"}}
                 },
                 "required": ["polys", "vars"]
+            }),
+        ),
+        ToolSchema::new(
+            "residue",
+            "Residuo de una expresión en un polo (variable = at) vía desarrollo de Laurent acotado (orden ≤ 16). Devuelve residuo, orden del polo y método (AnalyticZero, SimplePole, HigherPole).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "at": {"type": "number", "description": "Punto finito del polo, default 0"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "principal_part",
+            "Parte principal de Laurent en un polo: términos (power, coefficient) con power < 0 (máx 64 términos, orden ≤ 16). Vacía si la expresión es analítica en el punto.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "at": {"type": "number", "description": "Punto finito del polo, default 0"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "poly_gcd",
+            "MCD mónico de dos polinomios univariados por PRS subresultante. Coeficientes ASCENDENTES: p[i] multiplica x^i ([-1, 0, 1] es x^2 - 1). Grado ≤ 64.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "p": {"type": "array", "description": "Coeficientes ascendentes de p, 1..=65", "items": {"type": "number"}},
+                    "q": {"type": "array", "description": "Coeficientes ascendentes de q, 1..=65", "items": {"type": "number"}}
+                },
+                "required": ["p", "q"]
+            }),
+        ),
+        ToolSchema::new(
+            "resultant",
+            "Resultante Res_y(f, g)(x) por matriz de Sylvester: elimina y entre dos polinomios bivariados dados como monomios [ix, iy, c] con c*x^ix*y^iy (ej. x+y-3 → [[1,0,1],[0,1,1],[0,0,-3]]). Coeficientes ascendentes en x, convención estándar (Mathematica/SymPy) Res = lc(f)^deg_y(g)·∏g(raíces de f), antisimétrica en (f, g). Cotas: deg_y(f)+deg_y(g) en 1..=8 y m*deg_x(g)+n*deg_x(f) ≤ 32.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "f": {"type": "array", "description": "Monomios [ix, iy, c] de f, 1..=64", "items": {"type": "array", "items": {"type": "number"}}},
+                    "g": {"type": "array", "description": "Monomios [ix, iy, c] de g, 1..=64", "items": {"type": "array", "items": {"type": "number"}}},
+                    "m": {"type": "integer", "description": "Grado de f en y (default: mayor iy no nulo de f)"},
+                    "n": {"type": "integer", "description": "Grado de g en y (default: mayor iy no nulo de g)"}
+                },
+                "required": ["f", "g"]
+            }),
+        ),
+        ToolSchema::new(
+            "steps",
+            "Step-by-Step Learning: traza pedagógica before→after con regla y descripción por paso del CAS nativo (máx 32 pasos, 4 KiB por campo; el resultado viaja acotado a 2048 chars: pasos completos que entren + truncated/total honestos). 12 operaciones: derivative, integral, limit (at), taylor (center, order), solve (expression, variable); ode_nth_order (coeffs [aₙ..a₀], rhs), ode_euler (a, b, rhs), frobenius (p, q, center, terms), laplace_derivative (order, initials, y, t, s), laplace_integral (f, t, s), groebner (polys, vars, monomial_order), eliminate (polys, vars, elim).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "description": "derivative | integral | limit | taylor | solve | ode_nth_order | ode_euler | frobenius | laplace_derivative | laplace_integral | groebner | eliminate"},
+                    "expression": {"type": "string", "description": "Expresión principal, máx 2000 bytes (obligatoria salvo ode_*, laplace_*, groebner y eliminate)"},
+                    "variable": {"type": "string", "description": "Variable independiente (x de las EDO), default x"},
+                    "at": {"type": "number", "description": "Punto del límite, default 0 (solo limit)"},
+                    "center": {"type": "number", "description": "Centro de Taylor/Frobenius, default 0 (solo taylor y frobenius)"},
+                    "order": {"type": "integer", "description": "1..=64 orden de Taylor (solo taylor, default 4) o 1..=8 orden de la derivada (solo laplace_derivative)"},
+                    "coeffs": {"type": "array", "description": "Coeficientes constantes [aₙ..a₀] descendentes, 2..=9 (solo ode_nth_order)", "items": {"type": "number"}},
+                    "rhs": {"type": "string", "description": "Segundo miembro de la EDO, default '0' (solo ode_nth_order y ode_euler)"},
+                    "a": {"type": "string", "description": "Coeficiente constante de x·y' en Euler x²y''+a·x·y'+b·y = rhs (solo ode_euler)"},
+                    "b": {"type": "string", "description": "Coeficiente constante de y en Euler (solo ode_euler)"},
+                    "p": {"type": "string", "description": "p(x) polinómica de y''+p·y'+q·y = 0 (solo frobenius)"},
+                    "q": {"type": "string", "description": "q(x) polinómica de y''+p·y'+q·y = 0 (solo frobenius)"},
+                    "terms": {"type": "integer", "description": "Términos de la serie 2..=9, default 4 (solo frobenius)"},
+                    "y": {"type": "string", "description": "Nombre de la función incógnita, default 'y' (solo laplace_derivative)"},
+                    "t": {"type": "string", "description": "Variable temporal, default 't' (solo laplace_derivative y laplace_integral)"},
+                    "s": {"type": "string", "description": "Variable de Laplace, default 's' (solo laplace_derivative y laplace_integral)"},
+                    "initials": {"type": "array", "description": "Iniciales y(0)..y^(n−1)(0): exactamente 'order' strings (solo laplace_derivative)", "items": {"type": "string"}},
+                    "f": {"type": "string", "description": "Integrando f de L{∫₀ᵗ f dt} (solo laplace_integral)"},
+                    "polys": {"type": "array", "description": "Polinomios del sistema, 1..=12 strings (solo groebner y eliminate)", "items": {"type": "string"}},
+                    "vars": {"type": "array", "description": "Variables del sistema, 1..=6 (solo groebner y eliminate)", "items": {"type": "string"}},
+                    "elim": {"type": "array", "description": "Variables a eliminar, 1..=6 y subconjunto de vars (solo eliminate)", "items": {"type": "string"}},
+                    "monomial_order": {"type": "string", "enum": ["lex", "grlex", "grevlex"], "description": "Orden monomial, default lex (solo groebner)"}
+                },
+                "required": ["operation"]
+            }),
+        ),
+        ToolSchema::new(
+            "fourier",
+            "Coeficientes de Fourier (a0, an, bn) y serie truncada de una expresión con período completo L (máx 32 armónicos; origen simbólico o numérico con estimación de error).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "L": {"type": "number", "description": "Período completo T, finito y > 0"},
+                    "n": {"type": "integer", "description": "Armónicos 1..=32"}
+                },
+                "required": ["expression", "L", "n"]
+            }),
+        ),
+        ToolSchema::new(
+            "nth_derivative",
+            "Derivada simbólica n-ésima iterando la derivada tipada (n en 1..=16 por crecimiento factorial del árbol).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable, default x"},
+                    "n": {"type": "integer", "description": "Orden 1..=16"}
+                },
+                "required": ["expression", "n"]
+            }),
+        ),
+        ToolSchema::new(
+            "partial",
+            "Derivada parcial simbólica respecto de una variable (las demás se tratan como constantes).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string"},
+                    "variable": {"type": "string", "description": "Variable de derivación, default x"}
+                },
+                "required": ["expression"]
+            }),
+        ),
+        ToolSchema::new(
+            "lambert_w",
+            "Rama principal W0 de la W de Lambert: única raíz real de W·e^W = a en (-1, ∞). Dominio real a ≥ -1/e; la rama W-1 queda fuera a propósito.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "a": {"type": "number", "description": "Argumento finito, a ≥ -1/e"}
+                },
+                "required": ["a"]
             }),
         ),
     ]
@@ -2942,7 +4051,8 @@ pub fn harness2_tool_schemas() -> Vec<ToolSchema> {
     vec![search_topp39_tool_schema(), export_dimacs_tool_schema()]
 }
 
-/// Conjunto completo seguro (base + pedagógicas) para el loop del agente.
+/// Conjunto completo seguro (base + pedagógicas + matemáticas + harness) para
+/// el loop del agente.
 pub fn all_safe_tool_schemas() -> Vec<ToolSchema> {
     let mut schemas = vec![
         ToolSchema::new(
@@ -5336,6 +6446,39 @@ mod tests {
     }
 
     #[test]
+    fn reject_oversized_recursa_en_arrays_anidados() {
+        // Un string largo escondido dentro de un objeto dentro de un array
+        // (`{"a":[{"b":"<5000 B>"}]}`) no debe evadir el filtro.
+        let largo = "x".repeat(5_000);
+        let anidado = ToolCall {
+            id: "anidado1".into(),
+            name: "diff".into(),
+            arguments: json!({ "a": [{ "b": largo }] }),
+        };
+        assert!(
+            reject_oversized_string_args(&anidado).is_some(),
+            "el string anidado en un array debe rechazarse"
+        );
+        // Array plano de strings largos: también.
+        let plano = ToolCall {
+            id: "anidado2".into(),
+            name: "diff".into(),
+            arguments: json!({ "a": [largo] }),
+        };
+        assert!(
+            reject_oversized_string_args(&plano).is_some(),
+            "un string largo dentro de un array debe rechazarse"
+        );
+        // Caso válido chico: pasa.
+        let chico = ToolCall {
+            id: "anidado3".into(),
+            name: "diff".into(),
+            arguments: json!({ "a": [{ "b": "x^2" }] }),
+        };
+        assert!(reject_oversized_string_args(&chico).is_none());
+    }
+
+    #[test]
     fn r6e_schemas_enums_cerrados_y_minmax() {
         // generate_animation: enums cerrados + cotas numéricas en el schema.
         let schema = generate_animation_tool_schema();
@@ -5689,7 +6832,7 @@ mod tests {
         assert!(nombres.contains(&"search_topp39"));
         assert!(nombres.contains(&"export_dimacs"));
         assert!(nombres.contains(&"generate_short_script"));
-        assert_eq!(esquemas.len(), 23);
+        assert_eq!(esquemas.len(), 32);
     }
 
     #[test]
@@ -6433,9 +7576,10 @@ mod tests {
             assert_eq!(openai["type"], "function");
             assert_eq!(openai["function"]["name"], schema.name);
         }
-        assert_eq!(math_tool_schemas().len(), 8);
-        // 3 base + 8 pedagógicas + 8 matemáticas + 2 harness-1 + 2 harness-2.
-        assert_eq!(all_safe_tool_schemas().len(), 23);
+        assert_eq!(math_tool_schemas().len(), 17);
+        // 3 base + 8 pedagógicas + 17 matemáticas (13 F2 + 4 G1) + 2 harness-1
+        // + 2 harness-2.
+        assert_eq!(all_safe_tool_schemas().len(), 32);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {
@@ -6470,6 +7614,23 @@ mod tests {
                 "groebner_gate",
                 json!({"polys": ["x + y - 3", "x - y - 1"], "vars": ["x", "y"]}),
             ),
+            ("residue", json!({"expression": "1/x", "at": 0.0})),
+            ("principal_part", json!({"expression": "1/x^2", "at": 0.0})),
+            (
+                "poly_gcd",
+                json!({"p": [-1.0, 0.0, 1.0], "q": [1.0, 2.0, 1.0]}),
+            ),
+            (
+                "resultant",
+                json!({
+                    "f": [[0, 1, 1.0], [1, 0, -1.0]],
+                    "g": [[0, 2, 1.0], [0, 0, -1.0]],
+                }),
+            ),
+            (
+                "steps",
+                json!({"expression": "x^2", "operation": "derivative"}),
+            ),
         ];
         for (name, arguments) in cases {
             let result = dispatch_safe_tool(&math_call(name, arguments.clone()));
@@ -6480,6 +7641,117 @@ mod tests {
             );
             assert!(result.ok, "tool {name} failed: {}", result.content);
         }
+    }
+
+    // ── Tools G1 (contrato grafito-geometry): una por tool, dispatch real + error ──
+
+    #[test]
+    fn fourier_tool_despacha_y_rechaza_periodo_invalido() {
+        // f ≡ 1 con T = 2: a0 = 2 (constante a0/2 = 1), armónicos nulos.
+        let ok = dispatch_safe_tool(&math_call(
+            "fourier",
+            json!({"expression": "1", "L": 2.0, "n": 2}),
+        ));
+        assert!(ok.ok, "fourier falló: {}", ok.content);
+        let value: Value = serde_json::from_str(&ok.content).expect("json fourier");
+        let a0: f64 = value["a0"]
+            .as_str()
+            .expect("a0 string")
+            .parse()
+            .expect("a0 number");
+        assert!((a0 - 2.0).abs() < 1e-6, "a0 de f≡1 fue {a0}");
+        assert_eq!(value["terms"], json!(2));
+        assert_eq!(value["an"].as_array().expect("an").len(), 2);
+
+        let bad_period = dispatch_safe_tool(&math_call(
+            "fourier",
+            json!({"expression": "x", "L": -1.0, "n": 2}),
+        ));
+        assert!(
+            !bad_period.ok,
+            "L negativo debe fallar: {}",
+            bad_period.content
+        );
+        let bad_n = dispatch_safe_tool(&math_call(
+            "fourier",
+            json!({"expression": "x", "L": 2.0, "n": 0}),
+        ));
+        assert!(!bad_n.ok, "n=0 debe fallar: {}", bad_n.content);
+    }
+
+    #[test]
+    fn nth_derivative_tool_deriva_n_veces_y_rechaza_orden_fuera_de_rango() {
+        let ok = dispatch_safe_tool(&math_call(
+            "nth_derivative",
+            json!({"expression": "x^3", "variable": "x", "n": 2}),
+        ));
+        assert!(ok.ok, "nth_derivative falló: {}", ok.content);
+        // El motor no simplifica: se verifica evaluando el resultado en x = 1
+        // (d²/dx² x^3 = 6x → 6) en vez de pinear el formato del árbol.
+        let value = grafito_geometry::expr::evaluate(&ok.content, &[("x".to_owned(), 1.0)])
+            .unwrap_or(f64::NAN);
+        assert!(
+            (value - 6.0).abs() < 1e-9,
+            "d²/dx² x^3 evaluada en 1 debía dar 6, fue {value} (expr: {})",
+            ok.content
+        );
+        let bad_n = dispatch_safe_tool(&math_call(
+            "nth_derivative",
+            json!({"expression": "x^3", "n": 17}),
+        ));
+        assert!(!bad_n.ok, "n=17 debe fallar: {}", bad_n.content);
+    }
+
+    #[test]
+    fn partial_tool_deriva_por_la_variable_y_rechaza_variable_invalida() {
+        let ok = dispatch_safe_tool(&math_call(
+            "partial",
+            json!({"expression": "x^2*y", "variable": "x"}),
+        ));
+        assert!(ok.ok, "partial falló: {}", ok.content);
+        // Sin simplificar: se evalúa ∂/∂x (x²y) en (x=3, y=2) → 2·3·2 = 12.
+        let value = grafito_geometry::expr::evaluate(
+            &ok.content,
+            &[("x".to_owned(), 3.0), ("y".to_owned(), 2.0)],
+        )
+        .unwrap_or(f64::NAN);
+        assert!(
+            (value - 12.0).abs() < 1e-9,
+            "∂/∂x x^2·y evaluada en (3, 2) debía dar 12, fue {value} (expr: {})",
+            ok.content
+        );
+        let bad_var = dispatch_safe_tool(&math_call(
+            "partial",
+            json!({"expression": "x^2*y", "variable": "x-y"}),
+        ));
+        assert!(
+            !bad_var.ok,
+            "variable inválida debe fallar: {}",
+            bad_var.content
+        );
+    }
+
+    #[test]
+    fn lambert_w_tool_resuelve_w0_y_rechaza_fuera_de_dominio() {
+        // W0(0) = 0 (única raíz real de W·e^W = 0).
+        let ok = dispatch_safe_tool(&math_call("lambert_w", json!({"a": 0.0})));
+        assert!(ok.ok, "lambert_w falló: {}", ok.content);
+        let value: Value = serde_json::from_str(&ok.content).expect("json lambert_w");
+        assert_eq!(value["branch"], json!("W0"));
+        let w: f64 = value["w"]
+            .as_str()
+            .expect("w string")
+            .parse()
+            .expect("w number");
+        assert!(w.abs() < 1e-6, "W0(0) fue {w}");
+
+        let fuera = dispatch_safe_tool(&math_call("lambert_w", json!({"a": -1.0})));
+        assert!(!fuera.ok, "a < -1/e debe fallar: {}", fuera.content);
+        assert!(
+            fuera.content.contains("fuera de dominio"),
+            "error honesto esperado, fue: {}",
+            fuera.content
+        );
     }
 
     #[test]
@@ -6558,6 +7830,458 @@ mod tests {
             "NaN debe rechazarse: {}",
             non_finite.content
         );
+    }
+
+    #[test]
+    fn residue_computes_pole_and_rejects_oversized_input() {
+        // Polo simple: 1/x en 0 → residuo 1, orden 1, SimplePole.
+        let simple = dispatch_safe_tool(&math_call(
+            "residue",
+            json!({"expression": "1/x", "at": 0.0}),
+        ));
+        assert!(simple.ok, "{}", simple.content);
+        let value: Value = serde_json::from_str(&simple.content).expect("json");
+        assert_eq!(value["pole_order"], json!(1));
+        assert_eq!(value["method"], json!("SimplePole"));
+        let residue: f64 = value["residue"]
+            .as_str()
+            .expect("residue str")
+            .parse()
+            .expect("residue f64");
+        assert!((residue - 1.0).abs() < 1e-6, "residuo {residue}");
+
+        // Analítica en el punto → residuo 0 sin inventar polo.
+        let analytic = dispatch_safe_tool(&math_call(
+            "residue",
+            json!({"expression": "x^2", "at": 0.0}),
+        ));
+        assert!(analytic.ok, "{}", analytic.content);
+        let value: Value = serde_json::from_str(&analytic.content).expect("json");
+        assert_eq!(value["method"], json!("AnalyticZero"));
+        assert_eq!(value["pole_order"], json!(0));
+
+        // >2000 bytes lo frena reject_oversized_string_args sin tocar el CAS.
+        let oversized = dispatch_safe_tool(&math_call(
+            "residue",
+            json!({"expression": "x".repeat(2_001)}),
+        ));
+        assert!(!oversized.ok, "{}", oversized.content);
+    }
+
+    #[test]
+    fn principal_part_lists_negative_powers_and_rejects_bad_expression() {
+        // 1/x^2 en 0 → único término a_{-2} = 1 (a_{-1} = 0 se filtra).
+        let pp = dispatch_safe_tool(&math_call(
+            "principal_part",
+            json!({"expression": "1/x^2", "at": 0.0}),
+        ));
+        assert!(pp.ok, "{}", pp.content);
+        let value: Value = serde_json::from_str(&pp.content).expect("json");
+        assert_eq!(value["count"], json!(1));
+        assert_eq!(value["terms"][0]["power"], json!(-2));
+        let coefficient: f64 = value["terms"][0]["coefficient"]
+            .as_str()
+            .expect("coef str")
+            .parse()
+            .expect("coef f64");
+        assert!((coefficient - 1.0).abs() < 1e-6, "coef {coefficient}");
+
+        // Expresión vacía y expresión inválida → error honesto, sin pánico.
+        let empty = dispatch_safe_tool(&math_call("principal_part", json!({"expression": "   "})));
+        assert!(!empty.ok, "{}", empty.content);
+        let unparsable = dispatch_safe_tool(&math_call(
+            "principal_part",
+            json!({"expression": "1/((", "at": 0.0}),
+        ));
+        assert!(!unparsable.ok, "{}", unparsable.content);
+    }
+
+    #[test]
+    fn poly_gcd_returns_monic_gcd_and_rejects_bad_vectors() {
+        // gcd(x^2-1, x^2+2x+1) = x+1 → coeficientes ascendentes [1, 1].
+        let gcd = dispatch_safe_tool(&math_call(
+            "poly_gcd",
+            json!({"p": [-1.0, 0.0, 1.0], "q": [1.0, 2.0, 1.0]}),
+        ));
+        assert!(gcd.ok, "{}", gcd.content);
+        let value: Value = serde_json::from_str(&gcd.content).expect("json");
+        assert_eq!(value["degree"], json!(1));
+        let coeffs = value["gcd"].as_array().expect("gcd array");
+        assert_eq!(coeffs.len(), 2, "{}", gcd.content);
+        let c0: f64 = coeffs[0].as_str().expect("c0").parse().expect("c0 f64");
+        let c1: f64 = coeffs[1].as_str().expect("c1").parse().expect("c1 f64");
+        assert!(
+            (c0 - 1.0).abs() < 1e-6 && (c1 - 1.0).abs() < 1e-6,
+            "gcd {c0}, {c1}"
+        );
+
+        // Vector vacío y vector fuera de presupuesto (grado > 64) → error.
+        let empty = dispatch_safe_tool(&math_call("poly_gcd", json!({"p": [], "q": [1.0]})));
+        assert!(!empty.ok, "{}", empty.content);
+        let huge = dispatch_safe_tool(&math_call(
+            "poly_gcd",
+            json!({"p": vec![0.5_f64; 66], "q": [1.0]}),
+        ));
+        assert!(!huge.ok, "{}", huge.content);
+    }
+
+    #[test]
+    fn resultant_eliminates_y_and_rejects_out_of_budget() {
+        // Res_y(y - x, y^2 - 1) = x^2 - 1 → coeffs [-1, 0, 1] ascendentes.
+        // Convención estándar de `solve::sylvester_resultant` (2026-09):
+        // Res = lc(f)^deg_y(g)·∏g(raíces de f), antisimétrica en (f, g).
+        let res = dispatch_safe_tool(&math_call(
+            "resultant",
+            json!({
+                "f": [[0, 1, 1.0], [1, 0, -1.0]],
+                "g": [[0, 2, 1.0], [0, 0, -1.0]],
+            }),
+        ));
+        assert!(res.ok, "{}", res.content);
+        let value: Value = serde_json::from_str(&res.content).expect("json");
+        let coeffs = value["coeffs"].as_array().expect("coeffs array");
+        assert_eq!(coeffs.len(), 3, "{}", res.content);
+        let parsed: Vec<f64> = coeffs
+            .iter()
+            .map(|c| c.as_str().expect("str").parse().expect("f64"))
+            .collect();
+        assert!((parsed[0] + 1.0).abs() < 1e-6, "{parsed:?}");
+        assert!(parsed[1].abs() < 1e-6, "{parsed:?}");
+        assert!((parsed[2] - 1.0).abs() < 1e-6, "{parsed:?}");
+
+        // m declarado debe coincidir con el grado en y calculado.
+        let mismatch = dispatch_safe_tool(&math_call(
+            "resultant",
+            json!({"f": [[0, 1, 1.0]], "g": [[0, 1, 1.0]], "m": 2}),
+        ));
+        assert!(!mismatch.ok, "{}", mismatch.content);
+
+        // Fuera de presupuesto del motor: deg_y(f)+deg_y(g) ≤ 8.
+        let over = dispatch_safe_tool(&math_call(
+            "resultant",
+            json!({"f": [[0, 5, 1.0]], "g": [[0, 4, 1.0]]}),
+        ));
+        assert!(!over.ok, "{}", over.content);
+    }
+
+    #[test]
+    fn steps_serializes_pedagogical_trace_and_rejects_bad_input() {
+        let trace = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "x^2", "operation": "derivative"}),
+        ));
+        assert!(trace.ok, "{}", trace.content);
+        let value: Value = serde_json::from_str(&trace.content).expect("json");
+        let steps = value["steps"].as_array().expect("steps array");
+        assert!(!steps.is_empty(), "{}", trace.content);
+        assert_eq!(value["count"], json!(steps.len()));
+        assert!(value["max_steps"].as_u64().expect("max_steps") <= 32);
+        for step in steps {
+            assert!(step["rule"].is_string(), "{}", trace.content);
+            assert!(step["before"].is_string(), "{}", trace.content);
+            assert!(step["after"].is_string(), "{}", trace.content);
+            assert!(step["description"].is_string(), "{}", trace.content);
+        }
+
+        // Operación desconocida → error honesto que lista las soportadas.
+        let unknown = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "x^2", "operation": "matrix_exp"}),
+        ));
+        assert!(!unknown.ok, "{}", unknown.content);
+
+        // >2000 bytes lo frena reject_oversized_string_args sin tocar el stepper.
+        let oversized = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "x".repeat(2_001), "operation": "derivative"}),
+        ));
+        assert!(!oversized.ok, "{}", oversized.content);
+    }
+
+    /// Pin del schema de `steps`: expone los args de las 12 variantes y
+    /// sólo `operation` es obligatoria (la forma histórica
+    /// `steps(expression, operation)` sigue validando como superset).
+    #[test]
+    fn steps_schema_expone_args_de_las_doce_variantes() {
+        let schema = math_tool_schemas()
+            .into_iter()
+            .find(|schema| schema.name == "steps")
+            .expect("schema steps");
+        assert!(schema.validate().is_ok(), "{}", schema.description);
+        assert!(schema.description.chars().count() <= 1_024, "description");
+        for arg in [
+            "expression",
+            "operation",
+            "variable",
+            "at",
+            "center",
+            "order",
+            "coeffs",
+            "rhs",
+            "a",
+            "b",
+            "p",
+            "q",
+            "terms",
+            "y",
+            "t",
+            "s",
+            "initials",
+            "f",
+            "polys",
+            "vars",
+            "elim",
+            "monomial_order",
+        ] {
+            assert!(
+                schema.parameters["properties"]
+                    .get(arg)
+                    .is_some_and(Value::is_object),
+                "falta arg {arg}"
+            );
+        }
+        let required = schema.parameters["required"].as_array().expect("required");
+        assert_eq!(required.len(), 1, "{required:?}");
+        assert!(required.iter().any(|item| item == "operation"));
+    }
+
+    /// Las 12 variantes de `CasOp` (`grafito_geometry::cas_steps::CasOp`)
+    /// quedan alcanzables desde la tool, con dispatch real y entrada válida.
+    #[test]
+    fn steps_cubre_las_doce_variantes_de_cas_op() {
+        assert_eq!(STEPS_OPERATIONS.len(), 12, "1:1 con las 12 CasOp");
+        let casos: &[(&str, Value)] = &[
+            // 5 históricas en la forma simple steps(expression, operation).
+            (
+                "derivative",
+                json!({"expression": "x^2", "operation": "derivative"}),
+            ),
+            (
+                "integral",
+                json!({"expression": "x^2", "operation": "integral"}),
+            ),
+            ("limit", json!({"expression": "x^2", "operation": "limit"})),
+            (
+                "taylor",
+                json!({"expression": "exp(x)", "operation": "taylor"}),
+            ),
+            (
+                "solve",
+                json!({"expression": "x^2 - 5*x + 6 = 0", "operation": "solve"}),
+            ),
+            // 7 con args extra (frente B2 del motor).
+            (
+                "ode_nth_order",
+                json!({"operation": "ode_nth_order", "coeffs": [1.0, 0.0, -1.0], "rhs": "0"}),
+            ),
+            (
+                "ode_euler",
+                json!({"operation": "ode_euler", "a": "0", "b": "1", "rhs": "0"}),
+            ),
+            (
+                "frobenius",
+                json!({"operation": "frobenius", "p": "0", "q": "1", "terms": 4}),
+            ),
+            (
+                "laplace_derivative",
+                json!({"operation": "laplace_derivative", "order": 2, "initials": ["1", "0"]}),
+            ),
+            (
+                "laplace_integral",
+                json!({"operation": "laplace_integral", "f": "t"}),
+            ),
+            (
+                "groebner",
+                json!({"operation": "groebner", "polys": ["x + y - 3", "x - y - 1"], "vars": ["x", "y"], "monomial_order": "grevlex"}),
+            ),
+            (
+                "eliminate",
+                json!({"operation": "eliminate", "polys": ["x + y - 3", "x - y - 1"], "vars": ["x", "y"], "elim": ["y"]}),
+            ),
+        ];
+        for (canonical, _, _) in STEPS_OPERATIONS {
+            assert!(
+                casos.iter().any(|(nombre, _)| nombre == canonical),
+                "sin caso de dispatch para {canonical}"
+            );
+        }
+        for (operacion, arguments) in casos {
+            let result = dispatch_safe_tool(&math_call("steps", arguments.clone()));
+            assert!(result.ok, "steps/{operacion}: {}", result.content);
+            let value: Value = serde_json::from_str(&result.content).unwrap_or_else(|error| {
+                panic!("steps/{operacion} JSON roto ({error}): {result:?}")
+            });
+            let pasos = value["steps"].as_array().expect("steps array");
+            assert!(!pasos.is_empty(), "steps/{operacion}: traza vacía");
+            assert_eq!(value["count"], json!(pasos.len()), "steps/{operacion}");
+            assert!(
+                result.content.chars().count() <= grafito_agent::schema::MAX_TOOL_RESULT_CHARS,
+                "steps/{operacion}: {} chars",
+                result.content.chars().count()
+            );
+        }
+    }
+
+    /// Trazas largas: el transporte nunca devuelve JSON roto por truncado —
+    /// entran pasos completos y `truncated`/`total` dicen qué faltó.
+    #[test]
+    fn steps_trunca_al_presupuesto_del_transporte_sin_romper_json() {
+        let result = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "exp(x)", "operation": "taylor", "order": 32}),
+        ));
+        assert!(result.ok, "{}", result.content);
+        assert!(
+            result.content.chars().count() <= grafito_agent::schema::MAX_TOOL_RESULT_CHARS,
+            "{} chars",
+            result.content.chars().count()
+        );
+        let value: Value = serde_json::from_str(&result.content).expect("json traza larga");
+        let pasos = value["steps"].as_array().expect("steps array");
+        assert_eq!(value["truncated"], json!(true), "{}", result.content);
+        let total = value["total"].as_u64().expect("total") as usize;
+        assert!(pasos.len() < total, "{} < {total}", pasos.len());
+        assert_eq!(value["count"], json!(pasos.len()), "{}", result.content);
+    }
+
+    /// Tarea 4: el error dice QUÉ falta y lista las 12 operaciones soportadas
+    /// con sus argumentos.
+    #[test]
+    fn steps_errores_de_args_dicen_que_falta_y_listan_operaciones() {
+        // Operación desconocida → catálogo completo.
+        let desconocida = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "x", "operation": "matrix_exp"}),
+        ));
+        assert!(!desconocida.ok, "{}", desconocida.content);
+        assert!(
+            desconocida.content.contains("Operaciones soportadas"),
+            "{}",
+            desconocida.content
+        );
+        for (canonical, _, _) in STEPS_OPERATIONS {
+            assert!(
+                desconocida.content.contains(canonical),
+                "catálogo sin {canonical}: {}",
+                desconocida.content
+            );
+        }
+
+        // Faltan TODOS los obligatorios de la variante, en un solo error.
+        let sin_args = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "ode_euler", "expression": "x"}),
+        ));
+        assert!(!sin_args.ok, "{}", sin_args.content);
+        assert!(
+            sin_args.content.contains("'a'") && sin_args.content.contains("'b'"),
+            "{}",
+            sin_args.content
+        );
+        assert!(
+            sin_args.content.contains("Operaciones soportadas"),
+            "{}",
+            sin_args.content
+        );
+
+        // Sin 'operation' → dice qué falta (y lista).
+        let sin_op = dispatch_safe_tool(&math_call("steps", json!({"expression": "x^2"})));
+        assert!(!sin_op.ok, "{}", sin_op.content);
+        assert!(sin_op.content.contains("'operation'"), "{}", sin_op.content);
+
+        // Compatibilidad: la forma histórica sin expression conserva el error
+        // que nombra el arg faltante.
+        let legacy = dispatch_safe_tool(&math_call("steps", json!({"operation": "derivative"})));
+        assert!(!legacy.ok, "{}", legacy.content);
+        assert!(
+            legacy.content.contains("'expression'"),
+            "{}",
+            legacy.content
+        );
+    }
+
+    /// Cotas de arrays en el borde de la tool + "grados incompatibles"
+    /// (`order` de laplace_derivative vs longitud de `initials`, y `elim`
+    /// fuera de `vars`: el análogo del m/n declarado de `math_degree_arg`).
+    #[test]
+    fn steps_cota_arrays_y_grados_incompatibles() {
+        // coeffs: orden 1..=8 → 2..=9 coeficientes [aₙ..a₀].
+        for n in [1_usize, 10] {
+            let coeffs = vec![1.0_f64; n];
+            let result = dispatch_safe_tool(&math_call(
+                "steps",
+                json!({"operation": "ode_nth_order", "coeffs": coeffs}),
+            ));
+            assert!(!result.ok, "coeffs[{n}]: {}", result.content);
+        }
+
+        // Cotas de Buchberger en el borde: polys 1..=12, vars 1..=6.
+        let muchos_polys = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "groebner", "polys": vec!["x".to_string(); 13], "vars": ["x"]}),
+        ));
+        assert!(!muchos_polys.ok, "{}", muchos_polys.content);
+        let muchas_vars = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "eliminate", "polys": ["x"], "vars": vec!["x".to_string(); 7], "elim": ["x"]}),
+        ));
+        assert!(!muchas_vars.ok, "{}", muchas_vars.content);
+
+        // initials fuera de cota (1..=8) y vs order incompatible.
+        let iniciales_largas = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "laplace_derivative", "order": 8, "initials": vec!["0".to_string(); 9]}),
+        ));
+        assert!(!iniciales_largas.ok, "{}", iniciales_largas.content);
+        let incompatibles = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "laplace_derivative", "order": 3, "initials": ["1", "0"]}),
+        ));
+        assert!(!incompatibles.ok, "{}", incompatibles.content);
+        assert!(
+            incompatibles.content.contains("incompatibles"),
+            "{}",
+            incompatibles.content
+        );
+
+        // elim ⊄ vars → incompatibles.
+        let elim_rara = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "eliminate", "polys": ["x + y"], "vars": ["x", "y"], "elim": ["z"]}),
+        ));
+        assert!(!elim_rara.ok, "{}", elim_rara.content);
+        assert!(
+            elim_rara.content.contains("incompatibles"),
+            "{}",
+            elim_rara.content
+        );
+
+        // order fuera de cota (taylor 1..=64).
+        let order_grande = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"expression": "exp(x)", "operation": "taylor", "order": 65}),
+        ));
+        assert!(!order_grande.ok, "{}", order_grande.content);
+
+        // monomial_order inválido → error honesto con las opciones.
+        let order_raro = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "groebner", "polys": ["x + y - 3"], "vars": ["x", "y"], "monomial_order": "plex"}),
+        ));
+        assert!(!order_raro.ok, "{}", order_raro.content);
+        assert!(
+            order_raro.content.contains("lex|grlex|grevlex"),
+            "{}",
+            order_raro.content
+        );
+
+        // >2000 bytes en un arg nuevo lo frena la guardia global.
+        let oversize = dispatch_safe_tool(&math_call(
+            "steps",
+            json!({"operation": "ode_euler", "a": "1", "b": "1", "rhs": "x".repeat(2_001)}),
+        ));
+        assert!(!oversize.ok, "{}", oversize.content);
+        assert!(oversize.content.contains("2000"), "{}", oversize.content);
     }
 
     /// Paridad F2: `grafito-agent::tools` (réplica autocontenida: wyhash +

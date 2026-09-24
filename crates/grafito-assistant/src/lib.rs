@@ -2833,10 +2833,16 @@ pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, Str
 
 /// Tools seguras por defecto que el modo agente ofrece al modelo.
 ///
-/// Incluye las 3 base (evaluate_expr, grafito_docs, ask_user) más las 6
+/// Incluye las 3 base (evaluate_expr, grafito_docs, ask_user), las 8
 /// pedagógicas F3.2 (scaffold, generate_exercise, assess_answer,
-/// get_curriculum, suggest_next, generate_animation) para orquestación
-/// vía OpenCode Go sin salir del chat. Todas son puras y sin Document.
+/// get_curriculum, suggest_next, generate_animation, generate_guion,
+/// generate_short_script), las 13 matemáticas F2 (verify_step, diff,
+/// integrate, limit, solve_poly, solve_system, interval_check, groebner_gate,
+/// residue, principal_part, poly_gcd, resultant, steps — esta última cubre
+/// las 12 variantes de `CasOp` del stepper) y las 4 de harness
+/// (run_command, solid_measure_3d, search_topp39, export_dimacs) para
+/// orquestación vía OpenCode Go sin salir del chat. Todas son puras y sin
+/// Document.
 pub fn default_agent_tools() -> Vec<ToolSchema> {
     // Delegamos al dispatcher canónico para mantener una única fuente de verdad
     // entre schema y dispatch (grafito-assistant/src/agent.rs).
@@ -6292,7 +6298,10 @@ mod tests {
         use grafito_pedagogy::{PedagogicalLevel, ScaffoldEngine, SocraticFsm};
         let req = request("derivada");
         let mut fsm = SocraticFsm::new("derivada");
-        fsm.record_attempt(Some("sign".into()));
+        assert!(
+            fsm.record_attempt(Some("sign".into())).is_ok(),
+            "el intento debe registrarse"
+        );
         let engine = ScaffoldEngine;
         let history = vec![grafito_pedagogy::scaffold::Turn {
             role: "user".into(),
@@ -6338,8 +6347,14 @@ mod tests {
         assert!(student.contains("Antes de mostrarte"), "{student}");
         // con attempts>=2 pasa
         let mut fsm2 = SocraticFsm::new("integral");
-        fsm2.record_attempt(None);
-        fsm2.record_attempt(None);
+        assert!(
+            fsm2.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
+        assert!(
+            fsm2.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
         assert!(check_telling_guard(&fsm2, telling).is_ok());
         assert!(enforce_telling_guard(&fsm2, telling, &scaffold).is_ok());
         // sin marcador no es telling aunque attempts<2
@@ -6368,8 +6383,14 @@ mod tests {
         assert!(!student.contains("attempts"), "{student}");
         assert!(student.contains("Antes de mostrarte"), "{student}");
         let mut fsm2 = SocraticFsm::new("derivada");
-        fsm2.record_attempt(None);
-        fsm2.record_attempt(None);
+        assert!(
+            fsm2.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
+        assert!(
+            fsm2.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
         let guarded2 = guard_remote_completion(&fsm2, completion, &scaffold);
         assert!(guarded2.is_ok());
     }
@@ -7563,8 +7584,14 @@ mod tests {
         assert!(student.contains("Antes de mostrarte"), "{student}");
         // attempts>=2: el mismo completado pasa.
         let mut seasoned = SocraticFsm::new("derivada");
-        seasoned.record_attempt(None);
-        seasoned.record_attempt(None);
+        assert!(
+            seasoned.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
+        assert!(
+            seasoned.record_attempt(None).is_ok(),
+            "el intento debe registrarse"
+        );
         let allowed = guard_remote_completion(&seasoned, completion, &scaffold).unwrap();
         assert_eq!(allowed.text, "La solución es x = 4");
     }
