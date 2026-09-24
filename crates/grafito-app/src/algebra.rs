@@ -822,7 +822,7 @@ pub(crate) fn draw_algebra_panel(app: &mut GrafitoApp, ctx: &egui::Context) {
                                 }
                                 if eye_resp.on_hover_text("Visibilidad").clicked() {
                                     snapshot.capture(&app.document);
-                                    if let Some(o) = app.document.get_object_mut(oid) {
+                                    if let Some(o) = app.document.get_object_mut_touch(oid) {
                                         let v = o.is_visible(); o.set_visible(!v);
                                     }
                                 }

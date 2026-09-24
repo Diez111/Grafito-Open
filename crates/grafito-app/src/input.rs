@@ -1003,7 +1003,7 @@ impl GrafitoApp {
                 // Throttling: solo añadimos un punto si está al menos a
                 // `min_step` unidades del último (en coords del mundo).
                 let min_step = 0.01 / self.document.view().scale.max(1e-3);
-                if let Some(GeoObject::Pencil(p)) = self.document.get_object_mut(pencil_id) {
+                if let Some(GeoObject::Pencil(p)) = self.document.get_object_mut_touch(pencil_id) {
                     let should_push = p
                         .points
                         .last()

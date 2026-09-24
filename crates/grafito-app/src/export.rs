@@ -959,6 +959,16 @@ fn invalid_object(
     }
 }
 
+/// Error de formateo contra un buffer `String` (los `write!`/`writeln!` ya no
+/// se tapan con `.ok()`: si el buffer falla, el export falla honesto en vez
+/// de salir truncado).
+fn buffer_write_err(format: ExportFormat, pieza: &'static str) -> ExportError {
+    ExportError::Encoding {
+        format,
+        reason: format!("no se pudo formatear {pieza} en el buffer"),
+    }
+}
+
 fn validate_stroke(
     format: ExportFormat,
     item: &ExportItem,
@@ -2872,15 +2882,14 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
     use std::fmt::Write as _;
 
     // R2-V3: `try_reserve` + `MAX_SVG_BYTES` (OOM honesto, jamás panic).
+    // La causa original se embute en el mensaje (antes `map_err(|_| ...)`
+    // la tragaba).
     let initial = scene.scene_units.saturating_mul(24).min(4_000_000);
     let mut svg = String::new();
     svg.try_reserve(initial)
-        .map_err(|_| ExportError::ResourceLimit {
+        .map_err(|e| ExportError::Encoding {
             format: ExportFormat::Svg,
-            resource: "bytes SVG",
-            attempted: initial as u64,
-            limit: MAX_SVG_BYTES as u64,
-            object: None,
+            reason: format!("reserva inicial SVG de {initial} bytes falló: {e}"),
         })?;
     let svg_budget_err = |attempted: usize| ExportError::ResourceLimit {
         format: ExportFormat::Svg,
@@ -2894,20 +2903,20 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
         "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\">",
         scene.width, scene.height, scene.width, scene.height
     )
-    .ok();
+    .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
     svg.push_str("<title>Grafito - exportacion SVG</title>\n");
     writeln!(
         svg,
         "<defs><clipPath id=\"grafito-export-clip\"><rect x=\"0\" y=\"0\" width=\"{}\" height=\"{}\"/></clipPath></defs>",
         scene.width, scene.height
     )
-    .ok();
+    .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
     writeln!(
         svg,
         "<rect width=\"{}\" height=\"{}\" fill=\"white\"/>",
         scene.width, scene.height
     )
-    .ok();
+    .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
     svg.push_str("<g clip-path=\"url(#grafito-export-clip)\">\n");
 
     for object in &scene.objects {
@@ -2918,7 +2927,7 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
             escape_xml(&object.item.label),
             escape_xml(&object.item.object_id)
         )
-        .ok();
+        .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
         for primitive in &object.primitives {
             match primitive {
                 ScenePrimitive::Path {
@@ -2942,12 +2951,13 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
                             point.x,
                             point.y
                         )
-                        .ok();
+                        .map_err(|_| buffer_write_err(ExportFormat::Svg, "trayectoria svg"))?;
                     }
                     if *closed {
                         data.push_str(" Z");
                     }
-                    write!(svg, "<path d=\"{data}\"").ok();
+                    write!(svg, "<path d=\"{data}\"")
+                        .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
                     if let Some(stroke) = stroke {
                         write!(
                             svg,
@@ -2956,7 +2966,7 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
                             stroke.color.a,
                             stroke.width
                         )
-                        .ok();
+                        .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
                     } else {
                         svg.push_str(" stroke=\"none\"");
                     }
@@ -2967,7 +2977,7 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
                             svg_color(*fill),
                             fill.a
                         )
-                        .ok();
+                        .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
                     } else {
                         svg.push_str(" fill=\"none\"");
                     }
@@ -2989,7 +2999,7 @@ fn serialize_svg(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportErro
                         font_size,
                         escape_xml(content)
                     )
-                    .ok();
+                    .map_err(|_| buffer_write_err(ExportFormat::Svg, "svg"))?;
                 }
             }
         }
@@ -3037,7 +3047,7 @@ fn tikz_color(color: Color) -> String {
     )
 }
 
-fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
+fn serialize_tikz(scene: &ExportScene) -> std::result::Result<Vec<u8>, ExportError> {
     use std::fmt::Write as _;
 
     let mut tex = String::with_capacity(scene.scene_units.saturating_mul(28).min(4_000_000));
@@ -3052,13 +3062,13 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
         "\\path[fill=white] (0,0) rectangle ({},{});",
         scene.width, scene.height
     )
-    .ok();
+    .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
     writeln!(
         tex,
         "\\clip (0,0) rectangle ({},{});",
         scene.width, scene.height
     )
-    .ok();
+    .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
 
     for object in &scene.objects {
         writeln!(
@@ -3068,7 +3078,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
             object.item.label.replace(['\n', '\r'], " "),
             object.item.object_id
         )
-        .ok();
+        .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
         for primitive in &object.primitives {
             match primitive {
                 ScenePrimitive::Path {
@@ -3091,7 +3101,8 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                     } else {
                         options.push("fill=none".to_string());
                     }
-                    write!(tex, "\\path[{}] ", options.join(",")).ok();
+                    write!(tex, "\\path[{}] ", options.join(","))
+                        .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
                     for (index, point) in points.iter().enumerate() {
                         if index > 0 {
                             tex.push_str(" -- ");
@@ -3102,7 +3113,7 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                             point.x,
                             f64::from(scene.height) - point.y
                         )
-                        .ok();
+                        .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
                     }
                     if *closed {
                         tex.push_str(" -- cycle");
@@ -3126,13 +3137,13 @@ fn serialize_tikz(scene: &ExportScene) -> Vec<u8> {
                         f64::from(scene.height) - position.y,
                         escape_tikz(content)
                     )
-                    .ok();
+                    .map_err(|_| buffer_write_err(ExportFormat::Tikz, "tex"))?;
                 }
             }
         }
     }
     tex.push_str("\\end{tikzpicture}\n\\end{document}\n");
-    tex.into_bytes()
+    Ok(tex.into_bytes())
 }
 
 /// Número de mundo formateado para TikZ math; `None` si no es representable.
@@ -3191,7 +3202,11 @@ struct TikzMathWriter {
 impl TikzMathWriter {
     const FORMAT: ExportFormat = ExportFormat::Tikz;
 
-    fn fallback_comment(&mut self, item: &ExportItem, detail: &str) {
+    fn fallback_comment(
+        &mut self,
+        item: &ExportItem,
+        detail: &str,
+    ) -> std::result::Result<(), ExportError> {
         use std::fmt::Write as _;
         writeln!(
             self.tex,
@@ -3199,7 +3214,8 @@ impl TikzMathWriter {
             item.object_type,
             item.label.replace(['\n', '\r'], " ")
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "comentario tikz"))?;
+        Ok(())
     }
 
     fn invalid(&self, item: &ExportItem, reason: &str) -> ExportError {
@@ -3235,7 +3251,7 @@ impl TikzMathWriter {
             return Ok(());
         }
         let Some(expr) = tikz_math_expr(&function.expr) else {
-            self.fallback_comment(item, "expresion no portable a pgfplots; revisar sintaxis");
+            self.fallback_comment(item, "expresion no portable a pgfplots; revisar sintaxis")?;
             return Ok(());
         };
         let (Some(lo), Some(hi)) = (math_num(visible_min), math_num(visible_max)) else {
@@ -3243,14 +3259,14 @@ impl TikzMathWriter {
         };
         let stroke = validate_stroke(Self::FORMAT, item, function.width, function.color)?;
         if function.fill_color.is_some() {
-            self.fallback_comment(item, "nota: relleno hasta y=0 solo en tikz=visual");
+            self.fallback_comment(item, "nota: relleno hasta y=0 solo en tikz=visual")?;
         }
         writeln!(
             self.tex,
             "% Function '{}': y = {expr}",
             item.label.replace(['\n', '\r'], " ")
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         writeln!(
             self.tex,
             "\\addplot[domain={lo}:{hi}, samples=200, draw={}, draw opacity={:.5}, line width={:.3}pt] {{{expr}}};",
@@ -3258,7 +3274,7 @@ impl TikzMathWriter {
             stroke.color.a,
             stroke.width
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3298,7 +3314,7 @@ impl TikzMathWriter {
             stroke.color.a,
             stroke.width
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3343,7 +3359,7 @@ impl TikzMathWriter {
             tikz_color(point.color),
             point.size
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3354,7 +3370,7 @@ impl TikzMathWriter {
     ) -> std::result::Result<(), ExportError> {
         use std::fmt::Write as _;
         if line.kind != LineKind::Segment {
-            self.fallback_comment(item, "semirrecta/recta infinita: usar tikz=visual");
+            self.fallback_comment(item, "semirrecta/recta infinita: usar tikz=visual")?;
             return Ok(());
         }
         let start = (
@@ -3390,7 +3406,7 @@ impl TikzMathWriter {
             )?,
         );
         if start == end {
-            self.fallback_comment(item, "segmento degenerado sin longitud");
+            self.fallback_comment(item, "segmento degenerado sin longitud")?;
             return Ok(());
         }
         let stroke = validate_stroke(Self::FORMAT, item, line.width, line.color)?;
@@ -3409,7 +3425,7 @@ impl TikzMathWriter {
             stroke.color.a,
             stroke.width
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3457,7 +3473,7 @@ impl TikzMathWriter {
             stroke.width,
             corners.join(" -- ")
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3488,7 +3504,7 @@ impl TikzMathWriter {
             text.font_size * 1.2,
             escape_tikz(&text.content)
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
@@ -3528,17 +3544,17 @@ impl TikzMathWriter {
             stroke.width,
             ellipse.angle.to_degrees()
         )
-        .ok();
+        .map_err(|_| buffer_write_err(Self::FORMAT, "tikz math"))?;
         Ok(())
     }
 
     /// Vuelca `Document.whiteboard` en coordenadas del mundo. Los elementos
     /// inválidos se omiten en silencio, igual que en `append_whiteboard`.
-    fn emit_whiteboard(&mut self, document: &Document) {
+    fn emit_whiteboard(&mut self, document: &Document) -> std::result::Result<(), ExportError> {
         use std::fmt::Write as _;
         let elements = document.whiteboard.elements().to_vec();
         if elements.is_empty() {
-            return;
+            return Ok(());
         }
         let item = ExportItem {
             object_type: "Whiteboard".to_string(),
@@ -3547,16 +3563,22 @@ impl TikzMathWriter {
         };
         let mut included = 0usize;
         for element in &elements {
-            if self.emit_whiteboard_element(&item, element) {
+            if self.emit_whiteboard_element(&item, element)? {
                 included += 1;
             }
         }
         if included > 0 {
-            writeln!(self.tex, "% Whiteboard: {included} elementos").ok();
+            writeln!(self.tex, "% Whiteboard: {included} elementos")
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
         }
+        Ok(())
     }
 
-    fn emit_whiteboard_element(&mut self, item: &ExportItem, element: &WhiteboardElement) -> bool {
+    fn emit_whiteboard_element(
+        &mut self,
+        item: &ExportItem,
+        element: &WhiteboardElement,
+    ) -> std::result::Result<bool, ExportError> {
         use std::fmt::Write as _;
         let shape_color = whiteboard_rgb_to_color((26, 26, 26));
         match element {
@@ -3571,7 +3593,7 @@ impl TikzMathWriter {
                     *width as f32,
                     whiteboard_rgb_to_color(*color),
                 ) else {
-                    return false;
+                    return Ok(false);
                 };
                 let nodes = points
                     .iter()
@@ -3582,7 +3604,7 @@ impl TikzMathWriter {
                     .map(|(px, py)| format!("({px},{py})"))
                     .collect::<Vec<_>>();
                 if nodes.len() < 2 {
-                    return false;
+                    return Ok(false);
                 }
                 writeln!(
                     self.tex,
@@ -3592,19 +3614,19 @@ impl TikzMathWriter {
                     stroke.width,
                     nodes.join(" -- ")
                 )
-                .ok();
-                true
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
+                Ok(true)
             }
             WhiteboardElement::Rectangle { min, max, fill } => {
                 if !finite_whiteboard_pair(*min) || !finite_whiteboard_pair(*max) {
-                    return false;
+                    return Ok(false);
                 }
                 let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
-                    return false;
+                    return Ok(false);
                 };
                 let Ok(fill) = validate_fill(Self::FORMAT, item, fill.map(whiteboard_rgb_to_color))
                 else {
-                    return false;
+                    return Ok(false);
                 };
                 let (Some(x0), Some(y0), Some(x1), Some(y1)) = (
                     math_num(min.0.min(max.0)),
@@ -3612,10 +3634,10 @@ impl TikzMathWriter {
                     math_num(min.0.max(max.0)),
                     math_num(min.1.max(max.1)),
                 ) else {
-                    return false;
+                    return Ok(false);
                 };
                 if x0 == x1 || y0 == y1 {
-                    return false;
+                    return Ok(false);
                 }
                 let fill_option = fill.map_or_else(
                     || "fill=none".to_string(),
@@ -3628,8 +3650,8 @@ impl TikzMathWriter {
                     stroke.color.a,
                     stroke.width
                 )
-                .ok();
-                true
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
+                Ok(true)
             }
             WhiteboardElement::Ellipse { center, rx, ry } => {
                 if !finite_whiteboard_pair(*center)
@@ -3638,10 +3660,10 @@ impl TikzMathWriter {
                     || *rx <= 0.0
                     || *ry <= 0.0
                 {
-                    return false;
+                    return Ok(false);
                 }
                 let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
-                    return false;
+                    return Ok(false);
                 };
                 let (Some(cx), Some(cy), Some(rx), Some(ry)) = (
                     math_num(center.0),
@@ -3649,7 +3671,7 @@ impl TikzMathWriter {
                     math_num(*rx),
                     math_num(*ry),
                 ) else {
-                    return false;
+                    return Ok(false);
                 };
                 writeln!(
                     self.tex,
@@ -3658,15 +3680,15 @@ impl TikzMathWriter {
                     stroke.color.a,
                     stroke.width
                 )
-                .ok();
-                true
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
+                Ok(true)
             }
             WhiteboardElement::Arrow { from, to } => {
                 if !finite_whiteboard_pair(*from) || !finite_whiteboard_pair(*to) || from == to {
-                    return false;
+                    return Ok(false);
                 }
                 let Ok(stroke) = validate_stroke(Self::FORMAT, item, 1.8, shape_color) else {
-                    return false;
+                    return Ok(false);
                 };
                 let (Some(ax), Some(ay), Some(bx), Some(by)) = (
                     math_num(from.0),
@@ -3674,7 +3696,7 @@ impl TikzMathWriter {
                     math_num(to.0),
                     math_num(to.1),
                 ) else {
-                    return false;
+                    return Ok(false);
                 };
                 writeln!(
                     self.tex,
@@ -3683,18 +3705,18 @@ impl TikzMathWriter {
                     stroke.color.a,
                     stroke.width
                 )
-                .ok();
-                true
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
+                Ok(true)
             }
             WhiteboardElement::Text { at, text, size } => {
                 if text.is_empty() || !finite_whiteboard_pair(*at) {
-                    return false;
+                    return Ok(false);
                 }
                 if !size.is_finite() || *size <= 0.0 || *size as f32 > MAX_EXPORT_STYLE_PIXELS {
-                    return false;
+                    return Ok(false);
                 }
                 let (Some(px), Some(py)) = (math_num(at.0), math_num(at.1)) else {
-                    return false;
+                    return Ok(false);
                 };
                 writeln!(
                     self.tex,
@@ -3704,8 +3726,8 @@ impl TikzMathWriter {
                     *size as f32 * 1.2,
                     escape_tikz(text)
                 )
-                .ok();
-                true
+                .map_err(|_| buffer_write_err(Self::FORMAT, "pizarra tikz"))?;
+                Ok(true)
             }
         }
     }
@@ -3751,14 +3773,14 @@ fn serialize_tikz_math(
         "% grafito tikz-mode={} (editable; visual=replica exacta en pt)",
         TikzMode::Math.as_str()
     )
-    .ok();
+    .map_err(|_| buffer_write_err(FORMAT, "cabecera tikz math"))?;
     writer.tex.push_str("\\begin{document}\n");
     writer.tex.push_str("\\begin{tikzpicture}\n");
     writeln!(
         writer.tex,
         "\\begin{{axis}}[xmin={xmin}, xmax={xmax}, ymin={ymin}, ymax={ymax}, axis lines=middle, axis equal image, enlargelimits=false]"
     )
-    .ok();
+    .map_err(|_| buffer_write_err(FORMAT, "eje tikz math"))?;
 
     let mut visible: Vec<(ObjectId, &GeoObject)> = document
         .objects_iter()
@@ -3776,10 +3798,10 @@ fn serialize_tikz_math(
             GeoObject::Polygon(polygon) => writer.emit_polygon(&item, polygon)?,
             GeoObject::Text(text) => writer.emit_text(&item, text)?,
             GeoObject::Ellipse(ellipse) => writer.emit_ellipse(&item, ellipse)?,
-            _ => writer.fallback_comment(&item, "sin equivalente matematico directo"),
+            _ => writer.fallback_comment(&item, "sin equivalente matematico directo")?,
         }
     }
-    writer.emit_whiteboard(document);
+    writer.emit_whiteboard(document)?;
 
     writer
         .tex
@@ -4043,7 +4065,7 @@ pub(crate) fn export_document_with_options(
     let bytes = match format {
         ExportFormat::Svg => serialize_svg(&scene)?,
         ExportFormat::Png => render_png(&scene, format)?,
-        ExportFormat::Tikz => serialize_tikz(&scene),
+        ExportFormat::Tikz => serialize_tikz(&scene)?,
     };
     finish_export(format, &scene, bytes, path)
 }
@@ -4059,7 +4081,7 @@ pub(crate) fn export_document_with_tikz_mode(
     let path = path.as_ref();
     let scene = build_export_scene(document, ExportFormat::Tikz, options)?;
     let bytes = match mode {
-        TikzMode::Visual => serialize_tikz(&scene),
+        TikzMode::Visual => serialize_tikz(&scene)?,
         TikzMode::Math => serialize_tikz_math(document, &scene, options)?,
     };
     finish_export(ExportFormat::Tikz, &scene, bytes, path)
@@ -6424,6 +6446,21 @@ mod tests {
         );
         let _ = std::fs::remove_file(math_path);
         let _ = std::fs::remove_file(visual_path);
+    }
+
+    #[test]
+    fn tikz_visual_falla_honesto_en_vez_de_truncar() {
+        // FIX 4: los `write!` del builder ya no se tapan con `.ok()`; la
+        // serialización visual propaga `Result` y el documento válido sale
+        // completo (cierre standalone presente, sin truncado silencioso).
+        let document = tikz_math_fixture_document();
+        let options = ExportOptions::new(320, 240);
+        let scene =
+            build_export_scene(&document, ExportFormat::Tikz, options).expect("escena valida");
+        let bytes = serialize_tikz(&scene).expect("serialize_tikz propaga errores, no trunca");
+        let texto = String::from_utf8(bytes).expect("tikz es utf8");
+        assert!(texto.contains("\\begin{tikzpicture}"));
+        assert!(texto.contains("\\end{document}"), "sin truncado: {texto}");
     }
 
     #[test]

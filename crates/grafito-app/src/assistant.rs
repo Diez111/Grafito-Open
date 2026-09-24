@@ -5327,6 +5327,12 @@ impl GrafitoApp {
             AssistantUiAction::ReplayMedia { turn_idx } => {
                 self.replay_assistant_history_media(ctx, turn_idx);
             }
+            AssistantUiAction::RevealStep { turn } => {
+                self.reveal_assistant_steps(turn, false, ctx);
+            }
+            AssistantUiAction::RevealAllSteps { turn } => {
+                self.reveal_assistant_steps(turn, true, ctx);
+            }
         }
     }
 
@@ -5334,6 +5340,25 @@ impl GrafitoApp {
         let error = error.into();
         self.assistant.error = Some(error.clone());
         self.notify(error, ToastKind::Error);
+    }
+
+    /// Avanza el revelado del visor de desarrollo por pasos de un turno.
+    ///
+    /// Sin I/O: lee el total de pasos del contenido del turno, acota con el
+    /// panel y repinta. Si el turno no existe o no trae fences, no hace nada.
+    fn reveal_assistant_steps(&mut self, turn: usize, show_all: bool, ctx: &egui::Context) {
+        let total = self.assistant.conversation.get(turn).map_or(0, |turn| {
+            grafito_ui::step_by_step::count_steps_in_content(&turn.content)
+        });
+        if total == 0 {
+            return;
+        }
+        if show_all {
+            self.assistant.reveal_all_step_card(turn, total);
+        } else {
+            self.assistant.advance_step_card(turn, total);
+        }
+        ctx.request_repaint();
     }
 
     /// Freno 429 lado UI: si la cuota del proveedor sigue en pausa, muestra

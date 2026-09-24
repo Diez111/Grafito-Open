@@ -5164,7 +5164,7 @@ fn set_domain_coloring_mode(document: &mut Document, id: ObjectId, mode: u8) -> 
     if !needs_update {
         return false;
     }
-    if let Some(GeoObject::ComplexGrid(grid)) = document.get_object_mut(id) {
+    if let Some(GeoObject::ComplexGrid(grid)) = document.get_object_mut_touch(id) {
         grid.domain_coloring_mode = mode;
         true
     } else {
@@ -5187,7 +5187,7 @@ fn set_complex_mapping_animation(
     if !needs_update {
         return false;
     }
-    if let Some(GeoObject::ComplexMapping(mapping)) = document.get_object_mut(id) {
+    if let Some(GeoObject::ComplexMapping(mapping)) = document.get_object_mut_touch(id) {
         mapping.animate_homotopy = animate_homotopy;
         mapping.homotopy_speed = homotopy_speed;
         true

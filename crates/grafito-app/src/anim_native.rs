@@ -7812,37 +7812,36 @@ fn render_fractal_frames_with_params_impl(
 }
 
 pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<egui::ColorImage> {
-    // Compat: si se llama solo con template, el fallback es el placeholder
-    // neutro honesto (antes "elegante" con curva falsa).
-    match template {
-        "integral-area" | "fraccion-visual" | "prob-anim" => render_integral_frames(width, height),
-        "taylor-series" | "serie-anim" | "trig-anim" => render_taylor_frames(width, height),
-        "conformal-map" | "vector-anim" | "conica-anim" => render_conformal_frames(width, height),
-        "pitagoras" | "pythagoras" => render_pitagoras_frames(width, height),
-        "matriz-anim" | "universal" => {
-            render_universal_youtube_frames("matem\u{00e1}tica", width, height)
-        }
-        "derivative-slope" | "ecuacion-anim" => render_native_animation_frames(width, height),
+    // FIX 5 (paso 1): match canónico único — se resuelve el nombre con
+    // `resolve_native_template` (el mismo de `:6529`) y se despacha por
+    // canónica, sin repetir la lista de aliases. El fallback conserva el
+    // comportamiento histórico byte a byte: vacío → animación nativa,
+    // desconocido no vacío → placeholder universal con el texto pedido
+    // (eco), `"universal"`/`"matriz-anim"` exactos → universal neutro.
+    if template.trim().is_empty() {
+        return render_native_animation_frames(width, height);
+    }
+    match resolve_native_template(template, "") {
+        "integral-area" => render_integral_frames(width, height),
+        "taylor-series" => render_taylor_frames(width, height),
+        "conformal-map" => render_conformal_frames(width, height),
+        "pitagoras" => render_pitagoras_frames(width, height),
+        "derivative-slope" => render_native_animation_frames(width, height),
         "euler" => render_euler_frames(width, height),
         "fourier" => render_fourier_frames(width, height),
-        "logistic-bifurcation" | "bifurcacion-logistica" | "logistica" => {
-            render_logistic_bifurcation_frames(width, height)
-        }
-        "gradient-field" | "campo-gradiente" | "gradiente" => {
-            render_gradient_field_frames(width, height)
-        }
-        "mobius-transform" | "mobius" | "moebius" => render_mobius_frames(width, height),
+        "logistic-bifurcation" => render_logistic_bifurcation_frames(width, height),
+        "gradient-field" => render_gradient_field_frames(width, height),
+        "mobius-transform" => render_mobius_frames(width, height),
         "subspace" => render_subspace_frames(width, height),
         "fractal" => render_fractal_frames(width, height),
-        _ => {
-            // Template desconocido -> placeholder neutro con ese texto como
-            // concepto (eco, no respuesta) para no quedar vacío.
-            if template.trim().is_empty() {
-                render_native_animation_frames(width, height)
+        "universal" => {
+            if template.trim() == "universal" || template.trim() == "matriz-anim" {
+                render_universal_youtube_frames("matem\u{00e1}tica", width, height)
             } else {
                 render_universal_youtube_frames(template, width, height)
             }
         }
+        _ => render_universal_youtube_frames(template, width, height),
     }
 }
 
@@ -9137,6 +9136,65 @@ mod tests {
             render_anim_by_template("unknown-template", 64, 64)
         });
         assert_frames_valid(&d, 64, 64, "fallback-unknown");
+    }
+    #[test]
+    fn by_template_usa_match_canonico_unico() {
+        // FIX 5 (paso 1): `render_anim_by_template` despacha por canónica vía
+        // `resolve_native_template` sin repetir aliases. Cada alias da los
+        // mismos píxeles que su canónica; el fallback queda pineado.
+        fn pixeles(frames: &[egui::ColorImage]) -> Vec<Vec<egui::Color32>> {
+            frames.iter().map(|f| f.pixels.clone()).collect()
+        }
+        let pares = [
+            ("integral-area", "fraccion-visual"),
+            ("integral-area", "prob-anim"),
+            ("taylor-series", "serie-anim"),
+            ("taylor-series", "trig-anim"),
+            ("conformal-map", "vector-anim"),
+            ("conformal-map", "conica-anim"),
+            ("pitagoras", "pythagoras"),
+            ("derivative-slope", "ecuacion-anim"),
+            ("universal", "matriz-anim"),
+            ("logistic-bifurcation", "bifurcacion-logistica"),
+            ("logistic-bifurcation", "logistica"),
+            ("gradient-field", "campo-gradiente"),
+            ("gradient-field", "gradiente"),
+            ("mobius-transform", "mobius"),
+            ("mobius-transform", "moebius"),
+        ];
+        for (canonica, alias) in pares {
+            let a = render_anim_by_template(canonica, 64, 64);
+            let b = render_anim_by_template(alias, 64, 64);
+            assert_eq!(a.len(), b.len(), "alias {alias} vs {canonica}");
+            assert_eq!(
+                pixeles(&a),
+                pixeles(&b),
+                "alias {alias} debe dibujar igual que {canonica}"
+            );
+        }
+        // Las 13 canónicas resuelven a sí mismas (fuente única).
+        for tpl in CANONICAL_TEMPLATES {
+            assert_eq!(resolve_native_template(tpl, ""), *tpl, "canónica {tpl}");
+            let frames = render_anim_by_template(tpl, 64, 64);
+            assert_frames_valid(&frames, 64, 64, tpl);
+        }
+        // Fallback histórico intacto: vacío → nativa, desconocido → eco.
+        assert_eq!(
+            pixeles(&render_anim_by_template("", 64, 64)),
+            pixeles(&render_native_animation_frames(64, 64))
+        );
+        assert_eq!(
+            pixeles(&render_anim_by_template("unknown-template", 64, 64)),
+            pixeles(&render_universal_youtube_frames("unknown-template", 64, 64))
+        );
+        assert_eq!(
+            pixeles(&render_anim_by_template("universal", 64, 64)),
+            pixeles(&render_universal_youtube_frames(
+                "matem\u{00e1}tica",
+                64,
+                64
+            ))
+        );
     }
     #[test]
     fn universal_handles_any_text() {

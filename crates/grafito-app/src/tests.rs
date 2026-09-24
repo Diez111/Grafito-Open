@@ -1637,6 +1637,30 @@ fn trig_animation_explains_identities_for_teaching() {
 }
 
 #[test]
+fn trig_singularidades_no_pintan_inf() {
+    use crate::app::GrafitoApp;
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
+    // FIX 3: en θ = kπ las recíprocas no dan valor finito (antes `inf`).
+    assert!(GrafitoApp::trig_value_opt(3, 0.0).is_none());
+    assert!(GrafitoApp::trig_value_opt(5, 0.0).is_none());
+    assert!(GrafitoApp::trig_value_opt(2, FRAC_PI_2).is_none());
+    assert!(GrafitoApp::trig_value_opt(4, FRAC_PI_2).is_none());
+    assert!(GrafitoApp::trig_value_opt(0, f64::NAN).is_none());
+    // El legado sigue devolviendo f64 pero jamás `inf`: la UI filtra con
+    // `is_finite` (`panels.rs`, `render_2d.rs`) y muestra el fallback.
+    let v = GrafitoApp::trig_value(5, 0.0);
+    assert!(!v.is_finite(), "csc(0) debe ser no-finito, fue {v}");
+    assert!(!v.is_infinite(), "csc(0) debe ser NaN, no inf");
+    // Lejos de singularidades todo finito e idéntico al cálculo directo.
+    for i in 0..6 {
+        let v = GrafitoApp::trig_value_opt(i, FRAC_PI_4).expect("finito en π/4");
+        assert!(v.is_finite());
+        assert!((GrafitoApp::trig_value(i, FRAC_PI_4) - v).abs() < 1e-12);
+    }
+}
+
+#[test]
 fn invalid_command_submission_does_not_request_an_undo_snapshot() {
     let before = grafito_core::Document::new();
     let mut after = before.clone();
@@ -3584,8 +3608,8 @@ fn unversioned_legacy_visibility_refreshes_all_gpu_graphable_objects_and_caches(
     }
 
     assert_eq!(
-        document.version,
-        before.version.wrapping_add(graphable_ids.len() as u64)
+        document.version, before.version,
+        "los préstamos mutables no bumpean la versión"
     );
     assert_ne!(
         serde_json::to_value(&before).expect("before document should serialize"),
@@ -3597,7 +3621,8 @@ fn unversioned_legacy_visibility_refreshes_all_gpu_graphable_objects_and_caches(
     ));
     assert_eq!(
         document.version,
-        before.version.wrapping_add(graphable_ids.len() as u64)
+        before.version.wrapping_add(1),
+        "la red de seguridad bumpea una sola vez por cambio sin versionar"
     );
     assert!(graphable_ids.iter().all(|id| {
         !document
@@ -3633,7 +3658,10 @@ fn unversioned_legacy_style_change_refreshes_gpu_geometry() {
     };
     function_obj.width = 6.0;
 
-    assert_eq!(document.version, before.version.wrapping_add(1));
+    // Contrato nuevo: el préstamo mutable por sí solo no bumpea `version`
+    // (`Document::get_object_mut`). La red de seguridad
+    // `refresh_unversioned_document_change` es la que ensucia y refresca.
+    assert_eq!(document.version, before.version);
     assert_ne!(
         serde_json::to_value(&before).expect("before document should serialize"),
         serde_json::to_value(&document).expect("updated document should serialize")

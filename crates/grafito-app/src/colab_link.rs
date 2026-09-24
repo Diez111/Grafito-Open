@@ -634,11 +634,17 @@ pub fn list_lab_jobs() -> Vec<JobMeta> {
         if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
             continue;
         }
-        let kind = std::fs::read_to_string(entry.path())
-            .ok()
-            .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-            .and_then(|v| v.get("kind").and_then(Value::as_str).map(str::to_string))
-            .unwrap_or_else(|| "?".into());
+        let kind = match std::fs::read_to_string(entry.path()) {
+            Err(_) => "? (manifiesto ilegible)".to_string(),
+            Ok(texto) => match serde_json::from_str::<Value>(&texto) {
+                Err(_) => "? (json roto)".to_string(),
+                Ok(valor) => valor
+                    .get("kind")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "? (sin kind)".to_string()),
+            },
+        };
         out.push(JobMeta {
             job_id: id.to_string(),
             kind,
@@ -888,5 +894,59 @@ mod tests {
         assert!(dir.to_string_lossy().contains("lab_jobs"));
         assert!(read_job_script("xyz", 100).is_err());
         assert!(read_job_script(&"a".repeat(64), 100).is_err());
+    }
+
+    #[test]
+    fn jobs_kind_distinguido_no_traga_contexto() {
+        // FIX 4: el kind distingue ilegible/roto/sin-kind en vez de "?" mudo.
+        let base = std::env::temp_dir().join(format!(
+            "grafito-labkind-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let jobs = base.join("lab_jobs");
+        std::fs::create_dir_all(&jobs).unwrap();
+        let bueno = "a".repeat(64);
+        let roto = "b".repeat(64);
+        let sinkind = "c".repeat(64);
+        std::fs::write(
+            jobs.join(format!("{bueno}.json")),
+            r#"{"kind": "integral"}"#,
+        )
+        .unwrap();
+        std::fs::write(jobs.join(format!("{roto}.json")), "{no json").unwrap();
+        std::fs::write(jobs.join(format!("{sinkind}.json")), r#"{"otro": 1}"#).unwrap();
+        let ledger = base.join("lab_colab.jsonl");
+        std::fs::write(&ledger, "").unwrap();
+        let previo = std::env::var_os("GRAFITO_LAB_LEDGER");
+        std::env::set_var("GRAFITO_LAB_LEDGER", &ledger);
+        let lista = list_lab_jobs();
+        if let Some(v) = previo {
+            std::env::set_var("GRAFITO_LAB_LEDGER", v);
+        } else {
+            std::env::remove_var("GRAFITO_LAB_LEDGER");
+        }
+        let kind_de = |id: &str| {
+            lista
+                .iter()
+                .find(|j| j.job_id == id)
+                .map(|j| j.kind.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(kind_de(&bueno), "integral");
+        assert!(
+            kind_de(&roto).contains("roto"),
+            "json roto debe decirlo: {}",
+            kind_de(&roto)
+        );
+        assert!(
+            kind_de(&sinkind).contains("sin kind"),
+            "sin kind debe decirlo: {}",
+            kind_de(&sinkind)
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

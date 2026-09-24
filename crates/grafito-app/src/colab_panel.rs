@@ -19,7 +19,11 @@ use grafito_ui::tokens::{
     RADIUS_MD, RADIUS_SM, SPACE_MD, SPACE_SM, SPACE_XS, TYPE_LG, TYPE_SM, TYPE_XS,
 };
 use serde_json::{json, Value};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Ventana de frescura del cache de jobs: `draw_jobs` re-lee el disco como
+/// máximo una vez cada 2 s (cero I/O en el resto de los frames).
+pub const JOBS_CACHE_TTL: Duration = Duration::from_secs(2);
 
 /// Job seleccionado en el panel (no persiste entre sesiones a propósito).
 #[derive(Debug, Default)]
@@ -27,6 +31,39 @@ pub struct ColabPanelState {
     pub selected_job: Option<String>,
     pub script_preview: String,
     pub import_note: String,
+    /// Cache de `list_lab_jobs` para no tocar fs en cada frame.
+    pub jobs_cache: Vec<JobMeta>,
+    /// Cuándo se llenó `jobs_cache` (`None` = nunca: carga en el primer frame).
+    pub jobs_cached_at: Option<Instant>,
+}
+
+impl ColabPanelState {
+    /// Refresca el cache si está vacío o vencido el TTL. Única vía con I/O;
+    /// `draw_jobs` solo lee `cached_jobs` (cero I/O por frame).
+    pub fn refresh_jobs_if_stale(&mut self, now: Instant) {
+        self.refresh_jobs_with(now, list_lab_jobs);
+    }
+
+    /// Seam testeable: misma política con loader inyectado (sin fs en tests).
+    pub fn refresh_jobs_with(&mut self, now: Instant, listar: impl FnOnce() -> Vec<JobMeta>) {
+        let vencido = self
+            .jobs_cached_at
+            .is_none_or(|cuando| now.saturating_duration_since(cuando) >= JOBS_CACHE_TTL);
+        if vencido {
+            self.jobs_cache = listar();
+            self.jobs_cached_at = Some(now);
+        }
+    }
+
+    /// Lectura del cache (sin I/O).
+    pub fn cached_jobs(&self) -> &[JobMeta] {
+        &self.jobs_cache
+    }
+
+    /// Invalida el cache (llamar tras importar/ejecutar que cree jobs).
+    pub fn invalidate_jobs(&mut self) {
+        self.jobs_cached_at = None;
+    }
 }
 
 /// Dibuja la ventana Colab. Llamar una vez por frame cuando visible.
@@ -238,7 +275,10 @@ fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context, theme
             .color(theme.text_secondary),
     );
     ui.add_space(SPACE_XS);
-    let jobs: Vec<JobMeta> = list_lab_jobs();
+    // Cero I/O por frame: una sola lectura cada `JOBS_CACHE_TTL`, el resto
+    // lee el cache en memoria.
+    app.colab_panel.refresh_jobs_if_stale(Instant::now());
+    let jobs: Vec<JobMeta> = app.colab_panel.cached_jobs().to_vec();
     if jobs.is_empty() {
         ui.label(
             egui::RichText::new("Sin jobs todavía: el agente los crea con export_colab_job.")
@@ -255,9 +295,16 @@ fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context, theme
                 ui.horizontal(|ui| {
                     if ui.radio(selected, &job.job_id[..12]).clicked() {
                         app.colab_panel.selected_job = Some(job.job_id.clone());
-                        app.colab_panel.script_preview =
-                            read_job_script(&job.job_id, 1200).unwrap_or_default();
-                        app.colab_panel.import_note.clear();
+                        match read_job_script(&job.job_id, 1200) {
+                            Ok(preview) => {
+                                app.colab_panel.script_preview = preview;
+                                app.colab_panel.import_note.clear();
+                            }
+                            Err(e) => {
+                                app.colab_panel.script_preview.clear();
+                                app.colab_panel.import_note = format!("script ilegible: {e}");
+                            }
+                        }
                     }
                     ui.label(
                         egui::RichText::new(format!("… · {}", job.kind))
@@ -290,8 +337,12 @@ fn draw_jobs(ui: &mut egui::Ui, app: &mut GrafitoApp, ctx: &egui::Context, theme
     ui.horizontal(|ui| {
         if secondary_button(ui, theme, "Copiar script".to_string()).clicked() {
             if let Some(id) = app.colab_panel.selected_job.clone() {
-                let full = read_job_script(&id, 1_000_000).unwrap_or_default();
-                ctx.copy_text(full);
+                match read_job_script(&id, 1_000_000) {
+                    Ok(full) => ctx.copy_text(full),
+                    Err(e) => {
+                        app.colab_panel.import_note = format!("script ilegible: {e}");
+                    }
+                }
             }
         }
         let can_run = app.colab.phase == ColabPhase::Ready
@@ -367,6 +418,7 @@ fn run_selected_job(app: &mut GrafitoApp) {
     let mut args = serde_json::Map::new();
     args.insert(key, Value::String(script));
     app.colab.output.clear();
+    app.colab_panel.invalidate_jobs();
     app.colab.request_run(exec, Value::Object(args));
 }
 
@@ -413,6 +465,7 @@ fn import_last_output(app: &mut GrafitoApp) {
                 .unwrap_or("?");
             app.colab_panel.import_note =
                 format!("import: ok={ok} verificación={level} (ver lab_colab.jsonl)");
+            app.colab_panel.invalidate_jobs();
         }
         Err(e) => {
             app.colab_panel.import_note = format!("import falló: {e}");
@@ -494,6 +547,46 @@ fn draw_log(ui: &mut egui::Ui, app: &mut GrafitoApp, theme: &Theme) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn jobs_cache_evita_fs_por_frame() {
+        let hace_job = |n: usize| JobMeta {
+            job_id: format!("{n:064x}"),
+            kind: "integral".to_string(),
+        };
+        let mut estado = ColabPanelState::default();
+        let mut llamadas = 0u32;
+        let t0 = Instant::now();
+        // Apertura: primera lectura va al loader.
+        estado.refresh_jobs_with(t0, || {
+            llamadas += 1;
+            vec![hace_job(1)]
+        });
+        assert_eq!(llamadas, 1);
+        assert_eq!(estado.cached_jobs().len(), 1);
+        // Segundo frame dentro del TTL: NO toca el loader aunque haya job nuevo.
+        estado.refresh_jobs_with(t0 + Duration::from_millis(100), || {
+            llamadas += 1;
+            vec![hace_job(1), hace_job(2)]
+        });
+        assert_eq!(llamadas, 1, "el segundo frame debe leer el cache, sin fs");
+        assert_eq!(estado.cached_jobs().len(), 1);
+        // Vencido el TTL: re-lee y ve el job nuevo.
+        estado.refresh_jobs_with(t0 + JOBS_CACHE_TTL + Duration::from_millis(1), || {
+            llamadas += 1;
+            vec![hace_job(1), hace_job(2)]
+        });
+        assert_eq!(llamadas, 2);
+        assert_eq!(estado.cached_jobs().len(), 2);
+        // Invalidar (tras importar/ejecutar) fuerza re-lectura inmediata.
+        estado.invalidate_jobs();
+        estado.refresh_jobs_with(t0 + JOBS_CACHE_TTL + Duration::from_millis(1), || {
+            llamadas += 1;
+            vec![]
+        });
+        assert_eq!(llamadas, 3);
+        assert!(estado.cached_jobs().is_empty());
+    }
 
     #[test]
     fn extract_encuentra_json_embebido() {

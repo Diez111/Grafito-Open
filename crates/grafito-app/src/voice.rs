@@ -205,7 +205,9 @@ pub fn voice_candidate_dirs() -> Vec<PathBuf> {
 /// Solo lectura. Expuesta para tests herméticos (dirs falsos).
 pub fn find_voice_in_dirs(dirs: &[PathBuf]) -> Option<PathBuf> {
     for dir in dirs {
-        let entradas = std::fs::read_dir(dir).ok()?;
+        let Ok(entradas) = std::fs::read_dir(dir) else {
+            continue;
+        };
         let mut onnx: Vec<PathBuf> = entradas
             .filter_map(|e| e.ok())
             .map(|e| e.path())
@@ -906,6 +908,13 @@ mod tests {
         assert_eq!(
             find_voice_in_dirs(&[otras.clone(), voces.clone()]),
             Some(otras.join("z.onnx"))
+        );
+        // FIX 2: un dir ilegible/inexistente no aborta el resto.
+        let faltante = base.join("no-existe-xyz");
+        assert!(!faltante.exists());
+        assert_eq!(
+            find_voice_in_dirs(&[faltante, voces.clone()]),
+            Some(voces.join("a.ONNX"))
         );
         let _ = std::fs::remove_dir_all(&base);
     }

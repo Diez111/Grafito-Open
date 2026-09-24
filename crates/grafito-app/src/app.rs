@@ -1474,6 +1474,11 @@ pub(crate) struct TrigFunctionSpec {
     pub color: Color,
 }
 
+/// Cota de singularidad trigonométrica: denominador (`sin`/`cos`) con
+/// `|v| < EPS` cuenta como cero exacto (función no definida, `None` honesto
+/// en vez de `inf`/`1.6e16` pintado en el overlay).
+pub(crate) const TRIG_SINGULAR_EPS: f64 = 1.0e-12;
+
 pub(crate) const TRIG_FUNCTIONS: [TrigFunctionSpec; 6] = [
     TrigFunctionSpec {
         name: "sin",
@@ -2099,14 +2104,54 @@ impl GrafitoApp {
     }
 
     pub(crate) fn trig_value(index: u8, t: f64) -> f64 {
+        Self::trig_value_opt(index, t).unwrap_or(f64::NAN)
+    }
+
+    /// Valor trigonométrico con singularidades honestas: `None` donde la
+    /// función no está definida (`tan`/`sec` con `cos θ ≈ 0`,
+    /// `cot`/`csc` con `sin θ ≈ 0`, `t` no finito o cociente no finito).
+    /// Los llamadores (`panels.rs`, `render_2d.rs`) ya filtran con
+    /// `is_finite` y muestran "no está definido" en vez de pintar `inf`.
+    pub(crate) fn trig_value_opt(index: u8, t: f64) -> Option<f64> {
+        if !t.is_finite() {
+            return None;
+        }
+        let finito = |v: f64| v.is_finite().then_some(v);
         match index as usize {
-            0 => t.sin(),
-            1 => t.cos(),
-            2 => t.tan(),
-            3 => 1.0 / t.tan(),
-            4 => 1.0 / t.cos(),
-            5 => 1.0 / t.sin(),
-            _ => t.sin(),
+            0 => finito(t.sin()),
+            1 => finito(t.cos()),
+            2 => {
+                if t.cos().abs() < TRIG_SINGULAR_EPS {
+                    None
+                } else {
+                    finito(t.tan())
+                }
+            }
+            3 => {
+                let (s, c) = (t.sin(), t.cos());
+                if s.abs() < TRIG_SINGULAR_EPS {
+                    None
+                } else {
+                    finito(c / s)
+                }
+            }
+            4 => {
+                let c = t.cos();
+                if c.abs() < TRIG_SINGULAR_EPS {
+                    None
+                } else {
+                    finito(1.0 / c)
+                }
+            }
+            5 => {
+                let s = t.sin();
+                if s.abs() < TRIG_SINGULAR_EPS {
+                    None
+                } else {
+                    finito(1.0 / s)
+                }
+            }
+            _ => finito(t.sin()),
         }
     }
 
@@ -4194,6 +4239,18 @@ impl GrafitoApp {
                         );
                     }
                 }
+                return;
+            }
+            "Step by Step" => {
+                // Abre el visor: deja StepByStep[ listo en la entrada para
+                // completar la operación y ver la traza con revelado
+                // progresivo en el transcript. Sin ejecutar nada.
+                self.input_text = "StepByStep[".to_string();
+                self.command_input_focus_requested = true;
+                self.notify(
+                    "Completá la operación: StepByStep[Derivative[x^2, x]]",
+                    grafito_ui::toast::ToastKind::Info,
+                );
                 return;
             }
             "Save" => {
