@@ -30146,28 +30146,21 @@ fn parse_bounded_int_arg(
 // cuerpo de UNA función por símbolo y nada más. Los `MathResult<T>` se
 // adaptan con `math_result_a_resultado`.
 //
-// ESTADO VERIFICADO 2026-09-24 (`grep` sobre crates/grafito-geometry/src/):
-// `fourier::{fourier_coefficients, fourier_series}` y
-// `symbolic::derivative_typed` EXISTEN y están cableados (geo_fourier,
-// geo_derivative_nth, geo_partial_derivative). El resto del contrato todavía
-// NO existe: sin módulos `pde` ni `latex`, ni
-// `integral::{improper_integral, integrate_by_substitution}`, ni
-// `symbolic::{sum_closed, lambert_w}`. Hasta que salgan, cada `geo_*`
-// responde el error honesto del bloqueo (con el símbolo exacto que falta) en
-// lugar de una matemática inventada.
+// ESTADO VERIFICADO 2026-09-26: el contrato existe y está cableado
+// (pde::{solve_heat_1d, solve_wave_1d, solve_laplace_2d_rect} devuelven el
+// resumen muestreado; integral::integrate_by_substitution,
+// symbolic::sum_closed vía `math_result_a_resultado`; latex::{parse_latex,
+// to_latex} directos). Los `MathResult<T>` se adaptan con
+// `math_result_a_resultado`.
 
 /// Expone `pde::solve_heat_1d` y resume `u(x, t_end)`.
 fn geo_heat_1d(expr: &str, x: &str, t0: f64, t_end: f64) -> Result<String, String> {
-    // CALL SITE (contrato): grafito_geometry::pde::solve_heat_1d(expr, x, t0, t_end)
-    let _ = (expr, x, t0, t_end);
-    Err("HeatEquation: motor no disponible (falta grafito_geometry::pde::solve_heat_1d)".into())
+    grafito_geometry::pde::solve_heat_1d(expr, x, t0, t_end)
 }
 
 /// Expone `pde::solve_wave_1d` y resume `u(x, t_end)`.
 fn geo_wave_1d(expr: &str, x: &str, t0: f64, t_end: f64) -> Result<String, String> {
-    // CALL SITE (contrato): grafito_geometry::pde::solve_wave_1d(expr, x, t0, t_end)
-    let _ = (expr, x, t0, t_end);
-    Err("WaveEquation: motor no disponible (falta grafito_geometry::pde::solve_wave_1d)".into())
+    grafito_geometry::pde::solve_wave_1d(expr, x, t0, t_end)
 }
 
 /// Expone `pde::solve_laplace_2d_rect` y resume la solución muestreada.
@@ -30182,14 +30175,7 @@ fn geo_laplace_2d_rect(
     ymin: f64,
     ymax: f64,
 ) -> Result<String, String> {
-    // CALL SITE (contrato):
-    //   grafito_geometry::pde::solve_laplace_2d_rect(
-    //       g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax)
-    let _ = (g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax);
-    Err(
-        "Laplace2D: motor no disponible (falta grafito_geometry::pde::solve_laplace_2d_rect)"
-            .into(),
-    )
+    grafito_geometry::pde::solve_laplace_2d_rect(g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax)
 }
 
 /// Expone `fourier::fourier_coefficients` + `fourier::fourier_series`
@@ -30256,12 +30242,12 @@ fn geo_partial_derivative(expr: &str, var: &str) -> Result<String, String> {
     math_result_a_resultado(grafito_geometry::symbolic::derivative_typed(expr, var))
 }
 
-/// Expone `integral::integrate_by_substitution`.
+/// Expone `integral::integrate_by_substitution` (devuelve la primitiva).
 fn geo_integrate_by_substitution(expr: &str, var: &str, u: &str) -> Result<String, String> {
-    // CALL SITE (contrato):
-    //   grafito_geometry::integral::integrate_by_substitution(expr, var, u)
-    let _ = (expr, var, u);
-    Err("SubstituteInt: motor no disponible (falta grafito_geometry::integral::integrate_by_substitution)".into())
+    math_result_a_resultado(grafito_geometry::integral::integrate_by_substitution(
+        expr, var, u,
+    ))
+    .map(|salida| salida.primitive)
 }
 
 /// Expone `improper::improper_integral` (admite límites infinitos y
@@ -30283,19 +30269,13 @@ fn geo_improper_integral(expr: &str, var: &str, lo: f64, hi: f64) -> Result<f64,
 
 /// Expone `latex::parse_latex`.
 fn geo_parse_latex(input: &str) -> Result<String, String> {
-    // CALL SITE (contrato): grafito_geometry::latex::parse_latex(input)
-    //   → Ok(ast) => Ok(ast.to_string())
-    let _ = input;
-    Err("ParseLatex: motor no disponible (falta grafito_geometry::latex::parse_latex)".into())
+    grafito_geometry::latex::parse_latex(input)
 }
 
 /// Expone `latex::to_latex`.
 fn geo_to_latex(expr: &str) -> Result<String, String> {
-    // CALL SITE (contrato):
-    //   let ast = grafito_geometry::ast::parse_ast(expr)?;
-    //   Ok(grafito_geometry::latex::to_latex(&ast))
-    let _ = expr;
-    Err("ToLatex: motor no disponible (falta grafito_geometry::latex::to_latex)".into())
+    let ast = grafito_geometry::ast::parse_ast(expr).map_err(|e| format!("ToLatex: {e}"))?;
+    Ok(grafito_geometry::latex::to_latex(&ast))
 }
 
 // ── Frente G1: handlers de comandos ────────────────────────────────────────
@@ -30730,14 +30710,12 @@ fn run_sum_closed_command(args: &[String], document: &Document) -> CommandOutcom
     if hi < lo {
         return CommandOutcome::Error("SumClosed: se requiere hi >= lo".into());
     }
-    // BLOQUEO VERIFICADO: `grafito-geometry` no expone motor de sumas en forma
-    // cerrada (no hay Faulhaber ni polilogaritmos: `list_ops::list_sum` es
-    // numérico sobre datos y no sirve). Preferimos el error honesto a una suma
-    // directa disfrazada de cerrada. Requiere, p. ej.,
-    // `grafito_geometry::symbolic::sum_closed(expr, var, lo, hi)`.
-    CommandOutcome::Error(format!(
-        "SumClosed: sin motor de sumas en forma cerrada en grafito-geometry (falta, p. ej., grafito_geometry::symbolic::sum_closed); no se resuelve Σ_{{{var}={lo}..{hi}}} {expr} para no devolver una suma numérica por una forma cerrada"
-    ))
+    match math_result_a_resultado(grafito_geometry::symbolic::sum_closed(&expr, &var, lo, hi)) {
+        Ok(valor) => CommandOutcome::Message(format!(
+            "SumClosed: Σ_{{{var}={lo}..{hi}}} {expr} = {valor}"
+        )),
+        Err(error) => CommandOutcome::Error(format!("SumClosed: {error}")),
+    }
 }
 
 fn run_parse_latex_command(args: &[String], document: &Document) -> CommandOutcome {
