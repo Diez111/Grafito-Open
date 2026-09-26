@@ -157,6 +157,7 @@ impl StepByStepCardState {
             }
             if let Some(rule) = line.strip_prefix("- rule:") {
                 if steps.len() >= MAX_CAS_STEPS {
+                    current = None;
                     break;
                 }
                 if let Some(pending) = current.take() {
