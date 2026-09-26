@@ -8759,6 +8759,802 @@ fn solve_polynomial_newton(coeffs: &[f64]) -> Vec<f64> {
 }
 
 // ============================================================================
+// Sumas en forma cerrada (frente G1: `symbolic::sum_closed`).
+//
+// Subconjunto soportado, siempre por fórmula (nunca bucle numérico):
+// constante y polinomios en `var` hasta grado 10 (Faulhaber/Bernoulli),
+// geométricas `a·r^k` con exponente lineal, telescópicas `1/((k−r1)(k−r2))`
+// con raíces enteras consecutivas y diferencias `F(k+1)−F(k)`.
+// Lo demás (armónicas como `1/k`, `1/k^2`, `k·2^k`, trigonométricas) es
+// `Unsupported` honesto: no hay forma elemental en este motor.
+// Presupuestos: entrada ≤ 2000 bytes, `|lo|,|hi| ≤ 1_000_000`, hi ≥ lo.
+// ============================================================================
+
+/// Cota de entrada (igual que `MAX_EXPR_LENGTH` 2000, defensa en profundidad).
+const MAX_SUM_CLOSED_BYTES: usize = 2000;
+/// Grado polinómico máximo (Faulhaber usa Bernoulli hasta B10).
+const MAX_SUM_POLY_DEGREE: usize = 10;
+/// Cota de los límites (igual que el comando `SumClosed`: ±1 000 000).
+const MAX_SUM_ABS_BOUND: i64 = 1_000_000;
+
+/// Números de Bernoulli B0..=B10 para Faulhaber (los impares mayores
+/// que 1 son cero). OJO: acá B1 = +1/2, que es el signo que lleva la
+/// fórmula de la suma Σ_{k=1..n} (con B1 = −1/2 daría Σ_{k=0..n−1}).
+const SUM_BERNOULLI: [f64; 11] = [
+    1.0,
+    0.5,
+    1.0 / 6.0,
+    0.0,
+    -1.0 / 30.0,
+    0.0,
+    1.0 / 42.0,
+    0.0,
+    -1.0 / 30.0,
+    0.0,
+    5.0 / 66.0,
+];
+
+/// Suma en forma cerrada Σ_{var=lo..hi} expr.
+///
+/// Devuelve el valor como string (entero sin decimales cuando es entero
+/// exacto menor que 1e15, si no el `Debug` del f64). El cálculo usa la
+/// fórmula cerrada correspondiente, nunca un bucle término a término:
+/// `Exact` con el valor, `DomainError` si los límites son inválidos o la
+/// suma pasa por un polo, `ResourceLimit` si se excede un presupuesto y
+/// `Unsupported` honesto cuando no hay forma elemental (p. ej. armónicas).
+pub fn sum_closed(expr: &str, var: &str, lo: i64, hi: i64) -> MathResult<String> {
+    if expr.len() > MAX_SUM_CLOSED_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Summation,
+            provided_bytes: expr.len(),
+            maximum_bytes: MAX_SUM_CLOSED_BYTES,
+        });
+    }
+    if !is_math_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::Summation,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    if expr.trim().is_empty() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::Summation,
+            expression: expr.into(),
+            reason: "expresión vacía".into(),
+        });
+    }
+    if lo < -MAX_SUM_ABS_BOUND || lo > MAX_SUM_ABS_BOUND {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Summation,
+            provided_bytes: lo.unsigned_abs() as usize,
+            maximum_bytes: MAX_SUM_ABS_BOUND as usize,
+        });
+    }
+    if hi < -MAX_SUM_ABS_BOUND || hi > MAX_SUM_ABS_BOUND {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Summation,
+            provided_bytes: hi.unsigned_abs() as usize,
+            maximum_bytes: MAX_SUM_ABS_BOUND as usize,
+        });
+    }
+    if hi < lo {
+        return MathResult::DomainError(MathError::IntervalDomainViolation {
+            expression: expr.into(),
+            variable: var.into(),
+            lower: lo as f64,
+            upper: hi as f64,
+        });
+    }
+    let ast = match parse_math_expression(expr, MathOperation::Summation) {
+        Ok(ast) => ast.simplify(),
+        Err(error) => return math_failure(error),
+    };
+    // Constante (numérica o simbólica en otra variable): c·n.
+    if !contains_var(&ast, var) {
+        let n_terms = hi - lo + 1;
+        if let Some(c) = constant_scalar_value(&ast) {
+            if !c.is_finite() {
+                return MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::Summation,
+                    provided_bytes: expr.len(),
+                    maximum_bytes: MAX_SUM_CLOSED_BYTES,
+                });
+            }
+            let value = c * n_terms as f64;
+            return sum_format_value(value).map_or_else(
+                || {
+                    MathResult::ResourceLimit(MathError::InputTooLarge {
+                        operation: MathOperation::Summation,
+                        provided_bytes: expr.len(),
+                        maximum_bytes: MAX_SUM_CLOSED_BYTES,
+                    })
+                },
+                MathResult::Exact,
+            );
+        }
+        let text = format!("({})*{n_terms}", ast.to_expr_string());
+        if text.len() > MAX_SUM_CLOSED_BYTES {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: text.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            });
+        }
+        return MathResult::Exact(text);
+    }
+    if let Some(coeffs) = collect_polynomial_coeffs(&ast, var, MAX_SUM_POLY_DEGREE) {
+        return sum_closed_polynomial(&coeffs, lo, hi, expr);
+    }
+    if let Some(result) = sum_closed_geometric(&ast, var, lo, hi, expr) {
+        return result;
+    }
+    if let Some(result) = sum_closed_unit_fraction(&ast, var, lo, hi, expr) {
+        return result;
+    }
+    if let Some(result) = sum_closed_difference(&ast, var, lo, hi, expr) {
+        return result;
+    }
+    MathResult::Unsupported(MathError::InvalidExpression {
+        operation: MathOperation::Summation,
+        expression: expr.into(),
+        reason: sum_closed_no_form_hint(&ast, var),
+    })
+}
+
+/// Polinomio Σ c_p·k^p por Faulhaber término a término.
+fn sum_closed_polynomial(coeffs: &[f64], lo: i64, hi: i64, expr_label: &str) -> MathResult<String> {
+    let n_hi = hi as f64;
+    let n_lo_prev = lo as f64 - 1.0;
+    let mut total = 0.0;
+    for (p, c) in coeffs.iter().enumerate() {
+        if *c == 0.0 {
+            continue;
+        }
+        if !c.is_finite() {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            });
+        }
+        let (Some(s_hi), Some(s_lo)) = (
+            sum_faulhaber_prefix(p, n_hi),
+            sum_faulhaber_prefix(p, n_lo_prev),
+        ) else {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            });
+        };
+        total += c * (s_hi - s_lo);
+        if !total.is_finite() {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            });
+        }
+    }
+    match sum_format_value(total) {
+        Some(text) => MathResult::Exact(text),
+        None => MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Summation,
+            provided_bytes: expr_label.len(),
+            maximum_bytes: MAX_SUM_CLOSED_BYTES,
+        }),
+    }
+}
+
+/// Prefijo S_p(n) = Σ_{k=1..n} k^p por Faulhaber con Bernoulli.
+///
+/// Como polinomio vale también para `n` negativo (S_p(0) = 0), así que
+/// Σ_{lo..hi} = S_p(hi) − S_p(lo−1) cubre rangos con negativos.
+fn sum_faulhaber_prefix(p: usize, n: f64) -> Option<f64> {
+    if p >= SUM_BERNOULLI.len() || !n.is_finite() {
+        return None;
+    }
+    let mut acc = 0.0;
+    for j in 0..=p {
+        let b = SUM_BERNOULLI[j];
+        if b == 0.0 {
+            continue;
+        }
+        let c = sum_binom_small(p + 1, j)?;
+        let pw = n.powi((p + 1 - j) as i32);
+        if !pw.is_finite() {
+            return None;
+        }
+        let term = c * b * pw;
+        if !term.is_finite() {
+            return None;
+        }
+        acc += term;
+    }
+    let out = acc / (p + 1) as f64;
+    out.is_finite().then_some(out)
+}
+
+/// Coeficiente binomial para `n` chico (acá `n ≤ 11`), exacto en f64.
+fn sum_binom_small(n: usize, k: usize) -> Option<f64> {
+    if k > n {
+        return None;
+    }
+    let k = k.min(n - k);
+    let mut acc = 1.0;
+    for i in 0..k {
+        acc = acc * (n - i) as f64 / (i + 1) as f64;
+        if !acc.is_finite() {
+            return None;
+        }
+    }
+    Some(acc)
+}
+
+/// Formato numérico coherente con `to_expr_string`: entero sin decimales
+/// si es entero exacto menor que 1e15, si no el `Debug` del f64.
+fn sum_format_value(v: f64) -> Option<String> {
+    if !v.is_finite() {
+        return None;
+    }
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        Some(format!("{v:.0}"))
+    } else {
+        Some(format!("{v:?}"))
+    }
+}
+
+/// Separa `factor_constante · núcleo(var)`: aplana `Mul`/`Div`/`Neg` y
+/// pliega las constantes. `None` si hay una constante no finita.
+fn sum_split_const_factor(e: &Expr, var: &str) -> Option<(f64, Expr)> {
+    use Expr::*;
+    match e {
+        Const(c) if c.is_finite() => Some((*c, Const(1.0))),
+        Neg(a) => {
+            let (c, core) = sum_split_const_factor(a, var)?;
+            Some((-c, core))
+        }
+        Mul(a, b) => {
+            let (ca, ra) = sum_split_const_factor(a, var)?;
+            let (cb, rb) = sum_split_const_factor(b, var)?;
+            let c = ca * cb;
+            if !c.is_finite() {
+                return None;
+            }
+            let core = match (ra, rb) {
+                (Const(x), other) if x == 1.0 => other,
+                (other, Const(x)) if x == 1.0 => other,
+                (l, r) => Mul(Box::new(l), Box::new(r)),
+            };
+            Some((c, core))
+        }
+        Div(a, b) => {
+            if contains_var(b, var) {
+                // Denominador con variable: el núcleo es el cociente entero
+                // (cada detector mira el numerador por su cuenta).
+                if contains_var(a, var) {
+                    Some((1.0, e.clone()))
+                } else {
+                    let c = constant_scalar_value(a)?;
+                    if !c.is_finite() {
+                        return None;
+                    }
+                    Some((c, e.clone()))
+                }
+            } else {
+                let (ca, ra) = sum_split_const_factor(a, var)?;
+                let cb = constant_scalar_value(b)?;
+                if cb == 0.0 || !cb.is_finite() {
+                    return None;
+                }
+                Some((ca / cb, ra))
+            }
+        }
+        _ => {
+            if contains_var(e, var) {
+                Some((1.0, e.clone()))
+            } else {
+                constant_scalar_value(e).map(|c| (c, Const(1.0)))
+            }
+        }
+    }
+}
+
+/// Potencia entera de base real: `powi` exacto si la base es entera.
+fn sum_pow_int_base(r: f64, k: i64) -> f64 {
+    if r.fract() == 0.0 && k >= i64::from(i32::MIN) && k <= i64::from(i32::MAX) {
+        // `as` acotado por el chequeo de arriba: no trunca.
+        r.powi(k as i32)
+    } else {
+        r.powf(k as f64)
+    }
+}
+
+/// Geométrica `a·r^k` con exponente lineal en `var`.
+///
+/// `None` si no tiene esa forma; `Some` con el valor o el error honesto
+/// (polo con base cero y `lo < 0`, desborde) si la tiene.
+fn sum_closed_geometric(
+    body: &Expr,
+    var: &str,
+    lo: i64,
+    hi: i64,
+    expr_label: &str,
+) -> Option<MathResult<String>> {
+    let (factor, core) = sum_split_const_factor(body, var)?;
+    if !factor.is_finite() {
+        return None;
+    }
+    let (base_val, a_coef, b_coef) = match &core {
+        Expr::Const(c) if *c == 1.0 => return None,
+        Expr::Exp(arg) => {
+            let (a, b) = expr_linear_coeff(arg, var)?;
+            (std::f64::consts::E, a, b)
+        }
+        Expr::Pow(base, exp) => {
+            if contains_var(base, var) {
+                return None;
+            }
+            let r = constant_scalar_value(base)?;
+            let (a, b) = expr_linear_coeff(exp, var)?;
+            (r, a, b)
+        }
+        _ => return None,
+    };
+    if !base_val.is_finite() || a_coef.abs() < 1e-12 {
+        return None;
+    }
+    let r = base_val.powf(a_coef);
+    let c = base_val.powf(b_coef);
+    if !r.is_finite() || !c.is_finite() {
+        return None;
+    }
+    let count = hi as f64 - lo as f64 + 1.0;
+    // Base cero: solo exponente `var` exacto; si no, no es geométrica sana.
+    if r == 0.0 {
+        if (a_coef - 1.0).abs() > 1e-9 || b_coef.abs() > 1e-9 {
+            return None;
+        }
+        if lo < 0 {
+            return Some(MathResult::DomainError(MathError::NonFiniteValue {
+                expression: expr_label.into(),
+                variable: var.into(),
+                at: lo as f64,
+            }));
+        }
+        let value = if lo == 0 { factor } else { 0.0 };
+        return sum_format_value(value).map_or_else(
+            || {
+                Some(MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::Summation,
+                    provided_bytes: expr_label.len(),
+                    maximum_bytes: MAX_SUM_CLOSED_BYTES,
+                }))
+            },
+            |text| Some(MathResult::Exact(text)),
+        );
+    }
+    // Razón uno: serie constante.
+    if (r - 1.0).abs() < 1e-12 {
+        let value = factor * c * count;
+        return sum_format_value(value).map_or_else(
+            || {
+                Some(MathResult::ResourceLimit(MathError::InputTooLarge {
+                    operation: MathOperation::Summation,
+                    provided_bytes: expr_label.len(),
+                    maximum_bytes: MAX_SUM_CLOSED_BYTES,
+                }))
+            },
+            |text| Some(MathResult::Exact(text)),
+        );
+    }
+    let r_lo = sum_pow_int_base(r, lo);
+    let r_hi1 = sum_pow_int_base(r, hi + 1);
+    if !r_lo.is_finite() || !r_hi1.is_finite() {
+        return Some(MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::Summation,
+            provided_bytes: expr_label.len(),
+            maximum_bytes: MAX_SUM_CLOSED_BYTES,
+        }));
+    }
+    let value = factor * c * (r_lo - r_hi1) / (1.0 - r);
+    sum_format_value(value).map_or_else(
+        || {
+            Some(MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            }))
+        },
+        |text| Some(MathResult::Exact(text)),
+    )
+}
+
+/// Telescópica unitaria `c/((k−r1)(k−r2))` con raíces enteras consecutivas.
+///
+/// Acepta el denominador factorizado (`k·(k+1)`) o expandido (`k^2+k`).
+/// `None` si no tiene esa forma; `Some` con el valor o el polo honesto.
+fn sum_closed_unit_fraction(
+    body: &Expr,
+    var: &str,
+    lo: i64,
+    hi: i64,
+    expr_label: &str,
+) -> Option<MathResult<String>> {
+    let (factor, core) = sum_split_const_factor(body, var)?;
+    if !factor.is_finite() {
+        return None;
+    }
+    let (num, den) = match &core {
+        Expr::Div(n, d) => (n.as_ref(), d.as_ref()),
+        _ => return None,
+    };
+    if contains_var(num, var) {
+        return None;
+    }
+    let n0 = constant_scalar_value(num)?;
+    if !n0.is_finite() {
+        return None;
+    }
+    // Junta el denominador como (k−r1)(k−r2): factorizado o cuadrático.
+    let (r_small, r_big, lead) = sum_unit_fraction_roots(den, var)?;
+    if (r_big - r_small - 1.0).abs() > 1e-6 {
+        return None;
+    }
+    for root in [r_small, r_big] {
+        if (root - root.round()).abs() > 1e-6 {
+            return None;
+        }
+        if (lo as f64) <= root && root <= (hi as f64) {
+            return Some(MathResult::DomainError(MathError::NonFiniteValue {
+                expression: expr_label.into(),
+                variable: var.into(),
+                at: root,
+            }));
+        }
+    }
+    if lead.abs() < 1e-300 || !lead.is_finite() {
+        return None;
+    }
+    // Σ = c·(1/(lo−r2) − 1/(hi+1−r2)) / lead.
+    let scale = factor * n0 / lead;
+    let t1 = 1.0 / (lo as f64 - r_big);
+    let t2 = 1.0 / (hi as f64 + 1.0 - r_big);
+    if !t1.is_finite() || !t2.is_finite() {
+        return Some(MathResult::DomainError(MathError::NonFiniteValue {
+            expression: expr_label.into(),
+            variable: var.into(),
+            at: if !t1.is_finite() {
+                lo as f64
+            } else {
+                hi as f64 + 1.0
+            },
+        }));
+    }
+    let value = scale * (t1 - t2);
+    sum_format_value(value).map_or_else(
+        || {
+            Some(MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            }))
+        },
+        |text| Some(MathResult::Exact(text)),
+    )
+}
+
+/// Raíces `(r_chica, r_grande, lead)` del denominador cuadrático en `var`.
+///
+/// `lead` es el coeficiente principal (`a1·a2` si viene factorizado).
+/// `None` si no es cuadrático real en la variable.
+fn sum_unit_fraction_roots(den: &Expr, var: &str) -> Option<(f64, f64, f64)> {
+    if let Expr::Mul(f1, f2) = den {
+        let (a1, b1) = expr_linear_coeff(f1, var)?;
+        let (a2, b2) = expr_linear_coeff(f2, var)?;
+        if a1.abs() < 1e-300 || a2.abs() < 1e-300 {
+            return None;
+        }
+        if !a1.is_finite() || !a2.is_finite() || !b1.is_finite() || !b2.is_finite() {
+            return None;
+        }
+        let (r1, r2) = (-b1 / a1, -b2 / a2);
+        if !r1.is_finite() || !r2.is_finite() {
+            return None;
+        }
+        let (small, big) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+        return Some((small, big, a1 * a2));
+    }
+    let coeffs = collect_polynomial_coeffs(den, var, 2)?;
+    let (c0, c1, c2) = (
+        coeffs.first().copied()?,
+        coeffs.get(1).copied()?,
+        coeffs.get(2).copied()?,
+    );
+    if c2.abs() < 1e-300 || !c0.is_finite() || !c1.is_finite() || !c2.is_finite() {
+        return None;
+    }
+    let disc = c1 * c1 - 4.0 * c2 * c0;
+    if !disc.is_finite() || disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let (r1, r2) = ((-c1 + s) / (2.0 * c2), (-c1 - s) / (2.0 * c2));
+    if !r1.is_finite() || !r2.is_finite() {
+        return None;
+    }
+    let (small, big) = if r1 <= r2 { (r1, r2) } else { (r2, r1) };
+    Some((small, big, c2))
+}
+
+/// Sustituye `var` por `rep` en una copia (respeta `sum`/`product` ligado).
+fn sum_subst_var(node: &Expr, var: &str, rep: &Expr) -> Expr {
+    use Expr::*;
+    match node {
+        Const(_) => node.clone(),
+        Var(name) if name == var => rep.clone(),
+        Var(_) => node.clone(),
+        Neg(a) => Neg(Box::new(sum_subst_var(a, var, rep))),
+        Add(a, b) => Add(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Sub(a, b) => Sub(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Mul(a, b) => Mul(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Div(a, b) => Div(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Pow(a, b) => Pow(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Sin(a) => Sin(Box::new(sum_subst_var(a, var, rep))),
+        Cos(a) => Cos(Box::new(sum_subst_var(a, var, rep))),
+        Tan(a) => Tan(Box::new(sum_subst_var(a, var, rep))),
+        Asin(a) => Asin(Box::new(sum_subst_var(a, var, rep))),
+        Acos(a) => Acos(Box::new(sum_subst_var(a, var, rep))),
+        Atan(a) => Atan(Box::new(sum_subst_var(a, var, rep))),
+        Exp(a) => Exp(Box::new(sum_subst_var(a, var, rep))),
+        Ln(a) => Ln(Box::new(sum_subst_var(a, var, rep))),
+        Log(a) => Log(Box::new(sum_subst_var(a, var, rep))),
+        Sqrt(a) => Sqrt(Box::new(sum_subst_var(a, var, rep))),
+        Abs(a) => Abs(Box::new(sum_subst_var(a, var, rep))),
+        Sinh(a) => Sinh(Box::new(sum_subst_var(a, var, rep))),
+        Cosh(a) => Cosh(Box::new(sum_subst_var(a, var, rep))),
+        Tanh(a) => Tanh(Box::new(sum_subst_var(a, var, rep))),
+        Floor(a) => Floor(Box::new(sum_subst_var(a, var, rep))),
+        Ceil(a) => Ceil(Box::new(sum_subst_var(a, var, rep))),
+        Round(a) => Round(Box::new(sum_subst_var(a, var, rep))),
+        Sec(a) => Sec(Box::new(sum_subst_var(a, var, rep))),
+        Csc(a) => Csc(Box::new(sum_subst_var(a, var, rep))),
+        Cot(a) => Cot(Box::new(sum_subst_var(a, var, rep))),
+        Asinh(a) => Asinh(Box::new(sum_subst_var(a, var, rep))),
+        Acosh(a) => Acosh(Box::new(sum_subst_var(a, var, rep))),
+        Atanh(a) => Atanh(Box::new(sum_subst_var(a, var, rep))),
+        Sign(a) => Sign(Box::new(sum_subst_var(a, var, rep))),
+        Heaviside(a) => Heaviside(Box::new(sum_subst_var(a, var, rep))),
+        Cbrt(a) => Cbrt(Box::new(sum_subst_var(a, var, rep))),
+        Re(a) => Re(Box::new(sum_subst_var(a, var, rep))),
+        Im(a) => Im(Box::new(sum_subst_var(a, var, rep))),
+        Arg(a) => Arg(Box::new(sum_subst_var(a, var, rep))),
+        Conj(a) => Conj(Box::new(sum_subst_var(a, var, rep))),
+        Erf(a) => Erf(Box::new(sum_subst_var(a, var, rep))),
+        Erfc(a) => Erfc(Box::new(sum_subst_var(a, var, rep))),
+        Gamma(a) => Gamma(Box::new(sum_subst_var(a, var, rep))),
+        LnGamma(a) => LnGamma(Box::new(sum_subst_var(a, var, rep))),
+        Digamma(a) => Digamma(Box::new(sum_subst_var(a, var, rep))),
+        Trigamma(a) => Trigamma(Box::new(sum_subst_var(a, var, rep))),
+        Atan2(a, b) => Atan2(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Modulo(a, b) => Modulo(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Min(a, b) => Min(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Max(a, b) => Max(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Beta(a, b) => Beta(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        BesselJ(a, b) => BesselJ(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        BesselY(a, b) => BesselY(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        BesselI(a, b) => BesselI(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Lt(a, b) => Lt(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Gt(a, b) => Gt(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Le(a, b) => Le(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Ge(a, b) => Ge(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Eq(a, b) => Eq(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Ne(a, b) => Ne(
+            Box::new(sum_subst_var(a, var, rep)),
+            Box::new(sum_subst_var(b, var, rep)),
+        ),
+        Clamp(x, lo, hi) => Clamp(
+            Box::new(sum_subst_var(x, var, rep)),
+            Box::new(sum_subst_var(lo, var, rep)),
+            Box::new(sum_subst_var(hi, var, rep)),
+        ),
+        Sum(body, loop_var, start, end) => {
+            let body_out = if loop_var == var {
+                (**body).clone()
+            } else {
+                sum_subst_var(body, var, rep)
+            };
+            Sum(
+                Box::new(body_out),
+                loop_var.clone(),
+                Box::new(sum_subst_var(start, var, rep)),
+                Box::new(sum_subst_var(end, var, rep)),
+            )
+        }
+        Product(body, loop_var, start, end) => {
+            let body_out = if loop_var == var {
+                (**body).clone()
+            } else {
+                sum_subst_var(body, var, rep)
+            };
+            Product(
+                Box::new(body_out),
+                loop_var.clone(),
+                Box::new(sum_subst_var(start, var, rep)),
+                Box::new(sum_subst_var(end, var, rep)),
+            )
+        }
+        Piecewise(branches, default) => Piecewise(
+            branches
+                .iter()
+                .map(|(c, v)| {
+                    (
+                        Box::new(sum_subst_var(c, var, rep)),
+                        Box::new(sum_subst_var(v, var, rep)),
+                    )
+                })
+                .collect(),
+            Box::new(sum_subst_var(default, var, rep)),
+        ),
+    }
+}
+
+/// Telescópica general `F(k+1)−F(k)`: Σ = F(hi+1) − F(lo).
+///
+/// Detecta el corrimiento estructural (en ambos sentidos del signo).
+/// `None` si no tiene esa forma.
+fn sum_closed_difference(
+    body: &Expr,
+    var: &str,
+    lo: i64,
+    hi: i64,
+    expr_label: &str,
+) -> Option<MathResult<String>> {
+    let (left, right) = match body {
+        Expr::Sub(a, b) => (a.as_ref(), b.as_ref()),
+        _ => return None,
+    };
+    let shifted_arg = Expr::Add(
+        Box::new(Expr::Var(var.to_string())),
+        Box::new(Expr::Const(1.0)),
+    );
+    // Caso `F(k+1) − F(k)` con `F = right`.
+    if sum_subst_var(right, var, &shifted_arg)
+        .simplify()
+        .structurally_eq(left)
+    {
+        return Some(sum_telescoping_value(right, var, lo, hi, expr_label, true));
+    }
+    // Caso `F(k) − F(k+1)` con `F = left`.
+    if sum_subst_var(left, var, &shifted_arg)
+        .simplify()
+        .structurally_eq(right)
+    {
+        return Some(sum_telescoping_value(left, var, lo, hi, expr_label, false));
+    }
+    None
+}
+
+/// Evalúa `±(F(hi+1) − F(lo))`; polo en el borde → `DomainError` honesto.
+fn sum_telescoping_value(
+    f: &Expr,
+    var: &str,
+    lo: i64,
+    hi: i64,
+    expr_label: &str,
+    forward: bool,
+) -> MathResult<String> {
+    let end_at = hi as f64 + 1.0;
+    let start_at = lo as f64;
+    let (f_end, f_start) = (f.eval_at(var, end_at), f.eval_at(var, start_at));
+    if !f_end.is_finite() {
+        return MathResult::DomainError(MathError::NonFiniteValue {
+            expression: expr_label.into(),
+            variable: var.into(),
+            at: end_at,
+        });
+    }
+    if !f_start.is_finite() {
+        return MathResult::DomainError(MathError::NonFiniteValue {
+            expression: expr_label.into(),
+            variable: var.into(),
+            at: start_at,
+        });
+    }
+    let value = if forward {
+        f_end - f_start
+    } else {
+        f_start - f_end
+    };
+    sum_format_value(value).map_or_else(
+        || {
+            MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::Summation,
+                provided_bytes: expr_label.len(),
+                maximum_bytes: MAX_SUM_CLOSED_BYTES,
+            })
+        },
+        MathResult::Exact,
+    )
+}
+
+/// Pista honesta cuando no hay forma cerrada: distingue la armónica.
+fn sum_closed_no_form_hint(body: &Expr, var: &str) -> String {
+    if sum_looks_harmonic(body, var) {
+        return "sin forma cerrada elemental: la suma armónica necesita digamma/polygamma, fuera del subconjunto (constantes, polinomios, geométricas y telescópicas)".into();
+    }
+    "sin forma cerrada elemental en el subconjunto soportado (constantes, polinomios hasta grado 10, geométricas a·r^k y telescópicas 1/((k−r1)(k−r2)) o F(k+1)−F(k))".into()
+}
+
+/// ¿Tiene pinta de armónica (`1/k`, `k^-1`, cociente con `var` abajo)?
+fn sum_looks_harmonic(body: &Expr, var: &str) -> bool {
+    let (_, core) = sum_split_const_factor(body, var).unwrap_or((1.0, body.clone()));
+    match &core {
+        Expr::Div(num, den) => !contains_var(num, var) && contains_var(den, var),
+        Expr::Pow(base, exp) => {
+            contains_var(base, var)
+                && matches!(exp.as_ref(), Expr::Const(e) if e.is_finite() && *e < 0.0)
+        }
+        _ => false,
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -9590,5 +10386,115 @@ mod coverage_sweep_symbolic {
         let b = parse_ast("x+2").expect("b");
         assert!(!a.structurally_eq(&b));
         assert_ne!(expr_fingerprint(&a), expr_fingerprint(&b));
+    }
+
+    // --- Frente G1: sumas en forma cerrada ---
+
+    fn sum_valor(expr: &str, var: &str, lo: i64, hi: i64) -> f64 {
+        match sum_closed(expr, var, lo, hi) {
+            MathResult::Exact(text) => text.parse::<f64>().expect("suma numérica"),
+            otro => panic!("se esperaba Exact, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_constante_y_variable() {
+        // Σ_{k=1..5} 3 = 15
+        assert!((sum_valor("3", "k", 1, 5) - 15.0).abs() < 1e-9);
+        // Σ_{k=1..10} k = 55
+        assert!((sum_valor("k", "k", 1, 10) - 55.0).abs() < 1e-9);
+        // Σ_{k=-2..2} k = 0
+        assert!((sum_valor("k", "k", -2, 2) - 0.0).abs() < 1e-9);
+        // Constante simbólica en otra variable: c·n.
+        match sum_closed("y", "k", 1, 5) {
+            MathResult::Exact(text) => assert_eq!(text, "(y)*5"),
+            otro => panic!("se esperaba Exact, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_polinomios_faulhaber() {
+        // Σ k² 1..10 = 385 (verificado a mano: 1+4+9+16+25+36+49+64+81+100)
+        assert!((sum_valor("k^2", "k", 1, 10) - 385.0).abs() < 1e-9);
+        // Σ k³ 1..5 = 225 (1+8+27+64+125)
+        assert!((sum_valor("k^3", "k", 1, 5) - 225.0).abs() < 1e-9);
+        // Σ (2k+1) 1..4 = 3+5+7+9 = 24
+        assert!((sum_valor("2*k+1", "k", 1, 4) - 24.0).abs() < 1e-9);
+        // Σ (k+1)^2 0..3 = 1+4+9+16 = 30
+        assert!((sum_valor("(k+1)^2", "k", 0, 3) - 30.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sum_geometricas() {
+        // Σ 2^k 0..10 = 2047
+        assert!((sum_valor("2^k", "k", 0, 10) - 2047.0).abs() < 1e-9);
+        // Σ 2^k 1..4 = 2+4+8+16 = 30
+        assert!((sum_valor("2^k", "k", 1, 4) - 30.0).abs() < 1e-9);
+        // Σ 3·2^k 0..3 = 3·15 = 45
+        assert!((sum_valor("3*2^k", "k", 0, 3) - 45.0).abs() < 1e-9);
+        // Σ (1/2)^k 0..2 = 1+0.5+0.25 = 1.75
+        assert!((sum_valor("(1/2)^k", "k", 0, 2) - 1.75).abs() < 1e-9);
+        // Σ (-1)^k 0..4 = 1-1+1-1+1 = 1
+        assert!((sum_valor("(-1)^k", "k", 0, 4) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sum_telescopicas() {
+        // Σ 1/(k(k+1)) 1..10 = 1 − 1/11 = 10/11
+        let v = sum_valor("1/(k*(k+1))", "k", 1, 10);
+        assert!((v - 10.0 / 11.0).abs() < 1e-9, "vino {v}");
+        // Denominador expandido: 1/(k^2+k) 1..3 = 1−1/4 = 3/4
+        let v2 = sum_valor("1/(k^2+k)", "k", 1, 3);
+        assert!((v2 - 0.75).abs() < 1e-9, "vino {v2}");
+        // Diferencia: Σ ((k+1)^2 − k^2) 1..4 = 25−1 = 24
+        let v3 = sum_valor("(k+1)^2-k^2", "k", 1, 4);
+        assert!((v3 - 24.0).abs() < 1e-9, "vino {v3}");
+    }
+
+    #[test]
+    fn sum_harmonica_es_honesta() {
+        // Σ 1/k no tiene forma elemental: Unsupported, no número inventado.
+        match sum_closed("1/k", "k", 1, 5) {
+            MathResult::Unsupported(_) => {}
+            otro => panic!("se esperaba Unsupported, llegó {otro:?}"),
+        }
+        match sum_closed("1/k^2", "k", 1, 5) {
+            MathResult::Unsupported(_) => {}
+            otro => panic!("se esperaba Unsupported, llegó {otro:?}"),
+        }
+        match sum_closed("sin(k)", "k", 1, 5) {
+            MathResult::Unsupported(_) => {}
+            otro => panic!("se esperaba Unsupported, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn sum_bordes_honestos() {
+        // hi < lo: dominio.
+        assert!(matches!(
+            sum_closed("k", "k", 5, 1),
+            MathResult::DomainError(MathError::IntervalDomainViolation { .. })
+        ));
+        // Polo telescópico en el rango: 1/(k(k+1)) con k=0 adentro.
+        assert!(matches!(
+            sum_closed("1/(k*(k+1))", "k", 0, 3),
+            MathResult::DomainError(MathError::NonFiniteValue { .. })
+        ));
+        // Variable inválida.
+        assert!(matches!(
+            sum_closed("k", "9k", 1, 3),
+            MathResult::DomainError(MathError::InvalidExpression { .. })
+        ));
+        // Entrada gigante: presupuesto.
+        let larga = "k+".repeat(2000);
+        assert!(matches!(
+            sum_closed(&larga, "k", 1, 3),
+            MathResult::ResourceLimit(MathError::InputTooLarge { .. })
+        ));
+        // Límite fuera de cota.
+        assert!(matches!(
+            sum_closed("k", "k", 0, 2_000_000),
+            MathResult::ResourceLimit(_)
+        ));
     }
 }

@@ -3470,6 +3470,595 @@ pub fn integrate_rational_hermite(expr: &str, var: &str) -> Result<String, Risch
     Ok(hermite_rational_ast(&num, &den, &variable, &mut terms)?.to_expr_string())
 }
 
+// ---------------------------------------------------------------------------
+// Frente G1: integración por sustitución (`integrate_by_substitution`).
+//
+// Dada `u = g(var)` del usuario: deriva `du/dvar` con el AST, verifica que
+// el patrón `g` aparezca en el integrando, factoriza `du` sintácticamente
+// (listas de factores conmutativas + plegado de constantes), integra lo que
+// queda respecto de `u` con `symbolic` (repliegue `risch_norman`) y
+// des-sustituye. Si el patrón no aparece o no se aísla `du`, error honesto.
+// Presupuestos: entradas ≤ 2000 bytes, salida ≤ 2000 caracteres.
+// ---------------------------------------------------------------------------
+
+use crate::{MathError, MathOperation, MathResult};
+use std::collections::HashSet;
+
+/// Cota de cada entrada y de la primitiva (igual que `MAX_EXPR_LENGTH`).
+const MAX_SUBST_INPUT_BYTES: usize = 2000;
+/// Nombre provisorio de `u` al integrar; se sufija si colisiona.
+const SUBST_PLACEHOLDER_BASE: &str = "u_sub";
+
+/// Resultado de integrar por sustitución: primitiva en la variable original
+/// más los pasos legibles (cada uno acotado por el presupuesto de salida).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubstitutionOutcome {
+    /// Primitiva en función de `var` (ya des-sustituida).
+    pub primitive: String,
+    /// Pasos: `u`, `du/dvar`, forma en `u` e integral en `u`.
+    pub steps: Vec<String>,
+}
+
+/// Integra `expr` respecto de `var` con el cambio `u` dado por el usuario.
+///
+/// Ejemplo: `integrate_by_substitution("2*x*exp(x^2)", "x", "x^2")` deriva
+/// `du/dx = 2·x`, reescribe el integrando como `exp(u)·du` e integra en
+/// `u` para devolver `exp(x^2)` con sus pasos. Sin `unwrap`: todo borde es
+/// `MathResult` con mensajes en español rioplatense.
+pub fn integrate_by_substitution(
+    expr: &str,
+    var: &str,
+    u: &str,
+) -> MathResult<SubstitutionOutcome> {
+    if expr.len() > MAX_SUBST_INPUT_BYTES || u.len() > MAX_SUBST_INPUT_BYTES {
+        let provided = expr.len().max(u.len());
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::IndefiniteIntegration,
+            provided_bytes: provided,
+            maximum_bytes: MAX_SUBST_INPUT_BYTES,
+        });
+    }
+    if !subst_is_identifier(var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: var.into(),
+            reason: "variable no es un identificador válido".into(),
+        });
+    }
+    if expr.trim().is_empty() || u.trim().is_empty() {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: expr.into(),
+            reason: "expresión o cambio vacío".into(),
+        });
+    }
+    let integrand = match crate::ast::parse_ast(&expr.replace(' ', "")) {
+        Ok(ast) => ast.simplify(),
+        Err(reason) => {
+            return MathResult::DomainError(MathError::InvalidExpression {
+                operation: MathOperation::IndefiniteIntegration,
+                expression: expr.into(),
+                reason,
+            });
+        }
+    };
+    let u_ast = match crate::ast::parse_ast(&u.replace(' ', "")) {
+        Ok(ast) => ast.simplify(),
+        Err(reason) => {
+            return MathResult::DomainError(MathError::InvalidExpression {
+                operation: MathOperation::IndefiniteIntegration,
+                expression: u.into(),
+                reason,
+            });
+        }
+    };
+    if !crate::cas::cas_contains_var(&u_ast, var) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: u.into(),
+            reason: format!("el cambio u no contiene a la variable {var}"),
+        });
+    }
+    if u_ast.structurally_eq(&crate::ast::Expr::Var(var.to_string())) {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: u.into(),
+            reason: "el cambio es trivial (u es la variable); integrá directo".into(),
+        });
+    }
+    let du = u_ast.diff(var).simplify();
+    if matches!(&du, crate::ast::Expr::Const(v) if *v == 0.0)
+        || crate::symbolic::is_identically_zero(&du)
+    {
+        return MathResult::DomainError(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: u.into(),
+            reason: format!("du/d{var} es cero: el cambio no depende de {var}"),
+        });
+    }
+    let du_str = du.to_expr_string();
+    if du_str.len() > MAX_SUBST_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::IndefiniteIntegration,
+            provided_bytes: du_str.len(),
+            maximum_bytes: MAX_SUBST_INPUT_BYTES,
+        });
+    }
+    let placeholder = match subst_fresh_placeholder(&integrand, &u_ast, var) {
+        Some(name) => name,
+        None => {
+            return MathResult::ResourceLimit(MathError::InputTooLarge {
+                operation: MathOperation::IndefiniteIntegration,
+                provided_bytes: expr.len(),
+                maximum_bytes: MAX_SUBST_INPUT_BYTES,
+            });
+        }
+    };
+    // El patrón tal cual aparece en el integrando, o error honesto.
+    let (integrand_w, hits) = subst_replace_pattern(
+        &integrand,
+        &u_ast,
+        &crate::ast::Expr::Var(placeholder.clone()),
+    );
+    if hits == 0 {
+        return MathResult::Unsupported(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: expr.into(),
+            reason: format!(
+                "el cambio u = {} no aparece en el integrando, revisá el patrón",
+                u_ast.to_expr_string()
+            ),
+        });
+    }
+    // h = integrando/du por cancelación sintáctica de factores.
+    let h = match subst_divide_out(&integrand_w, &du) {
+        Some(h) => h.simplify(),
+        None => {
+            return MathResult::Unsupported(MathError::InvalidExpression {
+                operation: MathOperation::IndefiniteIntegration,
+                expression: expr.into(),
+                reason: format!(
+                    "no se pudo aislar du/d{var} en el integrando con u = {}; probá otro cambio",
+                    u_ast.to_expr_string()
+                ),
+            });
+        }
+    };
+    if crate::cas::cas_contains_var(&h, var) {
+        return MathResult::Unsupported(MathError::InvalidExpression {
+            operation: MathOperation::IndefiniteIntegration,
+            expression: expr.into(),
+            reason: format!(
+                "después de sustituir u = {} queda {} libre: el cambio no cierra",
+                u_ast.to_expr_string(),
+                var
+            ),
+        });
+    }
+    let h_str = h.to_expr_string();
+    if h_str.len() > MAX_SUBST_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::IndefiniteIntegration,
+            provided_bytes: h_str.len(),
+            maximum_bytes: MAX_SUBST_INPUT_BYTES,
+        });
+    }
+    // Integra en u: `symbolic` primero, `risch_norman` de repliegue.
+    let prim_w_str = match crate::symbolic::integrate_typed(&h_str, &placeholder) {
+        MathResult::Exact(prim) => prim,
+        MathResult::Approximate { value, .. } => value,
+        _ => match risch_norman_integrate(&h_str, &placeholder) {
+            Ok(prim) => prim,
+            Err(error) => {
+                return MathResult::Unsupported(MathError::AntiderivativeUnavailable {
+                    expression: format!("{expr} con u = {} ({error})", u_ast.to_expr_string()),
+                    variable: var.into(),
+                });
+            }
+        },
+    };
+    // Des-sustituye el provisorio por u y verifica por derivación numérica.
+    let prim_w_ast = match crate::ast::parse_ast(&prim_w_str.replace(' ', "")) {
+        Ok(ast) => ast,
+        Err(_) => {
+            return MathResult::Unsupported(MathError::AntiderivativeUnavailable {
+                expression: format!("{expr} con u = {}", u_ast.to_expr_string()),
+                variable: var.into(),
+            });
+        }
+    };
+    let prim_x = subst_replace_var(&prim_w_ast, &placeholder, &u_ast).simplify();
+    let primitive = prim_x.to_expr_string();
+    if primitive.len() > MAX_SUBST_INPUT_BYTES {
+        return MathResult::ResourceLimit(MathError::InputTooLarge {
+            operation: MathOperation::IndefiniteIntegration,
+            provided_bytes: primitive.len(),
+            maximum_bytes: MAX_SUBST_INPUT_BYTES,
+        });
+    }
+    if !subst_verifies(&integrand, &prim_x, var) {
+        return MathResult::Unsupported(MathError::AntiderivativeUnavailable {
+            expression: format!("{expr} con u = {}", u_ast.to_expr_string()),
+            variable: var.into(),
+        });
+    }
+    let steps = vec![
+        format!("u = {}", u_ast.to_expr_string()),
+        format!("du/d{var} = {du_str}"),
+        format!("integrando en u: {h_str}"),
+        format!("integral en u: {prim_w_str}"),
+    ];
+    MathResult::Exact(SubstitutionOutcome { primitive, steps })
+}
+
+/// Identificador ASCII `[A-Za-z_][A-Za-z0-9_]*` (espejo de `ValidVar`).
+fn subst_is_identifier(var: &str) -> bool {
+    let mut chars = var.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Nombre provisorio que no aparece ni es `var`. `None` si no hay lugar.
+fn subst_fresh_placeholder(
+    integrand: &crate::ast::Expr,
+    u_ast: &crate::ast::Expr,
+    var: &str,
+) -> Option<String> {
+    let mut vars = HashSet::new();
+    integrand.get_variables(&mut vars);
+    u_ast.get_variables(&mut vars);
+    let mut candidate = SUBST_PLACEHOLDER_BASE.to_string();
+    let mut suffix = 0_usize;
+    while candidate == var || vars.contains(&candidate) {
+        suffix += 1;
+        if suffix > 1024 {
+            return None;
+        }
+        candidate = format!("{SUBST_PLACEHOLDER_BASE}_{suffix}");
+    }
+    Some(candidate)
+}
+
+/// Reemplaza el subárbol `pattern` por `rep`; devuelve el árbol y cuántos
+/// reemplazos hizo (igualdad estructural, recorre todo el AST).
+fn subst_replace_pattern(
+    node: &crate::ast::Expr,
+    pattern: &crate::ast::Expr,
+    rep: &crate::ast::Expr,
+) -> (crate::ast::Expr, usize) {
+    use crate::ast::Expr;
+    if node.structurally_eq(pattern) {
+        return (rep.clone(), 1);
+    }
+    let mut hits = 0_usize;
+    let out = match node {
+        Expr::Const(_) | Expr::Var(_) => node.clone(),
+        Expr::Neg(a) => {
+            let (m, h) = subst_replace_pattern(a, pattern, rep);
+            hits += h;
+            Expr::Neg(Box::new(m))
+        }
+        Expr::Add(a, b) => {
+            let (ma, ha) = subst_replace_pattern(a, pattern, rep);
+            let (mb, hb) = subst_replace_pattern(b, pattern, rep);
+            hits += ha + hb;
+            Expr::Add(Box::new(ma), Box::new(mb))
+        }
+        Expr::Sub(a, b) => {
+            let (ma, ha) = subst_replace_pattern(a, pattern, rep);
+            let (mb, hb) = subst_replace_pattern(b, pattern, rep);
+            hits += ha + hb;
+            Expr::Sub(Box::new(ma), Box::new(mb))
+        }
+        Expr::Mul(a, b) => {
+            let (ma, ha) = subst_replace_pattern(a, pattern, rep);
+            let (mb, hb) = subst_replace_pattern(b, pattern, rep);
+            hits += ha + hb;
+            Expr::Mul(Box::new(ma), Box::new(mb))
+        }
+        Expr::Div(a, b) => {
+            let (ma, ha) = subst_replace_pattern(a, pattern, rep);
+            let (mb, hb) = subst_replace_pattern(b, pattern, rep);
+            hits += ha + hb;
+            Expr::Div(Box::new(ma), Box::new(mb))
+        }
+        Expr::Pow(a, b) => {
+            let (ma, ha) = subst_replace_pattern(a, pattern, rep);
+            let (mb, hb) = subst_replace_pattern(b, pattern, rep);
+            hits += ha + hb;
+            Expr::Pow(Box::new(ma), Box::new(mb))
+        }
+        Expr::Sin(a) => subst_unary(Expr::Sin, a, pattern, rep, &mut hits),
+        Expr::Cos(a) => subst_unary(Expr::Cos, a, pattern, rep, &mut hits),
+        Expr::Tan(a) => subst_unary(Expr::Tan, a, pattern, rep, &mut hits),
+        Expr::Asin(a) => subst_unary(Expr::Asin, a, pattern, rep, &mut hits),
+        Expr::Acos(a) => subst_unary(Expr::Acos, a, pattern, rep, &mut hits),
+        Expr::Atan(a) => subst_unary(Expr::Atan, a, pattern, rep, &mut hits),
+        Expr::Exp(a) => subst_unary(Expr::Exp, a, pattern, rep, &mut hits),
+        Expr::Ln(a) => subst_unary(Expr::Ln, a, pattern, rep, &mut hits),
+        Expr::Log(a) => subst_unary(Expr::Log, a, pattern, rep, &mut hits),
+        Expr::Sqrt(a) => subst_unary(Expr::Sqrt, a, pattern, rep, &mut hits),
+        Expr::Abs(a) => subst_unary(Expr::Abs, a, pattern, rep, &mut hits),
+        Expr::Sinh(a) => subst_unary(Expr::Sinh, a, pattern, rep, &mut hits),
+        Expr::Cosh(a) => subst_unary(Expr::Cosh, a, pattern, rep, &mut hits),
+        Expr::Tanh(a) => subst_unary(Expr::Tanh, a, pattern, rep, &mut hits),
+        Expr::Floor(a) => subst_unary(Expr::Floor, a, pattern, rep, &mut hits),
+        Expr::Ceil(a) => subst_unary(Expr::Ceil, a, pattern, rep, &mut hits),
+        Expr::Round(a) => subst_unary(Expr::Round, a, pattern, rep, &mut hits),
+        Expr::Sec(a) => subst_unary(Expr::Sec, a, pattern, rep, &mut hits),
+        Expr::Csc(a) => subst_unary(Expr::Csc, a, pattern, rep, &mut hits),
+        Expr::Cot(a) => subst_unary(Expr::Cot, a, pattern, rep, &mut hits),
+        Expr::Asinh(a) => subst_unary(Expr::Asinh, a, pattern, rep, &mut hits),
+        Expr::Acosh(a) => subst_unary(Expr::Acosh, a, pattern, rep, &mut hits),
+        Expr::Atanh(a) => subst_unary(Expr::Atanh, a, pattern, rep, &mut hits),
+        Expr::Sign(a) => subst_unary(Expr::Sign, a, pattern, rep, &mut hits),
+        Expr::Heaviside(a) => subst_unary(Expr::Heaviside, a, pattern, rep, &mut hits),
+        Expr::Cbrt(a) => subst_unary(Expr::Cbrt, a, pattern, rep, &mut hits),
+        Expr::Re(a) => subst_unary(Expr::Re, a, pattern, rep, &mut hits),
+        Expr::Im(a) => subst_unary(Expr::Im, a, pattern, rep, &mut hits),
+        Expr::Arg(a) => subst_unary(Expr::Arg, a, pattern, rep, &mut hits),
+        Expr::Conj(a) => subst_unary(Expr::Conj, a, pattern, rep, &mut hits),
+        Expr::Erf(a) => subst_unary(Expr::Erf, a, pattern, rep, &mut hits),
+        Expr::Erfc(a) => subst_unary(Expr::Erfc, a, pattern, rep, &mut hits),
+        Expr::Gamma(a) => subst_unary(Expr::Gamma, a, pattern, rep, &mut hits),
+        Expr::LnGamma(a) => subst_unary(Expr::LnGamma, a, pattern, rep, &mut hits),
+        Expr::Digamma(a) => subst_unary(Expr::Digamma, a, pattern, rep, &mut hits),
+        Expr::Trigamma(a) => subst_unary(Expr::Trigamma, a, pattern, rep, &mut hits),
+        Expr::Atan2(a, b) => subst_binary(Expr::Atan2, a, b, pattern, rep, &mut hits),
+        Expr::Modulo(a, b) => subst_binary(Expr::Modulo, a, b, pattern, rep, &mut hits),
+        Expr::Min(a, b) => subst_binary(Expr::Min, a, b, pattern, rep, &mut hits),
+        Expr::Max(a, b) => subst_binary(Expr::Max, a, b, pattern, rep, &mut hits),
+        Expr::Beta(a, b) => subst_binary(Expr::Beta, a, b, pattern, rep, &mut hits),
+        Expr::BesselJ(a, b) => subst_binary(Expr::BesselJ, a, b, pattern, rep, &mut hits),
+        Expr::BesselY(a, b) => subst_binary(Expr::BesselY, a, b, pattern, rep, &mut hits),
+        Expr::BesselI(a, b) => subst_binary(Expr::BesselI, a, b, pattern, rep, &mut hits),
+        Expr::Lt(a, b) => subst_binary(Expr::Lt, a, b, pattern, rep, &mut hits),
+        Expr::Gt(a, b) => subst_binary(Expr::Gt, a, b, pattern, rep, &mut hits),
+        Expr::Le(a, b) => subst_binary(Expr::Le, a, b, pattern, rep, &mut hits),
+        Expr::Ge(a, b) => subst_binary(Expr::Ge, a, b, pattern, rep, &mut hits),
+        Expr::Eq(a, b) => subst_binary(Expr::Eq, a, b, pattern, rep, &mut hits),
+        Expr::Ne(a, b) => subst_binary(Expr::Ne, a, b, pattern, rep, &mut hits),
+        Expr::Clamp(x, lo, hi) => {
+            let (mx, hx) = subst_replace_pattern(x, pattern, rep);
+            let (mlo, hlo) = subst_replace_pattern(lo, pattern, rep);
+            let (mhi, hhi) = subst_replace_pattern(hi, pattern, rep);
+            hits += hx + hlo + hhi;
+            Expr::Clamp(Box::new(mx), Box::new(mlo), Box::new(mhi))
+        }
+        Expr::Sum(body, loop_var, start, end) => {
+            let (mstart, hstart) = subst_replace_pattern(start, pattern, rep);
+            let (mend, hend) = subst_replace_pattern(end, pattern, rep);
+            hits += hstart + hend;
+            // El cuerpo liga `loop_var`: no se toca si el patrón lo nombra.
+            let mut body_vars = HashSet::new();
+            pattern.get_variables(&mut body_vars);
+            let mbody = if body_vars.contains(loop_var) {
+                (**body).clone()
+            } else {
+                let (m, h) = subst_replace_pattern(body, pattern, rep);
+                hits += h;
+                m
+            };
+            Expr::Sum(
+                Box::new(mbody),
+                loop_var.clone(),
+                Box::new(mstart),
+                Box::new(mend),
+            )
+        }
+        Expr::Product(body, loop_var, start, end) => {
+            let (mstart, hstart) = subst_replace_pattern(start, pattern, rep);
+            let (mend, hend) = subst_replace_pattern(end, pattern, rep);
+            hits += hstart + hend;
+            let mut body_vars = HashSet::new();
+            pattern.get_variables(&mut body_vars);
+            let mbody = if body_vars.contains(loop_var) {
+                (**body).clone()
+            } else {
+                let (m, h) = subst_replace_pattern(body, pattern, rep);
+                hits += h;
+                m
+            };
+            Expr::Product(
+                Box::new(mbody),
+                loop_var.clone(),
+                Box::new(mstart),
+                Box::new(mend),
+            )
+        }
+        Expr::Piecewise(branches, default) => {
+            let mut out = Vec::with_capacity(branches.len());
+            for (c, v) in branches {
+                let (mc, hc) = subst_replace_pattern(c, pattern, rep);
+                let (mv, hv) = subst_replace_pattern(v, pattern, rep);
+                hits += hc + hv;
+                out.push((Box::new(mc), Box::new(mv)));
+            }
+            let (mdef, hdef) = subst_replace_pattern(default, pattern, rep);
+            hits += hdef;
+            Expr::Piecewise(out, Box::new(mdef))
+        }
+    };
+    (out, hits)
+}
+
+/// Aplica `ctor` unario al reemplazo del hijo y suma los aciertos.
+fn subst_unary(
+    ctor: fn(Box<crate::ast::Expr>) -> crate::ast::Expr,
+    child: &crate::ast::Expr,
+    pattern: &crate::ast::Expr,
+    rep: &crate::ast::Expr,
+    hits: &mut usize,
+) -> crate::ast::Expr {
+    let (mapped, h) = subst_replace_pattern(child, pattern, rep);
+    *hits += h;
+    ctor(Box::new(mapped))
+}
+
+/// Aplica `ctor` binario al reemplazo de los hijos y suma los aciertos.
+fn subst_binary(
+    ctor: fn(Box<crate::ast::Expr>, Box<crate::ast::Expr>) -> crate::ast::Expr,
+    left: &crate::ast::Expr,
+    right: &crate::ast::Expr,
+    pattern: &crate::ast::Expr,
+    rep: &crate::ast::Expr,
+    hits: &mut usize,
+) -> crate::ast::Expr {
+    let (ml, hl) = subst_replace_pattern(left, pattern, rep);
+    let (mr, hr) = subst_replace_pattern(right, pattern, rep);
+    *hits += hl + hr;
+    ctor(Box::new(ml), Box::new(mr))
+}
+
+/// Reemplaza la variable `name` por `rep` (para des-sustituir el provisorio).
+fn subst_replace_var(
+    node: &crate::ast::Expr,
+    name: &str,
+    rep: &crate::ast::Expr,
+) -> crate::ast::Expr {
+    let var = crate::ast::Expr::Var(name.to_string());
+    let (mapped, _) = subst_replace_pattern(node, &var, rep);
+    mapped
+}
+
+/// Junta factores de `Mul`/`Div`/`Neg`: `(numerador, denominador, constante)`.
+///
+/// Las constantes se pliegan en un solo coeficiente; `None` si aparece una
+/// constante no finita o división por cero exacta.
+fn subst_collect_factors(
+    e: &crate::ast::Expr,
+    num: &mut Vec<crate::ast::Expr>,
+    den: &mut Vec<crate::ast::Expr>,
+    coeff: &mut f64,
+    to_num: bool,
+) -> bool {
+    use crate::ast::Expr;
+    match e {
+        Expr::Const(c) => {
+            if !c.is_finite() {
+                return false;
+            }
+            if to_num {
+                *coeff *= c;
+            } else if *c == 0.0 {
+                return false;
+            } else {
+                *coeff /= c;
+            }
+            coeff.is_finite()
+        }
+        Expr::Neg(a) => {
+            *coeff = -*coeff;
+            subst_collect_factors(a, num, den, coeff, to_num)
+        }
+        Expr::Mul(a, b) => {
+            subst_collect_factors(a, num, den, coeff, to_num)
+                && subst_collect_factors(b, num, den, coeff, to_num)
+        }
+        Expr::Div(a, b) => {
+            subst_collect_factors(a, num, den, coeff, to_num)
+                && subst_collect_factors(b, num, den, coeff, !to_num)
+        }
+        _ => {
+            if to_num {
+                num.push(e.clone());
+            } else {
+                den.push(e.clone());
+            }
+            true
+        }
+    }
+}
+
+/// Calcula `num/du` cancelando factores estructuralmente iguales.
+///
+/// Devuelve el cociente como AST (`coef · Πnum / Πden`) o `None` si no hay
+/// cancelación exacta (el llamador da el error honesto).
+fn subst_divide_out(num: &crate::ast::Expr, du: &crate::ast::Expr) -> Option<crate::ast::Expr> {
+    use crate::ast::Expr;
+    let (mut num_f, mut den_f, mut coeff) = (Vec::new(), Vec::new(), 1.0_f64);
+    if !subst_collect_factors(num, &mut num_f, &mut den_f, &mut coeff, true) {
+        return None;
+    }
+    // `du` va al denominador: sus factores de numerador cancelan con los de
+    // `num`, y sus factores de denominador pasan al numerador.
+    let (mut du_num, mut du_den, mut du_coeff) = (Vec::new(), Vec::new(), 1.0_f64);
+    if !subst_collect_factors(du, &mut du_num, &mut du_den, &mut du_coeff, true) {
+        return None;
+    }
+    if du_coeff == 0.0 || !du_coeff.is_finite() {
+        return None;
+    }
+    coeff /= du_coeff;
+    if !coeff.is_finite() {
+        return None;
+    }
+    num_f.extend(du_den);
+    den_f.extend(du_num);
+    // Cancela de a un par (conmutativo: busca en toda la lista).
+    let mut rest: Vec<Expr> = Vec::with_capacity(den_f.len());
+    for d in den_f {
+        if let Some(pos) = num_f.iter().position(|n| n.structurally_eq(&d)) {
+            num_f.remove(pos);
+        } else {
+            rest.push(d);
+        }
+    }
+    den_f = rest;
+    if coeff == 0.0 {
+        return Some(Expr::Const(0.0));
+    }
+    let mut acc: Option<Expr> = None;
+    let mut push_mul = |f: Expr| {
+        acc = Some(match acc.take() {
+            None => f,
+            Some(prev) => Expr::Mul(Box::new(prev), Box::new(f)),
+        });
+    };
+    if coeff != 1.0 {
+        push_mul(Expr::Const(coeff));
+    }
+    for f in num_f {
+        push_mul(f);
+    }
+    let numerator = acc;
+    let mut den_acc: Option<Expr> = None;
+    for f in den_f {
+        den_acc = Some(match den_acc.take() {
+            None => f,
+            Some(prev) => Expr::Mul(Box::new(prev), Box::new(f)),
+        });
+    }
+    match (numerator, den_acc) {
+        (None, None) => Some(Expr::Const(coeff)),
+        (Some(n), None) => Some(n),
+        (None, Some(d)) => Some(Expr::Div(Box::new(Expr::Const(coeff)), Box::new(d))),
+        (Some(n), Some(d)) => Some(Expr::Div(Box::new(n), Box::new(d))),
+    }
+}
+
+/// Verifica `d(prim)/dvar = integrando` en puntos de muestra finitos.
+///
+/// Si ningún punto es finito acepta (no hay con qué verificar); si alguno
+/// difiere, rechaza para no devolver matemática inventada.
+fn subst_verifies(integrand: &crate::ast::Expr, prim: &crate::ast::Expr, var: &str) -> bool {
+    let deriv = prim.diff(var);
+    for at in [0.5_f64, 1.0, 2.0, -0.5] {
+        let f = integrand.eval_at(var, at);
+        let d = deriv.eval_at(var, at);
+        if !f.is_finite() || !d.is_finite() {
+            continue;
+        }
+        let tol = 1e-6 * (1.0 + f.abs());
+        if (f - d).abs() > tol {
+            return false;
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4011,5 +4600,98 @@ mod tests {
                 "{expr} debe derivar a cuadratura, got {err}"
             );
         }
+    }
+
+    // --- Frente G1: integración por sustitución ---
+
+    fn subst_prim(expr: &str, var: &str, u: &str) -> SubstitutionOutcome {
+        match integrate_by_substitution(expr, var, u) {
+            MathResult::Exact(outcome) => outcome,
+            otro => panic!("se esperaba Exact, llegó {otro:?}"),
+        }
+    }
+
+    #[test]
+    fn subst_exponencial_cuadratica() {
+        // ∫2x·e^(x²)dx con u=x² → e^(x²) (d/dx e^(x²) = 2x·e^(x²)).
+        let out = subst_prim("2*x*exp(x^2)", "x", "x^2");
+        assert!(!out.steps.is_empty(), "sin pasos");
+        assert!(
+            out.steps.iter().any(|s| s.contains("u =")),
+            "pasos: {:?}",
+            out.steps
+        );
+        check_prim_by_derivative("2*x*exp(x^2)", "x", &out.primitive, &F3C_POINTS);
+    }
+
+    #[test]
+    fn subst_seno_cuadratico() {
+        // ∫x·sin(x²)dx con u=x² → −cos(x²)/2.
+        let out = subst_prim("x*sin(x^2)", "x", "x^2");
+        check_prim_by_derivative("x*sin(x^2)", "x", &out.primitive, &F3C_POINTS);
+    }
+
+    #[test]
+    fn subst_coseno_cubico() {
+        // ∫3x²·cos(x³)dx con u=x³ → sin(x³).
+        let out = subst_prim("3*x^2*cos(x^3)", "x", "x^3");
+        check_prim_by_derivative("3*x^2*cos(x^3)", "x", &out.primitive, &F3C_POINTS);
+    }
+
+    #[test]
+    fn subst_potencia_compuesta() {
+        // ∫2x·(x²+1)²dx con u=x²+1 → (x²+1)³/3.
+        let out = subst_prim("2*x*(x^2+1)^2", "x", "x^2+1");
+        check_prim_by_derivative("2*x*(x^2+1)^2", "x", &out.primitive, &F3C_POINTS);
+        // En x=1 la primitiva vale 8/3 + C y en x=0 vale 1/3 + C: la
+        // diferencia (integral 0..1 con w=x²+1, [w³/3]₁²) es 7/3.
+        let ast = crate::ast::parse_ast(&out.primitive.replace(' ', "")).expect("parse prim");
+        let (a, b) = (ast.eval_at("x", 1.0), ast.eval_at("x", 0.0));
+        assert!((a - b - 7.0 / 3.0).abs() < 1e-9, "got {}", out.primitive);
+    }
+
+    #[test]
+    fn subst_errores_honestos() {
+        // El patrón no aparece: sin matemática inventada.
+        assert!(
+            matches!(
+                integrate_by_substitution("sin(x)", "x", "x^2"),
+                MathResult::Unsupported(_)
+            ),
+            "u ausente debe ser Unsupported"
+        );
+        // u sin la variable.
+        assert!(
+            matches!(
+                integrate_by_substitution("x", "x", "5"),
+                MathResult::DomainError(_)
+            ),
+            "u constante debe ser DomainError"
+        );
+        // Cambio trivial.
+        assert!(
+            matches!(
+                integrate_by_substitution("x^2", "x", "x"),
+                MathResult::DomainError(_)
+            ),
+            "u trivial debe ser DomainError"
+        );
+        // Variable inválida.
+        assert!(
+            matches!(
+                integrate_by_substitution("x", "9x", "x^2"),
+                MathResult::DomainError(_)
+            ),
+            "var inválida debe ser DomainError"
+        );
+        // Entrada gigante: presupuesto.
+        let larga = "x+".repeat(2000);
+        assert!(
+            matches!(
+                integrate_by_substitution(&larga, "x", "x^2"),
+                MathResult::ResourceLimit(_)
+            ),
+            "entrada larga debe ser ResourceLimit"
+        );
     }
 }
