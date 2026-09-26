@@ -58,8 +58,8 @@ fn contrato_completo_con_ledger_temporal() {
         &limits,
     )
     .unwrap();
-    // 8 lab + execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 46);
+    // 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 53);
     let res = protocol::dispatch(
         &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}),
         &limits,

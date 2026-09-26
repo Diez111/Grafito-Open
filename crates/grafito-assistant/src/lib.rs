@@ -2839,7 +2839,10 @@ pub fn assistant_remote_prompt(request: &AssistantRequest) -> Result<String, Str
 /// generate_short_script), las 13 matemáticas F2 (verify_step, diff,
 /// integrate, limit, solve_poly, solve_system, interval_check, groebner_gate,
 /// residue, principal_part, poly_gcd, resultant, steps — esta última cubre
-/// las 12 variantes de `CasOp` del stepper) y las 4 de harness
+/// las 12 variantes de `CasOp` del stepper), las 11 G1 del contrato
+/// grafito-geometry (fourier, nth_derivative, partial, lambert_w, pde_heat,
+/// pde_wave, pde_laplace, sum_closed, substitute_int, parse_latex, to_latex)
+/// y las 4 de harness
 /// (run_command, solid_measure_3d, search_topp39, export_dimacs) para
 /// orquestación vía OpenCode Go sin salir del chat. Todas son puras y sin
 /// Document.

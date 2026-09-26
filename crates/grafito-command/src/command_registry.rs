@@ -11643,23 +11643,23 @@ mod registry_tests {
         //   AM2        +3: HeatEquation, WaveEquation, Laplace2D
         //   Texto      +2: ParseLatex, ToLatex
         // Nota de cuenta: CAS +9, AM2 +3, Texto +2 = 14.
-        // Frente G1-tools (este cambio): +0 comandos (conteos intactos
-        // 747/710/25). Lo que cambió son las TOOLS del asistente/MCP: se
-        // exponen las 4 operaciones del contrato que YA están cableadas a
-        // motor real (fourier, nth_derivative, partial, lambert_w). Las otras
-        // 7 del contrato (improper_integral, substitute_int, parse_latex,
-        // to_latex, sum_closed, pde_heat, pde_wave) NO se exponen hasta que
-        // existan los motores de `grafito-geometry` (error honesto en
-        // commands.rs, sin tool fantasma).
+        // Frente G1-tools: +0 comandos (conteos intactos 747/710/25). Las
+        // TOOLS del asistente/MCP exponen las 11 operaciones del contrato ya
+        // cableadas a motor real (fourier, nth_derivative, partial,
+        // lambert_w, pde_heat, pde_wave, pde_laplace, sum_closed,
+        // substitute_int, parse_latex, to_latex). Solo `improper_integral`
+        // sigue sin tool (sin tool fantasma).
         // DELTA exacto para architecture.md §158/§169/§272-§273 (lo replica el
         // agente de docs; acá NO se toca docs/architecture.md):
-        //   assistant math_tool_schemas 13 → 17 (+4: fourier, nth_derivative,
-        //     partial, lambert_w); all_safe_tool_schemas 28 → 32
-        //     (3 base + 8 pedag + 17 math + 2 harness1 + 2 harness2).
-        //   MCP proxied_tool_defs 26 → 30; tools/list 42 → 46 (8 lab +
-        //     execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab).
-        //     Pines nuevos: agent.rs (math 17 / safe 32), bridge.rs:30,
-        //     protocol.rs:447-448, tests/stdio_contract.rs:61-62.
+        //   assistant math_tool_schemas 13 → 24 (+4 G1 base: fourier,
+        //     nth_derivative, partial, lambert_w; +7 G1 nuevos: pde_heat,
+        //     pde_wave, pde_laplace, sum_closed, substitute_int, parse_latex,
+        //     to_latex); all_safe_tool_schemas 28 → 39
+        //     (3 base + 8 pedag + 24 math + 2 harness1 + 2 harness2).
+        //   MCP proxied_tool_defs 26 → 37; tools/list 42 → 53 (8 lab +
+        //     execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab).
+        //     Pines nuevos: agent.rs (math 24 / safe 39), bridge.rs:37,
+        //     protocol.rs, tests/stdio_contract.rs.
         //   docs/OPEN_PROBLEMS_LAB.md:4 ("42 tools") queda desactualizado:
         //     ahora 46.
         assert_eq!(all().len(), 747, "COMMANDS registrados (docs §8)");

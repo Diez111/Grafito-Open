@@ -139,7 +139,7 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-/// Todas las tools: 8 lab + execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+/// Todas las tools: 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
 pub fn all_tool_defs() -> Vec<Value> {
     let mut defs = tool_defs();
     defs.extend(crate::bridge::proxied_tool_defs());
@@ -444,8 +444,8 @@ mod tests {
             .and_then(|r| r.get("tools"))
             .and_then(Value::as_array)
             .unwrap();
-        // 8 lab + execute + 30 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
-        assert_eq!(tools.len(), 46);
+        // 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+        assert_eq!(tools.len(), 53);
         // Notificaciones no responden.
         assert!(dispatch(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),

@@ -275,6 +275,13 @@ fn dispatch_safe_tool(call: &ToolCall) -> ToolResult {
         "nth_derivative" => nth_derivative_tool(call),
         "partial" => partial_tool(call),
         "lambert_w" => lambert_w_tool(call),
+        "pde_heat" => pde_heat_tool(call),
+        "pde_wave" => pde_wave_tool(call),
+        "pde_laplace" => pde_laplace_tool(call),
+        "sum_closed" => sum_closed_tool(call),
+        "substitute_int" => substitute_int_tool(call),
+        "parse_latex" => parse_latex_tool(call),
+        "to_latex" => to_latex_tool(call),
         // Harness-1 — puras, sin Document, sin I/O, sin red
         "run_command" => run_command_tool(call),
         "solid_measure_3d" => solid_measure_3d_tool(call),
@@ -1055,11 +1062,11 @@ fn principal_part_tool(call: &ToolCall) -> ToolResult {
 //
 // Espejo puro de los handlers `geo_*` de `grafito-command`: mismos motores y
 // mismas cotas que los comandos FourierSeries/NDerivativeSym/Partial/LambertW,
-// sin Document, sin I/O. Las tools del contrato que todavía no tienen motor en
-// `grafito-geometry` (`improper_integral`, `substitute_int`, `parse_latex`,
-// `to_latex`, `sum_closed`, `pde_heat`, `pde_wave`) NO se exponen: mejor tool
-// ausente que una tool que solo devuelve "motor no disponible". Cuando salgan
-// los motores se suman acá + dispatch + schema + pin numérico.
+// HeatEquation/WaveEquation/Laplace2D, SumClosed, SubstituteInt, ParseLatex y
+// ToLatex, sin Document, sin I/O. La única tool del contrato que todavía no
+// tiene motor en `grafito-geometry` (`improper_integral`) NO se expone: mejor
+// tool ausente que una tool que solo devuelve "motor no disponible". Cuando
+// salga el motor se suma acá + dispatch + schema + pin numérico.
 
 /// Desempaqueta `MathResult` de valor: éxito (`Exact`/`Approximate`) → `Ok`,
 /// error tipado → `Err` ya formateado por `math_outcome_to_tool`.
@@ -1221,6 +1228,236 @@ fn lambert_w_tool(call: &ToolCall) -> ToolResult {
                 crate::format_number(a)
             ),
         ),
+    }
+}
+
+/// pde_heat(expression, variable?, t0, t_end) — calor 1D `u_t = u_xx` en [0, 1].
+///
+/// Dirichlet homogéneo `u = 0` en ambos extremos, condición inicial
+/// `u(x, t0) = expression`; FTCS explícito con malla de 101 nodos y `r = 0.4`
+/// (estable si `≤ 1/2`), tope de 200_000 pasos. `t0`/`t_end` finitos con
+/// `t_end >= t0` (misma cota que `HeatEquation`). Devuelve el resumen
+/// muestreado `u(x, t_end)` del motor, sin inventar valores.
+fn pde_heat_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let (t0, t_end) = match (math_finite_arg(call, "t0"), math_finite_arg(call, "t_end")) {
+        (Ok(t0), Ok(t_end)) => (t0, t_end),
+        (Err(error), _) | (_, Err(error)) => return math_err(call, error),
+    };
+    if t_end < t0 {
+        return math_err(call, "pde_heat: se requiere t_end >= t0".into());
+    }
+    match grafito_geometry::pde::solve_heat_1d(&expression, &variable, t0, t_end) {
+        Ok(resumen) => ToolResult::text(&call.id, true, resumen),
+        Err(error) => math_err(call, format!("pde_heat: {error}")),
+    }
+}
+
+/// pde_wave(expression, variable?, t0, t_end) — ondas 1D `u_tt = u_xx` en [0, 1].
+///
+/// Dirichlet homogéneo, `c = 1`, desplazamiento inicial `u(x, t0) = expression`
+/// y velocidad inicial nula; esquema explícito de 2do orden con malla de 201
+/// nodos y CFL `C = dt/dx ≤ 1`, tope de 200_000 pasos. `t0`/`t_end` finitos
+/// con `t_end >= t0` (misma cota que `WaveEquation`). Devuelve el resumen
+/// muestreado `u(x, t_end)` del motor.
+fn pde_wave_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let (t0, t_end) = match (math_finite_arg(call, "t0"), math_finite_arg(call, "t_end")) {
+        (Ok(t0), Ok(t_end)) => (t0, t_end),
+        (Err(error), _) | (_, Err(error)) => return math_err(call, error),
+    };
+    if t_end < t0 {
+        return math_err(call, "pde_wave: se requiere t_end >= t0".into());
+    }
+    match grafito_geometry::pde::solve_wave_1d(&expression, &variable, t0, t_end) {
+        Ok(resumen) => ToolResult::text(&call.id, true, resumen),
+        Err(error) => math_err(call, format!("pde_wave: {error}")),
+    }
+}
+
+/// pde_laplace(g_sup, g_inf, g_izq, g_der, xmin, xmax, ymin, ymax) — Laplace 2D.
+///
+/// `u_xx + u_yy = 0` en `[xmin, xmax] × [ymin, ymax]` con Dirichlet dado por
+/// 4 expresiones (pueden usar `x` y/o `y`; cada esquina promedia los dos
+/// bordes que la tocan). Gauss-Seidel in place en grilla 41×41, tol 1e-9 y
+/// tope de 10_000 barridos: no converger es error honesto (mismas cotas que
+/// `Laplace2D`). Devuelve el resumen muestreado del motor (cortes + centro).
+fn pde_laplace_tool(call: &ToolCall) -> ToolResult {
+    let (g_sup, g_inf, g_izq, g_der) = match (
+        math_expr_arg(call, "g_sup"),
+        math_expr_arg(call, "g_inf"),
+        math_expr_arg(call, "g_izq"),
+        math_expr_arg(call, "g_der"),
+    ) {
+        (Ok(g_sup), Ok(g_inf), Ok(g_izq), Ok(g_der)) => (g_sup, g_inf, g_izq, g_der),
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => return math_err(call, error),
+    };
+    let (xmin, xmax, ymin, ymax) = match (
+        math_finite_arg(call, "xmin"),
+        math_finite_arg(call, "xmax"),
+        math_finite_arg(call, "ymin"),
+        math_finite_arg(call, "ymax"),
+    ) {
+        (Ok(xmin), Ok(xmax), Ok(ymin), Ok(ymax)) => (xmin, xmax, ymin, ymax),
+        (Err(error), _, _, _)
+        | (_, Err(error), _, _)
+        | (_, _, Err(error), _)
+        | (_, _, _, Err(error)) => return math_err(call, error),
+    };
+    if !(xmin < xmax && ymin < ymax) {
+        return math_err(
+            call,
+            "pde_laplace: se requiere xmin < xmax e ymin < ymax".into(),
+        );
+    }
+    match grafito_geometry::pde::solve_laplace_2d_rect(
+        &g_sup, &g_inf, &g_izq, &g_der, xmin, xmax, ymin, ymax,
+    ) {
+        Ok(resumen) => ToolResult::text(&call.id, true, resumen),
+        Err(error) => math_err(call, format!("pde_laplace: {error}")),
+    }
+}
+
+/// Entero con signo en `[min..=max]` (para `lo`/`hi` de `sum_closed`, que
+/// admite negativos; `math_int_arg` sólo cubre `usize`).
+fn math_bounded_i64(call: &ToolCall, key: &str, min: i64, max: i64) -> Result<i64, String> {
+    match call.arguments.get(key).and_then(Value::as_i64) {
+        Some(value) if value >= min && value <= max => Ok(value),
+        _ => Err(format!("tool requiere '{key}' entero en {min}..={max}")),
+    }
+}
+
+/// sum_closed(expression, variable?, lo, hi) — suma en forma cerrada.
+///
+/// `Σ_{variable=lo..hi} expression` por fórmula cerrada (Faulhaber para
+/// polinomios de grado ≤ 10, geométricas, fracciones unitarias y telescópicas),
+/// nunca bucle término a término; `hi >= lo` con `lo`/`hi` en ±1_000_000
+/// (misma cota que `SumClosed`). Sin forma elemental el motor falla honesto
+/// (p. ej. armónicas); no se aproxima ni se inventa.
+fn sum_closed_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let (lo, hi) = match (
+        math_bounded_i64(call, "lo", -1_000_000, 1_000_000),
+        math_bounded_i64(call, "hi", -1_000_000, 1_000_000),
+    ) {
+        (Ok(lo), Ok(hi)) => (lo, hi),
+        (Err(error), _) | (_, Err(error)) => return math_err(call, error),
+    };
+    if hi < lo {
+        return math_err(call, "sum_closed: se requiere hi >= lo".into());
+    }
+    let outcome = grafito_geometry::symbolic::sum_closed(&expression, &variable, lo, hi);
+    math_outcome_to_tool(call, "sum_closed", outcome)
+}
+
+/// substitute_int(expression, variable?, u) — primitiva por sustitución `u`.
+///
+/// Deriva `du/dx`, reescribe el integrando en `u` e integra en `u` para
+/// devolver la primitiva des-sustituida más los pasos (`u`, `du/dx`, forma en
+/// `u`, integral en `u`). `u` debe contener a la variable y no ser trivial
+/// (misma cota que `SubstituteInt`: entradas de hasta 2000 bytes). Si el
+/// cambio no aparece en el integrando el motor falla honesto.
+fn substitute_int_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let variable = match math_var_arg(call) {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    let u = match math_expr_arg(call, "u") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::integral::integrate_by_substitution(&expression, &variable, &u) {
+        grafito_geometry::outcome::MathResult::Exact(outcome)
+        | grafito_geometry::outcome::MathResult::Approximate {
+            value: outcome,
+            error_estimate: _,
+        } => ToolResult::text(
+            &call.id,
+            true,
+            json!({
+                "primitive": outcome.primitive,
+                "steps": outcome.steps,
+            })
+            .to_string(),
+        ),
+        // `SubstitutionOutcome` no implementa `Display`, así que los errores se
+        // mapean acá con el mismo formato honesto que `math_outcome_to_tool`.
+        grafito_geometry::outcome::MathResult::DomainError(error) => math_err(
+            call,
+            format!("substitute_int: fuera de dominio ({error:?})"),
+        ),
+        grafito_geometry::outcome::MathResult::NotConverged(error) => {
+            math_err(call, format!("substitute_int: no convergió ({error:?})"))
+        }
+        grafito_geometry::outcome::MathResult::Unsupported(error) => {
+            math_err(call, format!("substitute_int: no soportado ({error:?})"))
+        }
+        grafito_geometry::outcome::MathResult::ResourceLimit(error) => math_err(
+            call,
+            format!("substitute_int: excede presupuesto ({error:?})"),
+        ),
+    }
+}
+
+/// parse_latex(latex) — LaTeX del subset a expresión canónica.
+///
+/// `\frac{1}{2}` → `(1)/(2)`, `\pi` → `pi`, `x_{1}^{2}` → `x_1^(2)`. La entrada
+/// (hasta 2000 bytes) se valida contra el parser canónico antes de salir: si
+/// algo no cierra, error honesto en rioplatense que nombra al culpable en vez
+/// de adivinar (misma cota que `ParseLatex`).
+fn parse_latex_tool(call: &ToolCall) -> ToolResult {
+    let latex = match math_expr_arg(call, "latex") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::latex::parse_latex(&latex) {
+        Ok(expression) => ToolResult::text(&call.id, true, expression),
+        Err(error) => math_err(call, format!("parse_latex: {error}")),
+    }
+}
+
+/// to_latex(expression) — expresión canónica a LaTeX del subset.
+///
+/// `x^2 + (x+1)/(x-1)` → `x^{2} + \frac{x + 1}{x - 1}`, `pi` → `\pi`. La
+/// expresión (hasta 2000 bytes) debe parsear con el parser canónico; si no
+/// parsea, error honesto en vez de traducción inventada (misma cota que
+/// `ToLatex`).
+fn to_latex_tool(call: &ToolCall) -> ToolResult {
+    let expression = match math_expr_arg(call, "expression") {
+        Ok(value) => value,
+        Err(error) => return math_err(call, error),
+    };
+    match grafito_geometry::ast::parse_ast(&expression) {
+        Ok(ast) => ToolResult::text(&call.id, true, grafito_geometry::latex::to_latex(&ast)),
+        Err(error) => math_err(call, format!("to_latex: {error}")),
     }
 }
 
@@ -3250,8 +3487,13 @@ pub fn pedagogy_tool_schemas() -> Vec<ToolSchema> {
 /// `resultant` (Sylvester bivariado) y `steps` (stepper paso a paso con las
 /// 12 variantes de `CasOp`: derivative/integral/limit/taylor/solve +
 /// ode_nth_order, ode_euler, frobenius, laplace_derivative, laplace_integral,
-/// groebner y eliminate; 32 pasos máx). Todas exigen expresiones de hasta
-/// 2000 bytes, valores finitos y dominio válido.
+/// groebner y eliminate; 32 pasos máx), más las 11 G1 del contrato
+/// grafito-geometry (`fourier`, `nth_derivative`, `partial`, `lambert_w`,
+/// `pde_heat`, `pde_wave`, `pde_laplace`, `sum_closed`, `substitute_int`,
+/// `parse_latex`, `to_latex`: mismos motores y cotas que los comandos
+/// FourierSeries/NDerivativeSym/Partial/LambertW, HeatEquation/WaveEquation/
+/// Laplace2D, SumClosed, SubstituteInt, ParseLatex y ToLatex). Todas exigen
+/// expresiones de hasta 2000 bytes, valores finitos y dominio válido.
 pub fn math_tool_schemas() -> Vec<ToolSchema> {
     vec![
         ToolSchema::new(
@@ -3488,6 +3730,101 @@ pub fn math_tool_schemas() -> Vec<ToolSchema> {
                     "a": {"type": "number", "description": "Argumento finito, a ≥ -1/e"}
                 },
                 "required": ["a"]
+            }),
+        ),
+        ToolSchema::new(
+            "pde_heat",
+            "Calor 1D u_t = u_xx en [0, 1] con borde Dirichlet homogéneo (FTCS explícito, malla 101, r = 0.4, tope 200000 pasos): devuelve u(x, t_end) muestreada desde la condición inicial u(x, t0) = expression. t0/t_end finitos con t_end >= t0.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Condición inicial u(x, t0), máx 2000 bytes"},
+                    "variable": {"type": "string", "description": "Variable espacial, default x"},
+                    "t0": {"type": "number", "description": "Tiempo inicial finito"},
+                    "t_end": {"type": "number", "description": "Tiempo final finito, t_end >= t0"}
+                },
+                "required": ["expression", "t0", "t_end"]
+            }),
+        ),
+        ToolSchema::new(
+            "pde_wave",
+            "Ondas 1D u_tt = u_xx en [0, 1] con borde Dirichlet homogéneo (explícito de 2do orden, c = 1, velocidad inicial nula, malla 201, CFL ≤ 1, tope 200000 pasos): devuelve u(x, t_end) muestreada desde el desplazamiento inicial u(x, t0) = expression. t0/t_end finitos con t_end >= t0.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Desplazamiento inicial u(x, t0), máx 2000 bytes"},
+                    "variable": {"type": "string", "description": "Variable espacial, default x"},
+                    "t0": {"type": "number", "description": "Tiempo inicial finito"},
+                    "t_end": {"type": "number", "description": "Tiempo final finito, t_end >= t0"}
+                },
+                "required": ["expression", "t0", "t_end"]
+            }),
+        ),
+        ToolSchema::new(
+            "pde_laplace",
+            "Laplace 2D u_xx + u_yy = 0 en [xmin, xmax] × [ymin, ymax] con Dirichlet dado por 4 expresiones (pueden usar x y/o y; cada esquina promedia los dos bordes que la tocan). Gauss-Seidel en grilla 41×41, tol 1e-9, tope 10000 barridos: no converger es error honesto. Devuelve cortes muestreados + centro.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "g_sup": {"type": "string", "description": "Borde superior g(x, ymax), máx 2000 bytes"},
+                    "g_inf": {"type": "string", "description": "Borde inferior g(x, ymin), máx 2000 bytes"},
+                    "g_izq": {"type": "string", "description": "Borde izquierdo g(xmin, y), máx 2000 bytes"},
+                    "g_der": {"type": "string", "description": "Borde derecho g(xmax, y), máx 2000 bytes"},
+                    "xmin": {"type": "number", "description": "Borde oeste finito"},
+                    "xmax": {"type": "number", "description": "Borde este finito, xmax > xmin"},
+                    "ymin": {"type": "number", "description": "Borde sur finito"},
+                    "ymax": {"type": "number", "description": "Borde norte finito, ymax > ymin"}
+                },
+                "required": ["g_sup", "g_inf", "g_izq", "g_der", "xmin", "xmax", "ymin", "ymax"]
+            }),
+        ),
+        ToolSchema::new(
+            "sum_closed",
+            "Suma en forma cerrada Σ_{variable=lo..hi} expression por fórmula (Faulhaber grado ≤ 10, geométricas, fracciones unitarias, telescópicas), sin bucle término a término. lo/hi enteros en ±1000000 con hi >= lo. Sin forma elemental falla honesto.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Sumando, máx 2000 bytes"},
+                    "variable": {"type": "string", "description": "Variable de suma, default x"},
+                    "lo": {"type": "integer", "description": "Límite inferior entero en -1000000..=1000000"},
+                    "hi": {"type": "integer", "description": "Límite superior entero en -1000000..=1000000, hi >= lo"}
+                },
+                "required": ["expression", "lo", "hi"]
+            }),
+        ),
+        ToolSchema::new(
+            "substitute_int",
+            "Primitiva por sustitución con el cambio u dado: deriva du/dx, reescribe el integrando en u e integra en u. Devuelve primitiva des-sustituida + pasos. u debe contener a la variable y no ser trivial; entradas de hasta 2000 bytes.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Integrando, máx 2000 bytes"},
+                    "variable": {"type": "string", "description": "Variable de integración, default x"},
+                    "u": {"type": "string", "description": "Cambio u con la variable adentro, no trivial, máx 2000 bytes"}
+                },
+                "required": ["expression", "u"]
+            }),
+        ),
+        ToolSchema::new(
+            "parse_latex",
+            "LaTeX del subset a expresión canónica (\\frac{1}{2} → (1)/(2), \\pi → pi). Entrada no vacía de hasta 2000 bytes, validada contra el parser canónico: si algo no cierra, error honesto.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "latex": {"type": "string", "description": "LaTeX del subset, máx 2000 bytes"}
+                },
+                "required": ["latex"]
+            }),
+        ),
+        ToolSchema::new(
+            "to_latex",
+            "Expresión canónica a LaTeX del subset (x^2 → x^{2}, pi → \\pi). La expresión debe parsear con el parser canónico (máx 2000 bytes); si no parsea, error honesto.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "expression": {"type": "string", "description": "Expresión canónica, máx 2000 bytes"}
+                },
+                "required": ["expression"]
             }),
         ),
     ]
@@ -6832,7 +7169,7 @@ mod tests {
         assert!(nombres.contains(&"search_topp39"));
         assert!(nombres.contains(&"export_dimacs"));
         assert!(nombres.contains(&"generate_short_script"));
-        assert_eq!(esquemas.len(), 32);
+        assert_eq!(esquemas.len(), 39);
     }
 
     #[test]
@@ -7576,10 +7913,10 @@ mod tests {
             assert_eq!(openai["type"], "function");
             assert_eq!(openai["function"]["name"], schema.name);
         }
-        assert_eq!(math_tool_schemas().len(), 17);
-        // 3 base + 8 pedagógicas + 17 matemáticas (13 F2 + 4 G1) + 2 harness-1
+        assert_eq!(math_tool_schemas().len(), 24);
+        // 3 base + 8 pedagógicas + 24 matemáticas (13 F2 + 11 G1) + 2 harness-1
         // + 2 harness-2.
-        assert_eq!(all_safe_tool_schemas().len(), 32);
+        assert_eq!(all_safe_tool_schemas().len(), 39);
     }
 
     fn math_call(name: &str, arguments: Value) -> ToolCall {
@@ -7631,6 +7968,31 @@ mod tests {
                 "steps",
                 json!({"expression": "x^2", "operation": "derivative"}),
             ),
+            (
+                "pde_heat",
+                json!({"expression": "sin(pi*x)", "t0": 0.0, "t_end": 0.01}),
+            ),
+            (
+                "pde_wave",
+                json!({"expression": "sin(pi*x)", "t0": 0.0, "t_end": 0.01}),
+            ),
+            (
+                "pde_laplace",
+                json!({
+                    "g_sup": "0", "g_inf": "0", "g_izq": "0", "g_der": "0",
+                    "xmin": 0.0, "xmax": 1.0, "ymin": 0.0, "ymax": 1.0,
+                }),
+            ),
+            (
+                "sum_closed",
+                json!({"expression": "k", "variable": "k", "lo": 1, "hi": 100}),
+            ),
+            (
+                "substitute_int",
+                json!({"expression": "2*x*exp(x^2)", "variable": "x", "u": "x^2"}),
+            ),
+            ("parse_latex", json!({"latex": "\\frac{1}{2}"})),
+            ("to_latex", json!({"expression": "x^2"})),
         ];
         for (name, arguments) in cases {
             let result = dispatch_safe_tool(&math_call(name, arguments.clone()));
@@ -7752,6 +8114,149 @@ mod tests {
             "error honesto esperado, fue: {}",
             fuera.content
         );
+    }
+
+    #[test]
+    fn pde_heat_tool_resume_calor_y_rechaza_horizonte_invertido() {
+        // sin(pi·x) con t_end − t0 = 0.01: 250 pasos FTCS, rápido y estable.
+        let ok = dispatch_safe_tool(&math_call(
+            "pde_heat",
+            json!({"expression": "sin(pi*x)", "t0": 0.0, "t_end": 0.01}),
+        ));
+        assert!(ok.ok, "pde_heat falló: {}", ok.content);
+        assert!(
+            ok.content.contains("calor 1D"),
+            "resumen del motor esperado, fue: {}",
+            ok.content
+        );
+        let invertido = dispatch_safe_tool(&math_call(
+            "pde_heat",
+            json!({"expression": "sin(pi*x)", "t0": 1.0, "t_end": 0.0}),
+        ));
+        assert!(
+            !invertido.ok,
+            "t_end < t0 debe fallar: {}",
+            invertido.content
+        );
+    }
+
+    #[test]
+    fn pde_wave_tool_resume_ondas_y_rechaza_horizonte_invertido() {
+        // sin(pi·x) con t_end − t0 = 0.01: 2 pasos, velocidad inicial nula.
+        let ok = dispatch_safe_tool(&math_call(
+            "pde_wave",
+            json!({"expression": "sin(pi*x)", "t0": 0.0, "t_end": 0.01}),
+        ));
+        assert!(ok.ok, "pde_wave falló: {}", ok.content);
+        assert!(
+            ok.content.contains("ondas 1D"),
+            "resumen del motor esperado, fue: {}",
+            ok.content
+        );
+        let invertido = dispatch_safe_tool(&math_call(
+            "pde_wave",
+            json!({"expression": "sin(pi*x)", "t0": 1.0, "t_end": 0.0}),
+        ));
+        assert!(
+            !invertido.ok,
+            "t_end < t0 debe fallar: {}",
+            invertido.content
+        );
+    }
+
+    #[test]
+    fn pde_laplace_tool_resuelve_bordes_nulos_y_rechaza_rectangulo_invalido() {
+        // Bordes nulos en [0,1]×[0,1]: solución idénticamente 0, converge al
+        // primer barrido.
+        let ok = dispatch_safe_tool(&math_call(
+            "pde_laplace",
+            json!({
+                "g_sup": "0", "g_inf": "0", "g_izq": "0", "g_der": "0",
+                "xmin": 0.0, "xmax": 1.0, "ymin": 0.0, "ymax": 1.0,
+            }),
+        ));
+        assert!(ok.ok, "pde_laplace falló: {}", ok.content);
+        assert!(
+            ok.content.contains("Laplace 2D"),
+            "resumen del motor esperado, fue: {}",
+            ok.content
+        );
+        let mal_rect = dispatch_safe_tool(&math_call(
+            "pde_laplace",
+            json!({
+                "g_sup": "0", "g_inf": "0", "g_izq": "0", "g_der": "0",
+                "xmin": 1.0, "xmax": 0.0, "ymin": 0.0, "ymax": 1.0,
+            }),
+        ));
+        assert!(
+            !mal_rect.ok,
+            "xmin >= xmax debe fallar: {}",
+            mal_rect.content
+        );
+    }
+
+    #[test]
+    fn sum_closed_tool_suma_faulhaber_y_rechaza_limites_invertidos() {
+        // Σ_{k=1..100} k = 5050 por Faulhaber, valor entero exacto.
+        let ok = dispatch_safe_tool(&math_call(
+            "sum_closed",
+            json!({"expression": "k", "variable": "k", "lo": 1, "hi": 100}),
+        ));
+        assert!(ok.ok, "sum_closed falló: {}", ok.content);
+        assert_eq!(ok.content.trim(), "5050");
+        let invertida = dispatch_safe_tool(&math_call(
+            "sum_closed",
+            json!({"expression": "k", "variable": "k", "lo": 5, "hi": 1}),
+        ));
+        assert!(!invertida.ok, "hi < lo debe fallar: {}", invertida.content);
+    }
+
+    #[test]
+    fn substitute_int_tool_integra_por_cambio_y_rechaza_cambio_trivial() {
+        // 2·x·exp(x²) con u = x² → exp(x²); se pinean primitiva + pasos.
+        let ok = dispatch_safe_tool(&math_call(
+            "substitute_int",
+            json!({"expression": "2*x*exp(x^2)", "variable": "x", "u": "x^2"}),
+        ));
+        assert!(ok.ok, "substitute_int falló: {}", ok.content);
+        let value: Value = serde_json::from_str(&ok.content).expect("json substitute_int");
+        assert!(
+            value["primitive"]
+                .as_str()
+                .is_some_and(|prim| prim.contains("exp")),
+            "primitiva con exp esperada, fue: {}",
+            ok.content
+        );
+        assert!(
+            value["steps"]
+                .as_array()
+                .is_some_and(|steps| !steps.is_empty()),
+            "pasos no vacíos esperados, fue: {}",
+            ok.content
+        );
+        let trivial = dispatch_safe_tool(&math_call(
+            "substitute_int",
+            json!({"expression": "x^2", "variable": "x", "u": "x"}),
+        ));
+        assert!(!trivial.ok, "u trivial debe fallar: {}", trivial.content);
+    }
+
+    #[test]
+    fn parse_latex_tool_traduce_frac_y_rechaza_vacio() {
+        let ok = dispatch_safe_tool(&math_call("parse_latex", json!({"latex": "\\frac{1}{2}"})));
+        assert!(ok.ok, "parse_latex falló: {}", ok.content);
+        assert_eq!(ok.content.trim(), "(1)/(2)");
+        let vacio = dispatch_safe_tool(&math_call("parse_latex", json!({"latex": "   "})));
+        assert!(!vacio.ok, "latex vacío debe fallar: {}", vacio.content);
+    }
+
+    #[test]
+    fn to_latex_tool_renderiza_potencia_y_rechaza_vacio() {
+        let ok = dispatch_safe_tool(&math_call("to_latex", json!({"expression": "x^2"})));
+        assert!(ok.ok, "to_latex falló: {}", ok.content);
+        assert_eq!(ok.content.trim(), "x^{2}");
+        let vacio = dispatch_safe_tool(&math_call("to_latex", json!({"expression": "   "})));
+        assert!(!vacio.ok, "expresión vacía debe fallar: {}", vacio.content);
     }
 
     #[test]

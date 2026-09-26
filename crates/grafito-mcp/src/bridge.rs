@@ -1,6 +1,6 @@
 //! Puente hacia el cerebro completo de Grafito (sin duplicar lógica).
 //!
-//! - **Proxy**: las 30 tools puras de `grafito-assistant` (`all_safe_tool_schemas`
+//! - **Proxy**: las 37 tools puras de `grafito-assistant` (`all_safe_tool_schemas`
 //!   menos el harness-2 viejo y `web_search`) se re-exportan tal cual y se
 //!   despachan por `SafeGrafitoDispatcher`. Paridad para siempre: si el
 //!   asistente suma una tool, el MCP la expone sin tocar este crate.
@@ -27,7 +27,7 @@ fn is_excluded(name: &str) -> bool {
     )
 }
 
-/// Definiciones MCP de las tools proxedas (30: 3 base + 8 pedag + 17 math + 2 harness1).
+/// Definiciones MCP de las tools proxedas (37: 3 base + 8 pedag + 24 math + 2 harness1).
 pub fn proxied_tool_defs() -> Vec<Value> {
     grafito_assistant::agent::all_safe_tool_schemas()
         .iter()
@@ -249,13 +249,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proxy_cubre_30_tools_y_excluye_2_mas_web() {
+    fn proxy_cubre_37_tools_y_excluye_2_mas_web() {
         let defs = proxied_tool_defs();
         let names: Vec<&str> = defs
             .iter()
             .filter_map(|d| d.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(defs.len(), 30, "nombres: {names:?}");
+        assert_eq!(defs.len(), 37, "nombres: {names:?}");
         assert!(!names.contains(&"search_topp39"));
         assert!(!names.contains(&"export_dimacs"));
         assert!(!names.contains(&"web_search"));
@@ -271,6 +271,13 @@ mod tests {
             "nth_derivative",
             "partial",
             "lambert_w",
+            "pde_heat",
+            "pde_wave",
+            "pde_laplace",
+            "sum_closed",
+            "substitute_int",
+            "parse_latex",
+            "to_latex",
         ] {
             assert!(names.contains(&must), "falta {must} en {names:?}");
         }
