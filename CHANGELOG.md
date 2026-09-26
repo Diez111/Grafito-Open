@@ -11,6 +11,32 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 
 ## [Unreleased]
 
+#### Agregado
+- **Motores CAS (`grafito-geometry`)**: `HeatEquation` (FTCS), `WaveEquation`
+  (2.º orden), `Laplace2D` (Gauss-Seidel), `ParseLatex`/`ToLatex` (roundtrip en
+  subset), `SubstituteInt` (verificación por derivación), `SumClosed`
+  (Faulhaber, geométricas, telescópicas). `LambertW` y `Laurent` ya existían.
+- **Cableado de 7 comandos** (`grafito-command`): los comandos nuevos delegan
+  en sus motores en vez de quedar como stub.
+- **Test `execution_smoke`**: ejecuta los 733+ comandos del registry sin
+  pánicos, en verde.
+
+#### Corregido
+- **StepByStepCard truncaba a 33 en vez de 32**: el parseo ahora respeta
+  `MAX_CAS_STEPS`.
+
+#### Cambiado
+- **Ventana de bienvenida desactivada** (`grafito-app`).
+
+#### Operativa
+- `cargo test --workspace` OOMea la máquina (27 GB); mitigación usada: por
+  crate con `-j1` y tope systemd `MemoryMax=16G`.
+- Tests en verde por crate: geometry 962, command 190 lib + 2 smoke, app 1145,
+  ui 416, core 383, assistant 246, más el resto (anim 175, pedagogy 161,
+  profile 110, render 85, classroom 82, agent 64, ggb 45, complex 45, mcp 42,
+  assistant-types 38, plugins 20, whiteboard 19, tex 12).
+- Binario instalado actualizado a `2a9edc7` + estos cambios.
+
 ## [1.2.1] - 2026-09-19
 
 #### Corregido
