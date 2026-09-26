@@ -1809,8 +1809,7 @@ pub struct GrafitoApp {
     /// (`FRAME_VERTEX_BUDGET` en render_2d): se recalcula en cada
     /// `draw_objects` (0 = escena dentro del tope). Ver insignia honesta.
     pub(crate) frame_budget_skipped: usize,
-    /// Ventana onboarding Scandinavian 30s — true si `config.onboarding_completed` es false.
-    /// Se muestra una vez con 3 pasos + [Probar ejemplo][Empezar vacío][No mostrar de nuevo].
+    /// Onboarding desactivado a pedido del usuario: siempre false, nunca se muestra.
     pub show_onboarding: bool,
     /// Jobs de I/O en background para no bloquear UI thread (60fps) — save/open/export.
     /// Pattern `spawn_profile_save` (assistant.rs:41-51) con `sync_channel(1)` + `request_repaint`.
@@ -2607,7 +2606,7 @@ impl GrafitoApp {
             redo_stack: VecDeque::new(),
             undo_total_bytes: 0,
             frame_budget_skipped: 0,
-            show_onboarding: !config.onboarding_completed,
+            show_onboarding: false,
             pending_save_job: None,
             pending_open_job: None,
             startup_pending_doc,
