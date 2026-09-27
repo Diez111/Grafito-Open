@@ -102,6 +102,7 @@ pub const TEMPLATE_IDS: &[&str] = &[
     "sup-interseccion",
     "sup-onda-3d",
     "sup-silla-descenso",
+    "sup-laplace-3d",
 ];
 
 /// Título + descripción corta para la UI/preview (sin construir nada).
@@ -124,6 +125,10 @@ pub fn describe(id: &str) -> Option<(&'static str, &'static str)> {
         "sup-silla-descenso" => Some((
             "Silla y descenso",
             "bajada por gradiente revelada sobre z = x² − y²",
+        )),
+        "sup-laplace-3d" => Some((
+            "Laplace 3D",
+            "|F(s)| sobre el plano complejo con sonda en el eje real",
         )),
         _ => None,
     }
@@ -302,6 +307,16 @@ impl Params3D {
                 mayor: 2.0,
                 menor: 0.6,
                 extra: 64.0,
+                modo: 0.0,
+            },
+            "sup-laplace-3d" => Self {
+                res: 32.0,
+                amp: 1.0,
+                freq: 1.0,
+                fase: 0.0,
+                mayor: 2.0,
+                menor: 0.6,
+                extra: 8.0,
                 modo: 0.0,
             },
             _ => Self {
@@ -1077,7 +1092,7 @@ impl SillaDescenso {
         })
     }
 
-    /// Punto del descenso en `alpha` (crudo; índice eased sobre el sendero).
+/// Punto del descenso en `alpha` (crudo; índice eased sobre el sendero).
     pub fn punto_en(self, alpha: f64) -> SceneResult<[f64; 3]> {
         let s = self.sendero()?;
         let e = smooth(clamp01(alpha));
@@ -1086,6 +1101,106 @@ impl SillaDescenso {
             donde: "SillaDescenso",
             detalle: "índice del sendero fuera de rango".to_string(),
         })
+    }
+}
+
+// ── Laplace 3D: |F(s)| sobre el plano complejo ────────────────────────────
+// f(t) = e^(−a·t) → F(s) = 1/(s+a). z = min(|F(σ+iω)|, tope): la campana
+// con el polo recortado honestamente (sin inf en la malla). La curva real
+// (ω=0) y la sonda móvil viven sobre la superficie.
+
+/// Tope de z (el polo en s=−a diverge; se recorta, no se miente).
+pub const LAPLACE3D_ZMAX: f64 = 4.0;
+/// Rango σ (parte real de s).
+pub const LAPLACE3D_SIG_MIN: f64 = -3.0;
+/// Rango σ (parte real de s).
+pub const LAPLACE3D_SIG_MAX: f64 = 1.5;
+/// Rango ω (parte imaginaria de s).
+pub const LAPLACE3D_W_MAX: f64 = 4.0;
+/// Decaimiento `a` válido.
+pub const LAPLACE3D_A_MIN: f64 = 0.05;
+/// Decaimiento `a` válido.
+pub const LAPLACE3D_A_MAX: f64 = 5.0;
+
+/// Superficie |F(s)| de Laplace con sonda sobre el eje real.
+pub struct Laplace3D {
+    res: usize,
+    a: f64,
+}
+
+impl Laplace3D {
+    /// Constructor validado. Todo `Err` honesto.
+    pub fn try_new(res: usize, a: f64) -> SceneResult<Self> {
+        if !(SURF3D_MIN_RES..=SURF3D_MAX_RES).contains(&res) {
+            return Err(SceneError::MobjectInvalido {
+                donde: "Laplace3D",
+                detalle: format!("res {res} fuera de {SURF3D_MIN_RES}..={SURF3D_MAX_RES}"),
+            });
+        }
+        coef_en(a, LAPLACE3D_A_MIN, LAPLACE3D_A_MAX, "Laplace3D", "a")?;
+        Ok(Self { res, a })
+    }
+
+    /// Desde los params vivos (`amp` = decaimiento `a`).
+    pub fn desde_params(p: &Params3D) -> SceneResult<Self> {
+        Self::try_new(p.res()?, p.amp)
+    }
+
+    /// |F(σ+iω)| = 1/|σ+a+iω| para f(t) = e^(−a·t). Pura.
+    pub fn modulo(&self, sigma: f64, omega: f64) -> f64 {
+        let m = (self.a + sigma).hypot(omega);
+        if m <= 0.0 || !m.is_finite() {
+            return LAPLACE3D_ZMAX;
+        }
+        (1.0 / m).min(LAPLACE3D_ZMAX)
+    }
+
+    /// Malla de la superficie sobre σ×ω. `Err` honesto si degenera.
+    pub fn superficie(&self) -> SceneResult<Surface3D> {
+        let a = self.a;
+        Surface3D::try_new(
+            self.res,
+            self.res,
+            [LAPLACE3D_SIG_MIN, LAPLACE3D_SIG_MAX],
+            [-LAPLACE3D_W_MAX, LAPLACE3D_W_MAX],
+            |u, v| {
+                let m = (a + u).hypot(v);
+                let z = if m <= 0.0 || !m.is_finite() {
+                    LAPLACE3D_ZMAX
+                } else {
+                    (1.0 / m).min(LAPLACE3D_ZMAX)
+                };
+                [u, v, z]
+            },
+        )
+    }
+
+    /// Curva real F(σ) sobre ω=0, σ ∈ [0.05, 3.0]. Pura.
+    pub fn curva_real(&self) -> SceneResult<Curva3D> {
+        let mut puntos = Vec::with_capacity(32);
+        for k in 0..32 {
+            let s = 0.05 + 2.95 * f64::from(k) / 31.0;
+            let z = 1.0 / (s + self.a);
+            if !z.is_finite() {
+                return Err(SceneError::MobjectInvalido {
+                    donde: "Laplace3D",
+                    detalle: "curva real no finita".to_string(),
+                });
+            }
+            puntos.push([s, 0.0, z]);
+        }
+        Ok(Curva3D {
+            puntos,
+            t0: 0.0,
+            t1: 1.0,
+        })
+    }
+
+    /// Sonda sobre el eje real en `alpha` crudo 0..1. Pura.
+    pub fn sonda_en(&self, alpha: f64) -> [f64; 3] {
+        let e = smooth(clamp01(alpha));
+        let s = 0.05 + e * 2.95;
+        [s, 0.0, 1.0 / (s + self.a)]
     }
 }
 
@@ -1181,6 +1296,11 @@ pub fn muestra_frame(
                 t0: 0.0,
                 t1: 1.0,
             });
+        }
+        "sup-laplace-3d" => {
+            let esc = Laplace3D::desde_params(params)?;
+            superficies.push(esc.superficie()?);
+            curvas.push(esc.curva_real()?);
         }
         otro => {
             return Err(SceneError::EscenaInvalida {
@@ -1289,7 +1409,7 @@ mod tpl_3d_tests {
 
     #[test]
     fn template_ids_kebab_unicos_y_descriptos() {
-        assert_eq!(TEMPLATE_IDS.len(), 6);
+        assert_eq!(TEMPLATE_IDS.len(), 7);
         for (i, a) in TEMPLATE_IDS.iter().enumerate() {
             assert!(es_kebab(a), "no kebab: {a}");
             for b in &TEMPLATE_IDS[i + 1..] {
@@ -1484,7 +1604,36 @@ mod tpl_3d_tests {
     }
 
     #[test]
-    fn sampler_gira_y_morphnea_en_las_seis() {
+    fn laplace_3d_modulo_curva_y_sonda() {
+        let esc = debe(Laplace3D::try_new(16, 1.0));
+        // F(s) = 1/(s+1): en s=0 vale 1, en s=1 vale 1/2.
+        assert!((esc.modulo(0.0, 0.0) - 1.0).abs() < 1e-12);
+        assert!((esc.modulo(1.0, 0.0) - 0.5).abs() < 1e-12);
+        // El polo se recorta al tope, jamás inf.
+        assert_eq!(esc.modulo(-1.0, 0.0), LAPLACE3D_ZMAX);
+        // Malla finita y con las dimensiones pedidas.
+        let sup = debe(esc.superficie());
+        assert_eq!(sup.n_tris(), 2 * 16 * 16);
+        // Curva real sobre F(σ) exacta.
+        let curva = debe(esc.curva_real());
+        assert_eq!(curva.puntos.len(), 32);
+        for p in &curva.puntos {
+            assert!((p[2] - 1.0 / (p[0] + 1.0)).abs() < 1e-9);
+            assert_eq!(p[1], 0.0);
+        }
+        // La sonda se mueve con alpha (frame 0 != último).
+        let q0 = esc.sonda_en(0.0);
+        let q1 = esc.sonda_en(1.0);
+        assert!((q1[0] - q0[0]).abs() > 1.0, "la sonda barre el eje");
+        assert!((q0[2] - 1.0 / (q0[0] + 1.0)).abs() < 1e-9);
+        // Presupuestos.
+        assert!(Laplace3D::try_new(1, 1.0).is_err());
+        assert!(Laplace3D::try_new(16, 0.0).is_err());
+        assert!(Laplace3D::try_new(16, 100.0).is_err());
+    }
+
+    #[test]
+    fn sampler_gira_y_morphnea_en_las_siete() {
         for id in TEMPLATE_IDS {
             let p = params(id);
             let m0 = debe(muestra_frame(id, &p, 0, 48, 8000));
