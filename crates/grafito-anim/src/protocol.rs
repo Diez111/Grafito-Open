@@ -1341,6 +1341,14 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         return "pitagoras";
     }
     if c.contains("integral") || contiene_palabra(&c, "area") || contiene_palabra(&c, "área") {
+        // Impropia: criterio-p y divergencia propios (no área finita).
+        if c.contains("impropia") || c.contains("impropio") {
+            return "improper-integral";
+        }
+        // Doble: rebanadas y Fubini propios (no área 2D).
+        if c.contains("doble") || c.contains("dobles") {
+            return "double-integral";
+        }
         return "integral-area";
     }
     if c.contains("taylor")
@@ -1348,6 +1356,10 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         || (c.contains("serie") && (c.contains("potencia") || c.contains("aprox")))
         || c.contains("aproxima")
     {
+        // Resto/error/orden: aproximación con cota propia (no la serie base).
+        if c.contains("resto") || c.contains("error de aproxim") || c.contains("orden de") {
+            return "taylor-remainder";
+        }
         return "taylor-series";
     }
     // `subspace` / `fractal` tienen renderer nativo propio: van a su
@@ -1383,6 +1395,10 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         || c.contains("slope")
         || (c.contains("l\u{00ed}mite") && c.contains("cociente"))
     {
+        // Derivada parcial: plano tangente 3D propio (no recta 2D).
+        if c.contains("parcial") {
+            return "partial-derivatives";
+        }
         return "derivative-slope";
     }
     // Pedagógicas v3 (base compartida con `anim_native::detect_template_for_concept`,
@@ -1392,6 +1408,10 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         return "logistic-bifurcation";
     }
     if c.contains("gradiente") || c.contains("gradient") {
+        // Descenso: optimización sobre el paisaje (no campo estático).
+        if c.contains("descenso") {
+            return "gradient-descent";
+        }
         return "gradient-field";
     }
     if c.contains("mobius") || c.contains("m\u{00f6}bius") || c.contains("moebius") {
@@ -1413,6 +1433,9 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         || c.contains("exponencial")
     {
         return "euler";
+    }
+    if c.contains("epiciclo") {
+        return "edo-fourier-epiciclos";
     }
     if c.contains("fourier")
         || c.contains("armónico")
@@ -1449,13 +1472,261 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     } else if c.contains("seno") || c.contains("coseno") {
         return "taylor-series";
     }
+    // Formas adjetivadas que el branch anterior no caza ("seno" no está en
+    // "senoidal"): dibujan seno real vía taylor-series.
+    if c.contains("senoidal") || c.contains("sinusoidal") || c.contains("sinusoide") {
+        return "taylor-series";
+    }
+    if c.contains("campo vectorial") || c.contains("campo de vectores") {
+        // Campo 3D explícito: superficie propia (no combinaciones planas).
+        if c.contains("3d") || c.contains("tridimensional") {
+            return "sup-campo-vectorial";
+        }
+        // El plano va al campo 2D (dibuja un campo real, no combinaciones).
+        return "gradient-field";
+    }
+    if c.contains("vector") && !c.contains("conforme") && !c.contains("complej") && !c.contains("campo") {
+        // Sin token conforme/complejo: combinaciones lineales honestas
+        // (antes `universal` mudo; el caso conforme lo resolvió arriba).
+        return "vectores-combinacion-lineal";
+    }
+    // Ola 52+extra: rutas a las 55 nuevas (ES+EN). Van DESPUÉS de las 13
+    // históricas para no robarles pedidos; cada rama exige token explícito
+    // del dominio (regla R6d: jamás curva falsa). Orden: específico primero.
+    // — Álgebra lineal extra (antes que la genérica).
+    if (c.contains("inversa") && c.contains("matr"))
+        || c.contains("núcleo")
+        || c.contains("nucleo")
+        || (c.contains("kernel") && (c.contains("matr") || c.contains("lineal")))
+    {
+        return "matriz-inversa-nucleo";
+    }
+    if c.contains("no cuadrada") || c.contains("rectangular") {
+        return "matriz-no-cuadrada";
+    }
+    if c.contains("producto punto") || c.contains("dualidad") {
+        return "producto-punto-dualidad";
+    }
+    if c.contains("matriz")
+        || c.contains("matrices")
+        || c.contains("determinante")
+        || c.contains("eigen")
+        || c.contains("valores propios")
+        || c.contains("cambio de base")
+        || c.contains("producto cruz")
+    {
+        return "matriz-transformacion";
+    }
+    // — Análisis I.
+    if c.contains("riemann") {
+        return "riemann-sums";
+    }
+    if c.contains("regla de la cadena") || (c.contains("cadena") && c.contains("deriv")) {
+        return "chain-rule";
+    }
+    if c.contains("campo de direcciones")
+        || c.contains("campo de pendientes")
+        || c.contains("isoclina")
+    {
+        return "ode-slope-field";
+    }
+    // — Análisis II.
+    if c.contains("derivada parcial") || c.contains("derivadas parciales") {
+        return "partial-derivatives";
+    }
+    if c.contains("descenso") {
+        return "gradient-descent";
+    }
+    if c.contains("lagrange") || c.contains("multiplicadores") {
+        return "lagrange-multipliers";
+    }
+    if c.contains("integral doble") || c.contains("integrales dobles") {
+        return "double-integral";
+    }
+    if c.contains("stokes")
+        || c.contains("green")
+        || c.contains("divergencia")
+        || c.contains("rotacional")
+    {
+        return "green-stokes";
+    }
+    if c.contains("jacobiano") || c.contains("jacobiana") {
+        return "jacobian";
+    }
+    // — EDO / Laplace / Fourier aplicado.
+    if c.contains("laplace") {
+        // Laplace en 3D: superficie |F(s)| propia (no curva 2D).
+        if c.contains("3d") || c.contains("tridimensional") || c.contains("superficie") {
+            return "sup-laplace-3d";
+        }
+        return "edo-laplace";
+    }
+    if c.contains("convoluci") {
+        return "edo-convolucion";
+    }
+    if c.contains("calor") {
+        return "edo-calor-onda";
+    }
+    if contiene_palabra(&c, "onda") {
+        return "edo-calor-onda";
+    }
+    if c.contains("epiciclo") {
+        return "edo-fourier-epiciclos";
+    }
+    // — Probabilidad / datos / redes.
+    if c.contains("bayes") {
+        return "teorema-bayes";
+    }
+    if c.contains("límite central")
+        || c.contains("limite central")
+        || c.contains("teorema central")
+        || contiene_palabra(&c, "clt")
+    {
+        return "limite-central";
+    }
+    if c.contains("regresi") {
+        return "regresion-lineal";
+    }
+    if c.contains("pca") || c.contains("componentes principales") {
+        return "pca-rotacion";
+    }
+    if c.contains("perceptr") || c.contains("red neuronal") || c.contains("redes neuronales") {
+        return "perceptron-mlp";
+    }
+    if c.contains("backprop") || c.contains("retropropagaci") {
+        return "backprop-flujo";
+    }
+    if c.contains("gaussiana")
+        || c.contains("campana")
+        || c.contains("distribución normal")
+        || c.contains("distribucion normal")
+        || c.contains("histograma")
+    {
+        return "distribuciones";
+    }
+    // — Superficies 3D.
+    if c.contains("paraboloide") {
+        return "sup-paraboloide-tangente";
+    }
+    if c.contains("toro") || c.contains("toroide") {
+        return "sup-toro-rotante";
+    }
+    if c.contains("silla") {
+        return "sup-silla-descenso";
+    }
+    if c.contains("esfera") {
+        return "sup-interseccion";
+    }
+    if c.contains("3d") {
+        return "sup-paraboloide-tangente";
+    }
+    if (c.contains("rotaci") || c.contains("rotar") || c.contains("rbita"))
+        && !c.contains("rotacional")
+    {
+        return "sup-toro-rotante";
+    }
+    if c.contains("campo vectorial 3d")
+        || c.contains("campo 3d")
+        || c.contains("campo vectorial tridimensional")
+    {
+        return "sup-campo-vectorial";
+    }
+    if (c.contains("intersecci") && (c.contains("esfera") || c.contains("plano") || c.contains("superficie")))
+        || (c.contains("esfera") && c.contains("plano"))
+    {
+        return "sup-interseccion";
+    }
+    if (c.contains("onda") || c.contains("ola")) && c.contains("3d") {
+        return "sup-onda-3d";
+    }
+    if (c.contains("superficie") || c.contains("tridimensional")) && !c.contains("integral") {
+        return "sup-paraboloide-tangente";
+    }
+    // — 4D / politopos.
+    if c.contains("tesseract") || c.contains("teseracto") {
+        return "tesseract-xw";
+    }
+    if c.contains("hipercubo") {
+        return "hipercubo-corte";
+    }
+    if c.contains("24-cell")
+        || c.contains("24 celdas")
+        || (c.contains("celda") && c.contains("24"))
+        || c.contains("veinticuatro")
+    {
+        return "celda-24";
+    }
+    if c.contains("estereogr") {
+        return "estereografica";
+    }
+    if c.contains("simplex") || c.contains("símplice") {
+        return "simplex-nd";
+    }
+    if c.contains("4d") || c.contains("cuarta dimensi") {
+        return "tesseract-xw";
+    }
+    // — Grafos y redes.
+    if c.contains("moser") {
+        return "moser-spindle-coloreo";
+    }
+    if contiene_palabra(&c, "bfs") || c.contains("anchura") {
+        return "bfs-animado";
+    }
+    if c.contains("dijkstra")
+        || c.contains("camino mínimo")
+        || c.contains("camino minimo")
+        || c.contains("camino más corto")
+        || c.contains("camino mas corto")
+    {
+        return "camino-minimo";
+    }
+    if c.contains("coloreo") || c.contains("colorear") || c.contains("k-coloreo") {
+        return "moser-spindle-coloreo";
+    }
+    if c.contains("unit distance")
+        || c.contains("distancia unidad")
+        || c.contains("distancia unitaria")
+    {
+        return "unit-distance";
+    }
+    if c.contains("force-directed") || c.contains("fruchterman") || c.contains("fuerzas") {
+        return "force-directed";
+    }
+    // — Caos.
+    if c.contains("lorenz") || c.contains("atractor") {
+        return "chaos-lorenz";
+    }
+    if c.contains("caos") || c.contains("caótico") || c.contains("caotico") {
+        return "chaos-lorenz";
+    }
+    if c.contains("péndulo doble") || c.contains("pendulo doble") {
+        return "chaos-pendulo-doble";
+    }
     // Fallback honesto T2: pedido desconocido → `universal` (placeholder
     // neutro rotulado, jamás curva falsa). Antes era `derivative-slope`,
     // que dibujaba parábola+tangente fingiendo respuesta.
     "universal"
 }
 
-/// Registro canónico de plantillas (sync 65↔65↔65, ola de 52).
+/// Catálogo compacto de plantillas para que la IA elija por intención
+/// (punto único: el prompt SPEC lo incluye entero). Agrupado por dominio
+/// con una pista por id; `expr` del SPEC es la función/expresión principal
+/// o el concepto en palabras si no hay fórmula.
+pub fn catalogo_plantillas_para_ia() -> &'static str {
+    "cálculo: derivative-slope(tangente), integral-area(área), taylor-series(serie+centro+orden), riemann-sums, epsilon-delta, chain-rule, taylor-remainder, improper-integral, ode-slope-field; \
+     análisis2: partial-derivatives, gradient-descent, lagrange-multipliers, double-integral, green-stokes, jacobian; \
+     linalg: matriz-transformacion, determinante-area, eigenvectores, cambio-de-base, producto-cruz, vectores-combinacion-lineal, matriz-inversa-nucleo, matriz-no-cuadrada, producto-punto-dualidad; \
+     edo: edo-campo-direcciones, edo-convolucion, edo-laplace, edo-fourier-epiciclos, edo-calor-onda; \
+     datos: distribuciones, limite-central, teorema-bayes, regresion-lineal, pca-rotacion, perceptron-mlp, backprop-flujo, descenso-gradiente-3d; \
+     3d: sup-paraboloide-tangente, sup-toro-rotante, sup-campo-vectorial, sup-interseccion, sup-onda-3d, sup-silla-descenso, sup-laplace-3d; \
+     4d: tesseract-xw, celda-24, hipercubo-corte, estereografica, simplex-nd; \
+     grafos: moser-spindle-coloreo, bfs-animado, force-directed, unit-distance, camino-minimo; \
+     caos: chaos-lorenz, chaos-mandelbrot-zoom, chaos-julia-morph, chaos-bifurcacion-barrido, chaos-pendulo-doble; \
+     clásicas: pitagoras, euler, fourier, logistic-bifurcation, gradient-field, mobius-transform, subspace, fractal, conformal-map; \
+     fallback: universal (solo si nada matchea, jamás curva falsa)"
+}
+
+/// Registro canónico de plantillas (sync 69↔69↔69, ola de 52+extra+laplace3d).
 ///
 /// Única fuente del protocolo: las 13 históricas con renderer nativo propio
 /// más las 52 de la ola (9 módulos `tpl_*`). Orden: las 13 intactas primero;
@@ -1548,6 +1819,11 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "force-directed",
     "moser-spindle-coloreo",
     "unit-distance",
+    // Ola extra: EoLA 7-9 (`tpl_extra`, 3) + Laplace 3D (`tpl_3d`, 1).
+    "matriz-inversa-nucleo",
+    "matriz-no-cuadrada",
+    "producto-punto-dualidad",
+    "sup-laplace-3d",
 ];
 
 /// Sanitiza un template libre a uno conocido (R6d: devuelve `Result`).
@@ -1822,6 +2098,82 @@ mod universal_tests {
         }
     }
 
+    // ── Ola 52+extra: cada template nuevo tiene al menos un concepto que
+    // lo resuelve (si cae a `universal`, el dispatcher nativo nunca lo
+    // atendería por concepto y el registro mentiría).
+    #[test]
+    fn template_for_concept_alcanza_la_ola() {
+        for (concepto, esperada) in [
+            ("animación de laplace", "edo-laplace"),
+            ("animación 3d de laplace", "sup-laplace-3d"),
+            ("haceme una senoidal con un parametro", "taylor-series"),
+            ("matriz de transformación", "matriz-transformacion"),
+            ("matriz inversa y núcleo", "matriz-inversa-nucleo"),
+            ("matriz no cuadrada", "matriz-no-cuadrada"),
+            ("producto punto y dualidad", "producto-punto-dualidad"),
+            ("campo de vectores", "gradient-field"),
+            ("sumas de riemann", "riemann-sums"),
+            ("regla de la cadena", "chain-rule"),
+            ("resto de taylor", "taylor-remainder"),
+            ("integral impropia", "improper-integral"),
+            ("campo de direcciones", "ode-slope-field"),
+            ("derivadas parciales", "partial-derivatives"),
+            ("descenso de gradiente", "gradient-descent"),
+            ("multiplicadores de lagrange", "lagrange-multipliers"),
+            ("integral doble", "double-integral"),
+            ("teorema de stokes", "green-stokes"),
+            ("jacobiano", "jacobian"),
+            ("convolución", "edo-convolucion"),
+            ("ecuación del calor", "edo-calor-onda"),
+            ("onda viajera", "edo-calor-onda"),
+            ("epiciclos de fourier", "edo-fourier-epiciclos"),
+            ("teorema de bayes", "teorema-bayes"),
+            ("teorema central del límite", "limite-central"),
+            ("regresión lineal", "regresion-lineal"),
+            ("componentes principales pca", "pca-rotacion"),
+            ("red neuronal perceptrón", "perceptron-mlp"),
+            ("retropropagación", "backprop-flujo"),
+            ("distribución normal", "distribuciones"),
+            ("histograma", "distribuciones"),
+            ("paraboloide", "sup-paraboloide-tangente"),
+            ("toro de revolución", "sup-toro-rotante"),
+            ("silla de montar", "sup-silla-descenso"),
+            ("campo vectorial 3d", "sup-campo-vectorial"),
+            ("intersección de esfera y plano", "sup-interseccion"),
+            ("superficie tridimensional", "sup-paraboloide-tangente"),
+            ("tesseract rotando", "tesseract-xw"),
+            ("hipercubo", "hipercubo-corte"),
+            ("celda 24", "celda-24"),
+            ("proyección estereográfica", "estereografica"),
+            ("simplex", "simplex-nd"),
+            ("cuarta dimensión", "tesseract-xw"),
+            ("spindle de moser", "moser-spindle-coloreo"),
+            ("búsqueda en anchura", "bfs-animado"),
+            ("camino mínimo de dijkstra", "camino-minimo"),
+            ("coloreo de grafos", "moser-spindle-coloreo"),
+            ("unit distance", "unit-distance"),
+            ("force-directed", "force-directed"),
+            ("atractor de lorenz", "chaos-lorenz"),
+            ("caos determinista", "chaos-lorenz"),
+            ("péndulo doble", "chaos-pendulo-doble"),
+            ("esfera y plano", "sup-interseccion"),
+            ("superficie 3d", "sup-paraboloide-tangente"),
+            ("toro rotando", "sup-toro-rotante"),
+        ] {
+            assert_eq!(template_for_concept(concepto), esperada, "{concepto}");
+        }
+    }
+    #[test]
+    fn catalogo_cubre_las_69_canonicas() {
+        let catalogo = catalogo_plantillas_para_ia();
+        for id in CANONICAL_TEMPLATES {
+            assert!(
+                catalogo.contains(id),
+                "el catálogo para la IA debe nombrar {id}"
+            );
+        }
+    }
+
     // ── v3: params vivos + timeline + sync plantillas + webm ────────────
     #[test]
     fn scene_param_default_y_finito() {
@@ -2076,10 +2428,10 @@ mod universal_tests {
 
     #[test]
     fn canonical_templates_once_y_sanitize_roundtrip() {
-        // Sync 65↔65↔65: este registro es la fuente; anim_native y anim_ui
+        // Sync 69↔69↔69: este registro es la fuente; anim_native y anim_ui
         // se pinean iguales por test en grafito-app (mismo orden las dos
         // primeras, por conjunto la UI).
-        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 69);
         for t in CANONICAL_TEMPLATES {
             assert_eq!(
                 sanitize_template(t, "cualquier concepto").expect("canónica"),
@@ -2114,14 +2466,14 @@ mod universal_tests {
     fn native_templates_once_y_wire_v1_paridad() {
         // F0: jubilado el worker Python, la divergencia 11/6 ya no existe.
         // Paridad portada del viejo `TestParidad11_6` (Python, borrado):
-        // las 65 canónicas son las soportadas y el wire v1 hace roundtrip
+        // las 69 canónicas son las soportadas y el wire v1 hace roundtrip
         // para los 5 mensajes que el puente lee (hello/pong/progress/
         // render_result/error). Presupuestos pineados: canvas 64..=4096,
         // duration 0.1..=60 s (P0.1 long-form), line_cap 64 KiB (engine), mensaje 500 chars.
         use std::collections::BTreeSet;
-        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 69);
         let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
-        assert_eq!(canon.len(), 65, "canónicas sin duplicados");
+        assert_eq!(canon.len(), 69, "canónicas sin duplicados");
         // Las 5 ex-"solo Rust" hoy son nativas como el resto: sanitize las
         // pasa literales en lugar de degradarlas por concepto.
         for t in [
@@ -2140,7 +2492,7 @@ mod universal_tests {
                 "{t}"
             );
         }
-        // Ola 52: los 9 módulos nuevos están registrados acá (13+52=65).
+        // Ola 52+extra+laplace3d: los nuevos están registrados acá (13+52+3+1=69).
         // Cada `TEMPLATE_IDS` vive en su módulo; este test pinnea que el
         // registro canónico los cubre todos, sin duplicados ni colisiones
         // con las 13 históricas.
