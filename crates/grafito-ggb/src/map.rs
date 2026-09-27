@@ -13,13 +13,13 @@ fn fmt_num(v: f64) -> String {
     if !v.is_finite() {
         return "0".to_string();
     }
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
+    let mut s = format!("{v:.6}");
+    let recortado = s.trim_end_matches('0').trim_end_matches('.');
+    if recortado.is_empty() || recortado == "-0" {
+        return "0".to_string();
     }
+    s.truncate(recortado.len());
+    s
 }
 fn fmt_point(x: f64, y: f64) -> String {
     format!("({}, {})", fmt_num(x), fmt_num(y))
@@ -35,12 +35,19 @@ pub(crate) fn sanitize_etiqueta(raw: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
-    let mut out = String::new();
+    // Fast-path ASCII (etiquetas típicas `P12`, `s1`): evita la tabla unicode
+    // de `char::is_alphanumeric` por carácter. No-ASCII cae al chequeo unicode
+    // original, misma semántica exacta.
+    let mut out = String::with_capacity(t.len().min(64));
     for ch in t.chars() {
-        if ch.is_alphanumeric() || ch == '_' || ch == '\'' {
+        if ch.is_ascii() {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '\'' {
+                out.push(ch);
+            } else if ch == ' ' || ch == '-' {
+                out.push('_');
+            }
+        } else if ch.is_alphanumeric() {
             out.push(ch);
-        } else if ch == ' ' || ch == '-' {
-            out.push('_');
         }
         if out.len() >= 64 {
             break;
@@ -49,23 +56,50 @@ pub(crate) fn sanitize_etiqueta(raw: &str) -> String {
     out
 }
 
+/// `true` si `raw` ya es canónica (lo que `sanitize_etiqueta` devolvería
+/// idéntico): permite lookup prestado sin alloc en el hot path.
+fn es_canonica(t: &str) -> bool {
+    !t.is_empty()
+        && t.len() <= 64
+        && t.chars().all(|c| {
+            if c.is_ascii() {
+                c.is_ascii_alphanumeric() || c == '_' || c == '\''
+            } else {
+                c.is_alphanumeric()
+            }
+        })
+}
+
 /// Resuelve una referencia a punto del XML: etiqueta sanitizada o literal
 /// `(x, y)`. Nunca usa la cadena cruda como clave (VULN 5).
+/// Fast-path: la etiqueta típica ya es canónica → lookup prestado sin alloc.
 fn resuelve_punto(puntos: &BTreeMap<String, (f64, f64)>, raw: &str) -> Option<(f64, f64)> {
-    let clave = sanitize_etiqueta(raw);
-    if !clave.is_empty() {
-        if let Some(p) = puntos.get(&clave) {
+    let t = raw.trim();
+    if es_canonica(t) {
+        if let Some(p) = puntos.get(t) {
             return Some(*p);
+        }
+    } else {
+        let clave = sanitize_etiqueta(raw);
+        if !clave.is_empty() {
+            if let Some(p) = puntos.get(&clave) {
+                return Some(*p);
+            }
         }
     }
     parse_point_literal(raw)
 }
 
 /// Resuelve una referencia a recta/vector del XML por etiqueta sanitizada.
+/// Fast-path canónico sin alloc como en `resuelve_punto`.
 fn resuelve_linea(
     lineas: &BTreeMap<String, ((f64, f64), (f64, f64))>,
     raw: &str,
 ) -> Option<((f64, f64), (f64, f64))> {
+    let t = raw.trim();
+    if es_canonica(t) {
+        return lineas.get(t).copied();
+    }
     let clave = sanitize_etiqueta(raw);
     if clave.is_empty() {
         return None;
@@ -81,23 +115,27 @@ fn resuelve_linea(
 fn expr_arg_segura(arg: &str) -> bool {
     !arg.is_empty()
         && arg.chars().all(|c| {
-            c.is_alphanumeric()
-                || matches!(
-                    c,
-                    '_' | '\''
-                        | ' '
-                        | '\t'
-                        | '+'
-                        | '-'
-                        | '*'
-                        | '/'
-                        | '^'
-                        | '('
-                        | ')'
-                        | '.'
-                        | ','
-                        | '>'
-                )
+            if c.is_ascii() {
+                c.is_ascii_alphanumeric()
+                    || matches!(
+                        c,
+                        '_' | '\''
+                            | ' '
+                            | '\t'
+                            | '+'
+                            | '-'
+                            | '*'
+                            | '/'
+                            | '^'
+                            | '('
+                            | ')'
+                            | '.'
+                            | ','
+                            | '>'
+                    )
+            } else {
+                c.is_alphanumeric()
+            }
         })
 }
 fn is_3d(tipo: &str) -> bool {
@@ -501,11 +539,19 @@ fn col_from_label(label: &str) -> Option<usize> {
     Some(col - 1)
 }
 fn row_from_label(label: &str) -> Option<usize> {
-    let digits: String = label.chars().filter(|c| c.is_ascii_digit()).collect();
-    if digits.is_empty() {
+    // Sin alloc: parsea los dígitos en su lugar (antes `filter().collect()`).
+    let mut n: usize = 0;
+    let mut vistos = 0u32;
+    for ch in label.chars() {
+        if ch.is_ascii_digit() {
+            let d = (ch as u8 - b'0') as usize;
+            n = n.checked_mul(10)?.checked_add(d)?;
+            vistos += 1;
+        }
+    }
+    if vistos == 0 {
         return None;
     }
-    let n: usize = digits.parse().ok()?;
     if n == 0 {
         return None;
     }
@@ -586,97 +632,151 @@ pub(crate) fn parse_csv_like_to_xy(csv: &[u8]) -> Option<(Vec<f64>, Vec<f64>)> {
     if text.len() > 2_000_000 {
         return None;
     }
-    let commas = text.matches(',').count();
-    let tabs = text.matches('\t').count();
+    // Una sola pasada para ambos delimitadores (antes dos `matches().count()`).
+    let mut commas: usize = 0;
+    let mut tabs: usize = 0;
+    for &b in csv {
+        if b == b',' {
+            commas += 1;
+        } else if b == b'\t' {
+            tabs += 1;
+        }
+    }
     let delim = if tabs > commas { '\t' } else { ',' };
-    let mut rows: Vec<Vec<String>> = Vec::new();
+    // Streaming sin `Vec<Vec<String>>` intermedio: cada fila se valida y
+    // parsea al momento (misma semántica de `None` que antes). Fast-path sin
+    // allocs para filas sin comillas (el CSV numérico típico).
+    let mut xs: Vec<f64> = Vec::new();
+    let mut ys: Vec<f64> = Vec::new();
+    let mut n_filas: usize = 0;
+    let mut es_primera = true;
     for line in text.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        let mut cells: Vec<String> = Vec::new();
-        let mut cur = String::new();
-        let mut in_q = false;
-        let mut chars = line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if in_q {
-                if ch == '"' {
-                    if chars.peek() == Some(&'"') {
-                        cur.push('"');
-                        chars.next();
-                    } else {
-                        in_q = false;
+        if !line.as_bytes().contains(&b'"') {
+            let mut partes = line.split(delim);
+            let a = partes.next().unwrap_or("");
+            let b = partes.next()?;
+            if partes.next().is_some() {
+                return None;
+            }
+            let s0 = a.trim().trim_start_matches('\u{feff}');
+            let s1 = b.trim();
+            n_filas += 1;
+            if n_filas > MAX_DATA_TABLE_ROWS + 1 {
+                return None;
+            }
+            if es_primera {
+                es_primera = false;
+                match (s0.parse::<f64>().ok(), s1.parse::<f64>().ok()) {
+                    (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
+                        xs.push(x);
+                        ys.push(y);
                     }
-                } else {
-                    cur.push(ch);
+                    _ => {
+                        if s0.parse::<f64>().is_ok() || s1.parse::<f64>().is_ok() {
+                            return None;
+                        }
+                        if s0.is_empty() || s1.is_empty() {
+                            return None;
+                        }
+                    }
                 }
-            } else if ch == '"' {
-                if !cur.trim().is_empty() {
+            } else {
+                let x: f64 = s0.parse().ok()?;
+                let y: f64 = s1.parse().ok()?;
+                if !x.is_finite() || !y.is_finite() {
                     return None;
                 }
-                in_q = true;
-            } else if ch == delim {
-                cells.push(cur.trim().to_string());
-                cur.clear();
+                xs.push(x);
+                ys.push(y);
+                if xs.len() > MAX_DATA_TABLE_ROWS {
+                    return None;
+                }
+            }
+        } else {
+            let cells = parsear_fila_con_comillas(line, delim)?;
+            let s0 = cells[0].trim_start_matches('\u{feff}');
+            let s1 = cells[1].as_str();
+            n_filas += 1;
+            if n_filas > MAX_DATA_TABLE_ROWS + 1 {
+                return None;
+            }
+            if es_primera {
+                es_primera = false;
+                match (s0.parse::<f64>().ok(), s1.parse::<f64>().ok()) {
+                    (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
+                        xs.push(x);
+                        ys.push(y);
+                    }
+                    _ => {
+                        if s0.parse::<f64>().is_ok() || s1.parse::<f64>().is_ok() {
+                            return None;
+                        }
+                        if s0.is_empty() || s1.is_empty() {
+                            return None;
+                        }
+                    }
+                }
             } else {
-                cur.push(ch);
+                let x: f64 = s0.parse().ok()?;
+                let y: f64 = s1.parse().ok()?;
+                if !x.is_finite() || !y.is_finite() {
+                    return None;
+                }
+                xs.push(x);
+                ys.push(y);
+                if xs.len() > MAX_DATA_TABLE_ROWS {
+                    return None;
+                }
             }
-        }
-        if in_q {
-            return None;
-        }
-        cells.push(cur.trim().to_string());
-        if let Some(f) = cells.first_mut() {
-            *f = f.trim_start_matches('\u{feff}').to_string();
-        }
-        if cells.len() != 2 {
-            return None;
-        }
-        rows.push(cells);
-        if rows.len() > MAX_DATA_TABLE_ROWS + 1 {
-            return None;
-        }
-    }
-    if rows.is_empty() {
-        return None;
-    }
-    let first_vals = (
-        rows[0][0].parse::<f64>().ok(),
-        rows[0][1].parse::<f64>().ok(),
-    );
-    let (mut xs, mut ys): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
-    let start = match first_vals {
-        (Some(x), Some(y)) if x.is_finite() && y.is_finite() => {
-            xs.push(x);
-            ys.push(y);
-            1
-        }
-        _ => {
-            if rows[0][0].parse::<f64>().is_ok() || rows[0][1].parse::<f64>().is_ok() {
-                return None;
-            }
-            if rows[0][0].is_empty() || rows[0][1].is_empty() {
-                return None;
-            }
-            1
-        }
-    };
-    for row in rows.iter().skip(start) {
-        let x: f64 = row[0].parse().ok()?;
-        let y: f64 = row[1].parse().ok()?;
-        if !x.is_finite() || !y.is_finite() {
-            return None;
-        }
-        xs.push(x);
-        ys.push(y);
-        if xs.len() > MAX_DATA_TABLE_ROWS {
-            return None;
         }
     }
     if xs.len() < 2 {
         return None;
     }
     Some((xs, ys))
+}
+/// Fila con comillas: misma máquina de estados que antes (celdas ya
+/// recortadas, `first` sin BOM). `None` en los mismos casos.
+fn parsear_fila_con_comillas(line: &str, delim: char) -> Option<[String; 2]> {
+    let mut cells: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if in_q {
+            if ch == '"' {
+                if chars.peek() == Some(&'"') {
+                    cur.push('"');
+                    chars.next();
+                } else {
+                    in_q = false;
+                }
+            } else {
+                cur.push(ch);
+            }
+        } else if ch == '"' {
+            if !cur.trim().is_empty() {
+                return None;
+            }
+            in_q = true;
+        } else if ch == delim {
+            cells.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    if in_q {
+        return None;
+    }
+    cells.push(cur.trim().to_string());
+    if cells.len() != 2 {
+        return None;
+    }
+    Some([cells.remove(0), cells.remove(0)])
 }
 pub(crate) fn mapear(construccion: &Construccion) -> ImportReport {
     let mut reporte = ImportReport {

@@ -293,38 +293,79 @@ pub fn fold_spanish(lower: &str) -> String {
         .collect()
 }
 
+/// Dobla a minúsculas + pliega tildes en una sola pasada (una alloc).
+/// Byte a byte idéntico a `fold_spanish(&s.to_lowercase())`: `to_lowercase`
+/// es el mismo mapeo Unicode aplicado char por char antes del doblado.
+fn fold_spanish_lower(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            'ç' => 'c',
+            other => other,
+        })
+        .collect()
+}
+
 /// Búsqueda difusa "contiene en orden": el query coincide si aparece como
 /// subcadena (vía rápida) o como subsecuencia en orden dentro del objetivo.
 ///
 /// Insensible a mayúsculas y a tildes; ignora espacios en el pase difuso
 /// para que "darkmode" encuentre "dark mode" y viceversa.
 pub fn fuzzy_match(query: &str, target: &str) -> bool {
-    let query = fold_spanish(&query.to_lowercase());
-    let target = fold_spanish(&target.to_lowercase());
-    let query = query.trim();
+    fuzzy_match_folded(&fold_spanish(&query.to_lowercase()), target)
+}
+
+/// Núcleo de [`fuzzy_match`] con el query ya normalizado
+/// (`fold_spanish` + minúsculas + trim pendiente).
+///
+/// Separa el costo por query (una vez) del costo por objetivo (una vez por
+/// comando y campo): el filtro de la paleta evalúa ~600 comandos × 5 campos
+/// por keystroke, así que plegar el query en cada llamada multiplicaba las
+/// allocs por ~3000. Además el pase difuso no aloca: recorre `chars` sin
+/// compactar a `Vec` (mismo resultado que la versión con `Vec<char>`).
+fn fuzzy_match_folded(folded_query: &str, target: &str) -> bool {
+    let query = folded_query.trim();
     if query.is_empty() {
         return true;
     }
-    if target.contains(query) {
+    fuzzy_match_both_folded(query, &fold_spanish_lower(target))
+}
+
+/// [`fuzzy_match_folded`] con ambos lados ya normalizados. El filtro de la
+/// paleta pliega los campos una vez por comando (no una por token).
+fn fuzzy_match_both_folded(query: &str, folded_target: &str) -> bool {
+    if query.is_empty() {
         return true;
     }
-    let compact_target: Vec<char> = target.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut pos = 0;
-    for qc in query.chars().filter(|c| !c.is_whitespace()) {
-        let mut found = false;
-        while pos < compact_target.len() {
-            let tc = compact_target[pos];
-            pos += 1;
-            if tc == qc {
-                found = true;
-                break;
+    if folded_target.contains(query) {
+        return true;
+    }
+    // Subsecuencia en orden ignorando blancos, sin `Vec` intermedio: los
+    // blancos del objetivo se saltan al vuelo y los del query no consumen
+    // objetivo (idéntico a compactar ambos antes de comparar).
+    let mut remaining = query.chars().filter(|c| !c.is_whitespace());
+    let mut want = remaining.next();
+    if want.is_none() {
+        return true;
+    }
+    for tc in folded_target.chars() {
+        if tc.is_whitespace() {
+            continue;
+        }
+        if Some(tc) == want {
+            want = remaining.next();
+            if want.is_none() {
+                return true;
             }
         }
-        if !found {
-            return false;
-        }
     }
-    true
+    false
 }
 
 pub fn all_commands() -> Vec<PaletteCommand> {
@@ -384,18 +425,20 @@ impl CustomToolPaletteEntry {
     /// palabra debe aparecer como subcadena o subsecuencia en orden en algún
     /// campo, sin tildes)?
     pub fn matches_query(&self, query: &str) -> bool {
-        let query = query.trim().to_lowercase();
-        if query.is_empty() {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
             return true;
         }
-        query.split_whitespace().all(|token| {
-            [
-                self.name.as_str(),
-                self.detail.as_str(),
-                self.keywords.as_str(),
-            ]
-            .iter()
-            .any(|haystack| fuzzy_match(token, haystack))
+        let tokens: Vec<String> = trimmed.split_whitespace().map(fold_spanish_lower).collect();
+        let folded = [
+            fold_spanish_lower(self.name.as_str()),
+            fold_spanish_lower(self.detail.as_str()),
+            fold_spanish_lower(self.keywords.as_str()),
+        ];
+        tokens.iter().all(|token| {
+            folded
+                .iter()
+                .any(|haystack| fuzzy_match_both_folded(token, haystack))
         })
     }
 }
@@ -411,9 +454,18 @@ pub fn custom_tool_entries(
         .map(|tool| {
             let detail = store.describe(&tool.name).unwrap_or_default();
             let template = tool.steps.join("\n");
-            let mut keywords = tool.name.clone();
+            // Nombre + pasos separados por un blanco, byte a byte igual que
+            // `name + " " + steps.join(" ")` pero sin el `String` temporal
+            // del `join(" ")` intermedio (la app lo alimenta cada frame).
+            let mut keywords = String::with_capacity(tool.name.len() + 1 + template.len());
+            keywords.push_str(&tool.name);
             keywords.push(' ');
-            keywords.push_str(&tool.steps.join(" "));
+            for (i, step) in tool.steps.iter().enumerate() {
+                if i > 0 {
+                    keywords.push(' ');
+                }
+                keywords.push_str(step);
+            }
             CustomToolPaletteEntry {
                 name: tool.name.clone(),
                 detail,
@@ -486,6 +538,12 @@ impl MruPalette {
         self.entries.iter().cloned().collect()
     }
 
+    /// ¿Está `key` entre los recientes? Vía rápida sin clonar la lista (el
+    /// draw la consulta por comando y por frame).
+    pub fn contains(&self, key: &str) -> bool {
+        self.entries.iter().any(|item| item == key)
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
     }
@@ -548,23 +606,27 @@ impl CommandPaletteState {
     /// `syntax_hint`, ayuda y alias. Cada palabra del query debe coincidir
     /// (subcadena o difusa en orden) en al menos un campo.
     fn filter_in(all: &[PaletteCommand], search: &str) -> Vec<PaletteCommand> {
-        let query = search.trim().to_lowercase();
-        if query.is_empty() {
+        let trimmed = search.trim();
+        if trimmed.is_empty() {
             return all.to_vec();
         }
+        // Query plegado una vez y campos plegados una vez por comando (no
+        // una por token): multi-token antes repetía los 5 `fold` por token.
+        let tokens: Vec<String> = trimmed.split_whitespace().map(fold_spanish_lower).collect();
         all.iter()
             .copied()
             .filter(|cmd| {
-                query.split_whitespace().all(|token| {
-                    [
-                        cmd.name,
-                        cmd.category,
-                        cmd.syntax_hint,
-                        cmd.help,
-                        cmd.keywords,
-                    ]
-                    .iter()
-                    .any(|haystack| fuzzy_match(token, haystack))
+                let folded = [
+                    fold_spanish_lower(cmd.name),
+                    fold_spanish_lower(cmd.category),
+                    fold_spanish_lower(cmd.syntax_hint),
+                    fold_spanish_lower(cmd.help),
+                    fold_spanish_lower(cmd.keywords),
+                ];
+                tokens.iter().all(|token| {
+                    folded
+                        .iter()
+                        .any(|haystack| fuzzy_match_both_folded(token, haystack))
                 })
             })
             .collect()
@@ -653,13 +715,14 @@ impl CommandPaletteState {
             self.selected_index = 0;
         }
 
-        let total = all_commands_localized(locale).len();
-        let filtered = self.filtered_commands_localized(locale);
+        let all = all_commands_localized(locale);
+        let total = all.len();
+        let filtered = Self::filter_in(&all, &self.search);
         // Sin búsqueda, los recientes suben primero (sin duplicados).
         let display: Vec<PaletteCommand> = if self.search.trim().is_empty() {
             self.mru.apply_order(&filtered)
         } else {
-            filtered.clone()
+            filtered
         };
         self.clamp_to(display.len());
 
@@ -690,11 +753,11 @@ impl CommandPaletteState {
         }
         let searching = !self.search.trim().is_empty();
         // Filas recientes: cabecera del MRU que abre la lista sin búsqueda.
-        let mru_keys = self.mru.recent();
+        // `contains` evita clonar las 8 claves a un `Vec` por frame.
         let mut recent_count = 0;
         if !searching {
             for cmd in &display {
-                if mru_keys.iter().any(|key| key == cmd.selection_key) {
+                if self.mru.contains(cmd.selection_key) {
                     recent_count += 1;
                 } else {
                     break;

@@ -13,6 +13,8 @@
 
 use grafito_agent::{ToolCall, ToolDispatcher};
 use serde_json::{json, Value};
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 /// Tools del asistente que el MCP NO proxea (las sirve él con versión propia
 /// o las excluye a propósito).
@@ -30,27 +32,45 @@ fn is_excluded(name: &str) -> bool {
 /// Definiciones MCP de las tools proxedas (3 base + 8 pedag + 24 math + 2 harness1;
 /// el harness-2 viejo y `web_search` los sirve el MCP o se excluyen).
 /// El conteo exacto lo verifica el test de forma dinámica.
+/// Se construyen una sola vez (los esquemas del asistente son estáticos) y se
+/// clonan por llamada: `tools/list` evita reconstruir ~40 JSON Schemas.
 pub fn proxied_tool_defs() -> Vec<Value> {
-    grafito_assistant::agent::all_safe_tool_schemas()
-        .iter()
-        .filter(|s| !is_excluded(&s.name))
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "description": s.description,
-                "inputSchema": s.parameters,
-                "annotations": {"readOnlyHint": true, "destructiveHint": false},
-            })
-        })
-        .collect()
+    proxied_defs_cached().clone()
 }
 
-/// ¿`name` es una tool proxeda?
-pub fn is_proxied(name: &str) -> bool {
-    !is_excluded(name)
-        && grafito_assistant::agent::all_safe_tool_schemas()
+fn proxied_defs_cached() -> &'static Vec<Value> {
+    static DEFS: OnceLock<Vec<Value>> = OnceLock::new();
+    DEFS.get_or_init(|| {
+        grafito_assistant::agent::all_safe_tool_schemas()
             .iter()
-            .any(|s| s.name == name)
+            .filter(|s| !is_excluded(&s.name))
+            .map(|s| {
+                json!({
+                    "name": s.name,
+                    "description": s.description,
+                    "inputSchema": s.parameters,
+                    "annotations": {"readOnlyHint": true, "destructiveHint": false},
+                })
+            })
+            .collect()
+    })
+}
+
+/// ¿`name` es una tool proxeda? (membresía sobre un conjunto cacheado: evita
+/// reconstruir todos los esquemas en cada `tools/call`.)
+pub fn is_proxied(name: &str) -> bool {
+    !is_excluded(name) && proxied_names_cached().contains(name)
+}
+
+fn proxied_names_cached() -> &'static HashSet<String> {
+    static NAMES: OnceLock<HashSet<String>> = OnceLock::new();
+    NAMES.get_or_init(|| {
+        grafito_assistant::agent::all_safe_tool_schemas()
+            .iter()
+            .filter(|s| !is_excluded(&s.name))
+            .map(|s| s.name.clone())
+            .collect()
+    })
 }
 
 /// Despacha una tool proxeda por el dispatcher del asistente.
@@ -93,27 +113,27 @@ pub const MAX_EXEC_STEPS: usize = 32;
 pub const MAX_STEP_CHARS: usize = 2000;
 
 /// Comandos con I/O de archivos/medios: se rechazan con guía hacia la app.
-/// Comparación por cabeza del comando en minúsculas.
-fn blocked_head(head: &str) -> bool {
-    matches!(
-        head,
-        "setimage"
-            | "toolimage"
-            | "playsound"
-            | "exportimage"
-            | "startrecord"
-            | "save"
-            | "export"
-            | "import"
-    )
-}
+/// Comparación ASCII sin alloc (`eq_ignore_ascii_case` equivale al
+/// `to_lowercase` anterior para esta lista: ningún literal tiene pliegues
+/// Unicode que colisionen).
+const BLOCKED_HEADS: [&str; 8] = [
+    "setimage",
+    "toolimage",
+    "playsound",
+    "exportimage",
+    "startrecord",
+    "save",
+    "export",
+    "import",
+];
 
-/// Cabeza del comando: hasta `[`, `(`, `=` o espacio (para el blocklist).
-fn command_head(text: &str) -> String {
-    text.chars()
-        .take_while(|c| !matches!(c, '[' | '(' | '=' | ' ' | '\t'))
-        .collect::<String>()
-        .to_lowercase()
+/// ¿El comando toca archivos/medios? (cabeza hasta `[`, `(`, `=` o espacio.)
+fn is_blocked_command(texto: &str) -> bool {
+    let end = texto
+        .find(['[', '(', '=', ' ', '\t'])
+        .unwrap_or(texto.len());
+    let head = &texto[..end];
+    BLOCKED_HEADS.iter().any(|b| head.eq_ignore_ascii_case(b))
 }
 
 /// Valida un paso: una línea, ≤2000 chars, sin NUL, sin I/O.
@@ -125,13 +145,16 @@ fn validate_step(raw: &str) -> Result<String, String> {
     if texto.contains('\n') || texto.contains('\r') || texto.contains('\0') {
         return Err("execute_command: cada paso debe ser una sola línea sin NUL".into());
     }
-    if texto.chars().count() > MAX_STEP_CHARS {
+    if texto.len() > MAX_STEP_CHARS && texto.chars().count() > MAX_STEP_CHARS {
         return Err(format!(
             "execute_command: paso excede {MAX_STEP_CHARS} caracteres"
         ));
     }
-    let head = command_head(texto);
-    if blocked_head(&head) {
+    if is_blocked_command(texto) {
+        let end = texto
+            .find(['[', '(', '=', ' ', '\t'])
+            .unwrap_or(texto.len());
+        let head = texto[..end].to_lowercase();
         return Err(format!(
             "execute_command: '{head}' toca archivos/medios y solo corre en la app (usá Grafito UI); el MCP ejecuta los 650 comandos de cómputo y geometría en memoria"
         ));
@@ -140,6 +163,10 @@ fn validate_step(raw: &str) -> Result<String, String> {
 }
 
 fn cap_chars(text: &str, max: usize) -> String {
+    // Vía rápida: bytes ≤ max ⇒ chars ≤ max (sin decodificar UTF-8).
+    if text.len() <= max {
+        return text.to_string();
+    }
     if text.chars().count() <= max {
         text.to_string()
     } else {

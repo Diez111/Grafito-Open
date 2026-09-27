@@ -2,7 +2,7 @@
 
 use crate::manifest::*;
 use crate::validate::ValidationContext;
-use crate::validate::{validate_instruction_path, validate_manifest};
+use crate::validate::{validate_instruction_path_with_root, validate_manifest};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -77,15 +77,20 @@ impl PluginRegistry {
                     continue;
                 }
             };
-            // Sin dedup para ids vacíos o manifiestos que no parsean: cada
-            // plugin roto queda visible con su error en vez de colapsar en
-            // un único `""`. Solo ids válidos no vacíos deduplican.
-            if let Some(id) = manifest_id_of(&raw) {
-                if !id.is_empty() && !seen_ids.insert(id) {
+            // PERF: un SOLO `parse_manifest` por candidato. Antes se parseaba
+            // dos veces (`manifest_id_of` para la dedup + `load_plugin` para
+            // la carga): el parseo TOML domina el costo (~10 µs/manifiesto
+            // medido) y la validación es ~0.2 µs, así que esto recorta ~50%
+            // del costo CPU del escaneo. Semántica idéntica: solo ids válidos
+            // no vacíos deduplican; lo roto queda visible con su error.
+            let parsed = parse_manifest(&raw);
+            if let Ok(manifest) = &parsed {
+                let id = &manifest.plugin.id;
+                if !id.is_empty() && !seen_ids.insert(id.clone()) {
                     continue;
                 }
             }
-            plugins.push(load_plugin(&path, &raw, ctx));
+            plugins.push(load_plugin(&path, &raw, parsed, ctx));
         }
         Self { plugins }
     }
@@ -138,8 +143,15 @@ impl PluginRegistry {
             };
             for file in &section.files {
                 // Unifica lógica con `validate_instruction_path` (elimina duplicado inline).
-                // `validate_instruction_path` es fail-closed: canonicalize + starts_with.
-                let canonical = match validate_instruction_path(&plugin.dir, file) {
+                // PERF: la raíz ya se canonicalizó arriba una vez por plugin;
+                // se reutiliza en vez de re-canonicalizar por archivo.
+                // `validate_instruction_path_with_root` es fail-closed:
+                // canonicalize + starts_with.
+                let canonical = match validate_instruction_path_with_root(
+                    &plugin.dir,
+                    file,
+                    &canonical_root,
+                ) {
                     Ok(p) => {
                         // Defensa en profundidad: verifica de nuevo contra canonical_root
                         // por si plugin_dir cambió entre llamadas.
@@ -480,17 +492,17 @@ fn unreadable_plugin(path: &Path, error: String) -> LoadedPlugin {
     }
 }
 
-/// Id del manifiesto ya leído (para deduplicar sin releer el archivo).
-fn manifest_id_of(raw: &str) -> Option<String> {
-    parse_manifest(raw).ok().map(|manifest| manifest.plugin.id)
-}
-
-fn load_plugin(path: &Path, raw: &str, ctx: &ValidationContext) -> LoadedPlugin {
+fn load_plugin(
+    path: &Path,
+    raw: &str,
+    parsed: Result<PluginManifest, String>,
+    ctx: &ValidationContext,
+) -> LoadedPlugin {
     let dir = path
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let manifest = match parse_manifest(raw) {
+    let manifest = match parsed {
         Ok(manifest) => manifest,
         Err(error) => {
             return LoadedPlugin {

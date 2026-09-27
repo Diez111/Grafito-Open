@@ -217,10 +217,31 @@ impl LabEntryCompat {
     }
 }
 
-/// Busca una entrada por `run_id` (barrido lineal, el ledger es chico).
+/// Busca una entrada por `run_id` con salida temprana: recorre el archivo
+/// línea por línea y vuelve en el primer match (mismo resultado que barrer
+/// todo, sin parsear ni alocar el resto).
 pub fn find_run(run_id: &str) -> Option<LabEntry> {
-    let (all, _) = read_all();
-    all.into_iter().find(|e| e.run_id == run_id)
+    use std::io::BufRead;
+    let path = ledger_path();
+    let file = std::fs::File::open(&path).ok()?;
+    let reader = std::io::BufReader::new(file);
+    for line in reader.lines() {
+        let line = line.ok()?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<LabEntryCompat>(line) {
+            Ok(c) => {
+                let entry = c.into_entry();
+                if entry.run_id == run_id {
+                    return Some(entry);
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    None
 }
 
 /// Guarda un CNF por hash (valida el hash, crea el dir).

@@ -38,7 +38,7 @@ impl JSpaceLedger {
 
     /// Valida tamaños y acota cada campo a sus presupuestos.
     pub fn validate(&self) -> Result<(), String> {
-        if self.goal.chars().count() > MAX_LEDGER_GOAL_CHARS {
+        if chars_exceed(&self.goal, MAX_LEDGER_GOAL_CHARS) {
             return Err("j-space ledger goal exceeds the character budget".into());
         }
         for (label, items, max) in [
@@ -50,12 +50,12 @@ impl JSpaceLedger {
                 return Err(format!("j-space ledger {label} exceeds the item budget"));
             }
             for item in items {
-                if item.chars().count() > MAX_LEDGER_ITEM_CHARS {
+                if chars_exceed(item, MAX_LEDGER_ITEM_CHARS) {
                     return Err(format!("j-space ledger {label} item exceeds its budget"));
                 }
             }
         }
-        if self.next.chars().count() > MAX_LEDGER_ITEM_CHARS {
+        if chars_exceed(&self.next, MAX_LEDGER_ITEM_CHARS) {
             return Err("j-space ledger next exceeds its budget".into());
         }
         Ok(())
@@ -65,7 +65,8 @@ impl JSpaceLedger {
     /// (lo que paga el prompt), cortando en frontera de char y con `…` final.
     pub fn render_bounded(&self, max_bytes: usize) -> String {
         let max_bytes = max_bytes.min(MAX_LEDGER_RENDER_BYTES);
-        let mut lines = Vec::new();
+        let mut lines =
+            Vec::with_capacity(self.core.len() + self.verified.len() + self.open.len() + 2);
         if !self.goal.trim().is_empty() {
             lines.push(format!("Goal: {}", self.goal.trim()));
         }
@@ -159,14 +160,37 @@ impl JSpaceLedger {
     }
 }
 
+/// Fast-path de presupuesto en chars: `len <= max` ⇒ no excede.
+fn chars_exceed(text: &str, max_chars: usize) -> bool {
+    if text.len() <= max_chars {
+        return false;
+    }
+    if text.len() > max_chars.saturating_mul(4) {
+        return true;
+    }
+    text.chars().count() > max_chars
+}
+
 fn truncate_chars(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+    if text.len() <= max_chars {
         return text.to_string();
     }
-    text.chars()
-        .take(max_chars.saturating_sub(1))
-        .collect::<String>()
-        + "…"
+    // Una sola pasada hasta `max_chars+1`: si hay más, recorta a `max-1+…`.
+    let mut chars = text.chars();
+    let mut buf = String::with_capacity(max_chars);
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(c) => buf.push(c),
+            None => return text.to_string(),
+        }
+    }
+    if chars.next().is_some() {
+        buf.pop();
+        buf.push('…');
+        buf
+    } else {
+        text.to_string()
+    }
 }
 
 /// Trunca a `max_bytes` BYTES reales (lo que paga el prompt), cortando en la

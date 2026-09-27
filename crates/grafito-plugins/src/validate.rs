@@ -164,12 +164,26 @@ pub fn validate_instruction_path(
         log::warn!("plugin dir canonicalize failed: {e}");
         format!("plugin dir canonicalize failed: {e}")
     })?;
+    validate_instruction_path_with_root(plugin_dir, file, &canonical_root)
+}
+
+/// Variante que reutiliza un `canonical_root` ya resuelto.
+///
+/// PERF: `instructions_bounded` resuelve la raíz una vez por plugin y la
+/// pasa por acá para cada archivo, en vez de re-canonicalizar el directorio
+/// en cada `validate_instruction_path` (un syscall menos por archivo).
+/// Semántica idéntica al fail-closed de arriba.
+pub(crate) fn validate_instruction_path_with_root(
+    plugin_dir: &std::path::Path,
+    file: &str,
+    canonical_root: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     let candidate = plugin_dir.join(file);
     let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
         log::warn!("instruction file '{}' canonicalize failed: {e}", file);
         format!("instruction file '{file}' canonicalize failed: {e}")
     })?;
-    if !canonical.starts_with(&canonical_root) {
+    if !canonical.starts_with(canonical_root) {
         log::warn!(
             "instruction file '{}' escapes plugin directory (path traversal)",
             file

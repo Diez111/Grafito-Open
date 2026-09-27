@@ -71,6 +71,22 @@ impl std::error::Error for SchedulerError {}
 /// `EF' = EF + (0.1 - (5-q)*(0.08+(5-q)*0.02))`. Por ahora se mantiene
 /// `(2 - mastery)` por compatibilidad y por los tests existentes
 /// (`next_interval_mastery_modulates`, `scheduler_interval_grows_with_box_level`).
+/// Base precomputada `DAY_SECS * 2^(nivel-1)` por caja 1..=8.
+///
+/// Evita `2_f64.powi` por llamada (hot en `record_outcome`/`review_schedules`):
+/// potencias de dos exactas en `f64`, bit a bit idénticas a `base * pow`.
+/// `INTERVAL_BASE[n]` = `86_400 * 2^n` para `n = 0..=7`.
+const INTERVAL_BASE_SECS: [f64; 8] = [
+    86_400.0,
+    172_800.0,
+    345_600.0,
+    691_200.0,
+    1_382_400.0,
+    2_764_800.0,
+    5_529_600.0,
+    11_059_200.0,
+];
+
 pub fn next_interval(box_level: u8, mastery: f32) -> u64 {
     let level = box_level.clamp(1, MAX_BOX_LEVEL);
     let mastery_clamped = if mastery.is_finite() {
@@ -78,12 +94,11 @@ pub fn next_interval(box_level: u8, mastery: f32) -> u64 {
     } else {
         0.5
     };
-    let base: f64 = DAY_SECS as f64;
-    let pow = 2_f64.powi(i32::from(level) - 1);
+    let base_pow = INTERVAL_BASE_SECS[usize::from(level) - 1];
     let factor = 2.0 - f64::from(mastery_clamped);
     // factor en [1.0, 2.0]; mastery alto => intervalo un poco más corto (ver nota arriba).
     // Saturar a u64 y evitar 0.
-    let interval = base * pow * factor;
+    let interval = base_pow * factor;
     let secs = interval.round() as u64;
     secs.max(1)
 }

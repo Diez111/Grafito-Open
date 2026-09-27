@@ -135,21 +135,28 @@ fn is_word_char(c: char) -> bool {
 }
 
 fn contains_word(hay: &str, needle: &str) -> bool {
-    let h: Vec<char> = hay.chars().collect();
-    let n: Vec<char> = needle.chars().collect();
-    if n.is_empty() || h.len() < n.len() {
+    if needle.is_empty() || hay.len() < needle.len() {
         return false;
     }
-    for i in 0..=h.len() - n.len() {
-        if h[i..i + n.len()] == n[..] {
-            let before_ok = i
-                .checked_sub(1)
-                .and_then(|b| h.get(b))
-                .is_some_and(|c| is_word_char(*c));
-            let after_ok = h.get(i + n.len()).is_some_and(|c| is_word_char(*c));
-            if !before_ok && !after_ok {
-                return true;
-            }
+    // `str::find` (memchr) en vez de colectar `Vec<char>`: sin allocs.
+    // Los bordes se chequean decodificando solo los chars adyacentes, con la
+    // misma `is_word_char` de antes (idéntico veredicto, incl. Unicode).
+    let nlen = needle.len();
+    let mut from = 0usize;
+    while from + nlen <= hay.len() {
+        let Some(rel) = hay[from..].find(needle) else {
+            return false;
+        };
+        let i = from + rel;
+        // `find` devuelve bordes de char; `i + nlen` también lo es.
+        let before_ok = hay[..i].chars().next_back().is_some_and(is_word_char);
+        let after_ok = hay[i + nlen..].chars().next().is_some_and(is_word_char);
+        if !before_ok && !after_ok {
+            return true;
+        }
+        from = i + 1;
+        while !hay.is_char_boundary(from) {
+            from += 1;
         }
     }
     false

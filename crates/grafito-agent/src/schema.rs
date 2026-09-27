@@ -46,16 +46,16 @@ impl ToolSchema {
         self
     }
 
-    /// Valida el schema acotando campos y profundidad antes de serializarlo.
+    /// Valida el schema acotando campos y presupuesto antes de serializarlo.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty()
-            || self.name.chars().count() > MAX_TOOL_NAME_CHARS
+            || str_exceeds_chars(&self.name, MAX_TOOL_NAME_CHARS)
             || self.name.chars().any(|character| character.is_control())
         {
             return Err("assistant tool name is invalid".into());
         }
         if self.description.is_empty()
-            || self.description.chars().count() > MAX_TOOL_DESCRIPTION_CHARS
+            || str_exceeds_chars(&self.description, MAX_TOOL_DESCRIPTION_CHARS)
         {
             return Err("assistant tool description is invalid".into());
         }
@@ -77,6 +77,21 @@ impl ToolSchema {
             }
         }))
     }
+}
+
+/// Chequeo de presupuesto en chars sin iterar el caso común.
+///
+/// `len <= max` ⇒ `chars <= max` (cada char ocupa ≥1 byte): sin conteo.
+/// `len > max*4` ⇒ `chars > max` (cada char ocupa ≤4 bytes en UTF-8):
+/// rechazo sin conteo. Solo el rango ambiguo cuenta chars.
+fn str_exceeds_chars(text: &str, max_chars: usize) -> bool {
+    if text.len() <= max_chars {
+        return false;
+    }
+    if text.len() > max_chars.saturating_mul(4) {
+        return true;
+    }
+    text.chars().count() > max_chars
 }
 
 fn validate_schema_depth(schema: &Value, depth: usize) -> Result<(), String> {
@@ -139,22 +154,39 @@ pub struct ToolResult {
 impl ToolResult {
     /// Construye un resultado para el modelo, truncado al presupuesto.
     pub fn text(call_id: impl Into<String>, ok: bool, content: impl Into<String>) -> Self {
-        let content = content.into();
-        let content = if content.chars().count() > MAX_TOOL_RESULT_CHARS {
-            let mut clipped = content
-                .chars()
-                .take(MAX_TOOL_RESULT_CHARS.saturating_sub(1))
-                .collect::<String>();
-            clipped.push('…');
-            clipped
-        } else {
-            content
-        };
+        let content_string = content.into();
+        let content = truncate_to_budget(content_string, MAX_TOOL_RESULT_CHARS);
         Self {
             call_id: call_id.into(),
             ok,
             content,
         }
+    }
+}
+
+/// Trunca a `max_chars` con `…` final en una sola pasada.
+///
+/// Fast-path: `len <= max` ⇒ sin truncar (bytes ≥ chars). Si no, consume
+/// como mucho `max+1` chars: evita recorrer strings largos enteros dos veces
+/// (`count` + `take`) como hacía la versión anterior.
+fn truncate_to_budget(text: String, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text;
+    }
+    let mut chars = text.chars();
+    let mut buf = String::with_capacity(max_chars);
+    for _ in 0..max_chars {
+        match chars.next() {
+            Some(c) => buf.push(c),
+            None => return text,
+        }
+    }
+    if chars.next().is_some() {
+        buf.pop();
+        buf.push('…');
+        buf
+    } else {
+        text
     }
 }
 
@@ -190,14 +222,14 @@ pub fn parse_tool_calls(message: &Value) -> Result<Vec<ToolCall>, String> {
             .unwrap_or_default()
             .trim()
             .to_owned();
-        if name.is_empty() || name.chars().count() > MAX_TOOL_NAME_CHARS {
+        if name.is_empty() || str_exceeds_chars(&name, MAX_TOOL_NAME_CHARS) {
             return Err(format!("assistant tool call {index} has an invalid name"));
         }
         let raw_arguments = function
             .get("arguments")
             .and_then(Value::as_str)
             .unwrap_or("{}");
-        if raw_arguments.chars().count() > MAX_TOOL_RESULT_CHARS {
+        if str_exceeds_chars(raw_arguments, MAX_TOOL_RESULT_CHARS) {
             return Err(format!(
                 "assistant tool call {index} arguments exceed the budget"
             ));

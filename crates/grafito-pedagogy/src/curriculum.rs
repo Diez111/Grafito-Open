@@ -3,6 +3,7 @@
 use crate::level::UTNProgram;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::OnceLock;
 
 /// Objetivo de aprendizaje atómico.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -30,6 +31,16 @@ fn default_level_min() -> u32 {
 }
 fn default_hours() -> f32 {
     2.0
+}
+
+/// LO + campos en minúsculas para búsqueda (caché de `find_for_concept`).
+#[derive(Debug, Clone)]
+struct LoMinusculas {
+    lo: LearningObjective,
+    id_l: String,
+    title_l: String,
+    desc_l: String,
+    tags_l: Vec<String>,
 }
 
 impl LearningObjective {
@@ -763,21 +774,53 @@ impl Curriculum {
     }
 
     /// Todos los LOs (primaria + secundaria + UTN + avanzados).
+    ///
+    /// Clon del caché estático (`OnceLock`): misma semántica que construir los
+    /// 7 grupos, sin reconstruir los `String` literales en cada llamada
+    /// (hot path de `get`/`find_for_concept`/`topological_order`/scheduling).
     pub fn all() -> Vec<LearningObjective> {
-        let mut v = Vec::new();
-        v.extend(Self::primary());
-        v.extend(Self::secondary());
-        v.extend(Self::utn_am1());
-        v.extend(Self::utn_am2());
-        v.extend(Self::utn_algebra());
-        v.extend(Self::utn_probabilidad());
-        v.extend(Self::avanzados());
-        v
+        Self::todo_cache().clone()
     }
 
-    /// Obtiene un LO por id.
+    /// Caché estático del currículum completo (50 LOs, determinista).
+    fn todo_cache() -> &'static Vec<LearningObjective> {
+        static CACHE: OnceLock<Vec<LearningObjective>> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            let mut v = Vec::new();
+            v.extend(Curriculum::primary());
+            v.extend(Curriculum::secondary());
+            v.extend(Curriculum::utn_am1());
+            v.extend(Curriculum::utn_am2());
+            v.extend(Curriculum::utn_algebra());
+            v.extend(Curriculum::utn_probabilidad());
+            v.extend(Curriculum::avanzados());
+            v
+        })
+    }
+
+    /// Índice en minúsculas para `find_for_concept` (hot path de búsqueda):
+    /// evita `to_lowercase()` por campo y por LO en cada llamada. Los
+    /// `*_l` son exactamente `campo.to_lowercase()` precomputado, así el
+    /// scoring (`contains` + conteo de tags) es idéntico al original.
+    fn indice_minusculas() -> &'static Vec<LoMinusculas> {
+        static CACHE: OnceLock<Vec<LoMinusculas>> = OnceLock::new();
+        CACHE.get_or_init(|| {
+            Curriculum::todo_cache()
+                .iter()
+                .map(|lo| LoMinusculas {
+                    lo: lo.clone(),
+                    id_l: lo.id.to_lowercase(),
+                    title_l: lo.title.to_lowercase(),
+                    desc_l: lo.description.to_lowercase(),
+                    tags_l: lo.tags.iter().map(|t| t.to_lowercase()).collect(),
+                })
+                .collect()
+        })
+    }
+
+    /// Obtiene un LO por id (sin reconstruir los 50 LOs: busca en el caché).
     pub fn get(id: &str) -> Option<LearningObjective> {
-        Self::all().into_iter().find(|lo| lo.id == id)
+        Self::todo_cache().iter().find(|lo| lo.id == id).cloned()
     }
 
     /// Prerequisitos directos de un LO (solo los que existen en el currículum).
@@ -794,9 +837,10 @@ impl Curriculum {
 
     /// LOs desbloqueados para un nivel numérico dado.
     pub fn all_unlocked_for_level(level: u32) -> Vec<LearningObjective> {
-        Self::all()
-            .into_iter()
+        Self::todo_cache()
+            .iter()
             .filter(|lo| lo.level_min <= level)
+            .cloned()
             .collect()
     }
 
@@ -804,8 +848,11 @@ impl Curriculum {
     /// Ola 1: mapas `BTreeMap` deterministas — el orden no depende del hash
     /// aleatorio del proceso (los niveles cero ya se ordenaban; ahora también
     /// las adyacencias e índices).
+    ///
+    /// El currículum es estático: se ordena el slice cacheado sin clonar
+    /// `all()` primero (mismo resultado que antes, sin el `Vec` intermedio).
     pub fn topological_order() -> Result<Vec<LearningObjective>, String> {
-        Self::orden_topologico_de(&Self::all())
+        Self::orden_topologico_de(Self::todo_cache())
     }
 
     /// Kahn sobre un slice arbitrario (el corazón testeable de
@@ -877,33 +924,32 @@ impl Curriculum {
 
     /// Busca LOs que contengan el concepto (case-insensitive, substring en tags+título+descripción+id).
     /// Retorna ordenado por relevancia (cantidad de campos/tags que matchean).
+    ///
+    /// Usa el índice en minúsculas (mismo scoring que antes, sin
+    /// `to_lowercase()` por LO en cada llamada).
     pub fn find_for_concept(concept: &str) -> Vec<LearningObjective> {
         let q = concept.to_lowercase();
         let q = q.trim().to_string();
         if q.is_empty() {
             return Vec::new();
         }
-        let mut scored: Vec<(usize, LearningObjective)> = Self::all()
-            .into_iter()
-            .filter_map(|lo| {
+        let mut scored: Vec<(usize, LearningObjective)> = Self::indice_minusculas()
+            .iter()
+            .filter_map(|e| {
                 let mut score = 0usize;
-                if lo.title.to_lowercase().contains(&q) {
+                if e.title_l.contains(&q) {
                     score += 1;
                 }
-                if lo.description.to_lowercase().contains(&q) {
+                if e.desc_l.contains(&q) {
                     score += 1;
                 }
-                if lo.id.to_lowercase().contains(&q) {
+                if e.id_l.contains(&q) {
                     score += 1;
                 }
-                let tag_matches = lo
-                    .tags
-                    .iter()
-                    .filter(|t| t.to_lowercase().contains(&q))
-                    .count();
+                let tag_matches = e.tags_l.iter().filter(|t| t.contains(&q)).count();
                 score += tag_matches;
                 if score > 0 {
-                    Some((score, lo))
+                    Some((score, e.lo.clone()))
                 } else {
                     None
                 }

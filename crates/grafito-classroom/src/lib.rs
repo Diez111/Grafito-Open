@@ -320,60 +320,54 @@ impl TeacherDashboard {
             return base;
         }
 
-        // avg_mastery
+        // Una sola pasada: `sanitize_bkt` una vez por perfil (antes eran 2-3:
+        // avg + summary + inferencia). Reusa `v` para todo; mismos resultados.
         let mut sum = 0.0_f64;
         let mut valid = 0_usize;
+        let mut sum_due: usize = 0;
+        let mut inferred_due: usize = 0;
+        // `bkt_summary` se trunca a 128 pero la inferencia cuenta sobre todos:
+        // se acumula `inferred_due` en la misma pasada.
+        let mut full_summary: Vec<(String, f64)> = Vec::with_capacity(profiles.len());
+        let mut agg: BTreeMap<String, usize> = BTreeMap::new();
         for p in profiles {
             let v = sanitize_bkt(p.bkt_p_known);
             if v.is_finite() {
                 sum += v;
                 valid = valid.saturating_add(1);
+                if v < 0.6 {
+                    inferred_due = inferred_due.saturating_add(1);
+                }
+            }
+            sum_due = sum_due.saturating_add(p.branches_due);
+            full_summary.push((sanitize_name(&p.name), v));
+            for (k, count) in &p.misconception_counts {
+                let key = normalize_misconception_key(k);
+                if key.is_empty() || *count == 0 {
+                    continue;
+                }
+                let entry = agg.entry(key).or_insert(0);
+                *entry = entry.saturating_add(*count);
             }
         }
         let avg = if valid > 0 { sum / valid as f64 } else { 0.0 };
         base.avg_mastery = sanitize_bkt(avg);
 
-        // bkt_summary: per-learner, orden estable alfabético.
-        let mut summary: Vec<(String, f64)> = profiles
-            .iter()
-            .map(|p| {
-                let v = sanitize_bkt(p.bkt_p_known);
-                (sanitize_name(&p.name), v)
-            })
-            .collect();
-        summary.sort_by(|a, b| a.0.cmp(&b.0));
-        if summary.len() > MAX_BKT_SUMMARY_LEN {
-            summary.truncate(MAX_BKT_SUMMARY_LEN);
+        // bkt_summary: orden estable alfabético.
+        full_summary.sort_by(|a, b| a.0.cmp(&b.0));
+        if full_summary.len() > MAX_BKT_SUMMARY_LEN {
+            full_summary.truncate(MAX_BKT_SUMMARY_LEN);
         }
-        base.bkt_summary = summary;
+        base.bkt_summary = full_summary;
 
         // branches_due: suma explícita si hay dato, si no inferencia por BKT.
-        let sum_due: usize = profiles.iter().map(|p| p.branches_due).sum();
         if sum_due > 0 {
             base.branches_due = sum_due;
         } else {
-            let inferred = profiles
-                .iter()
-                .filter(|p| {
-                    let v = sanitize_bkt(p.bkt_p_known);
-                    v.is_finite() && v < 0.6
-                })
-                .count();
-            base.branches_due = inferred;
+            base.branches_due = inferred_due;
         }
 
-        // top_misconceptions: agregación.
-        let mut agg: BTreeMap<String, usize> = BTreeMap::new();
-        for p in profiles {
-            for (k, v) in &p.misconception_counts {
-                let key = normalize_misconception_key(k);
-                if key.is_empty() || *v == 0 {
-                    continue;
-                }
-                let entry = agg.entry(key).or_insert(0);
-                *entry = entry.saturating_add(*v);
-            }
-        }
+        // top_misconceptions: agregación ya hecha en la pasada única.
         let mut top: Vec<(String, usize)> = agg.into_iter().collect();
         top.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if top.len() > MAX_MISCONCEPTION_KINDS {
@@ -464,7 +458,7 @@ fn truncate_digest(s: &str) -> String {
 }
 
 fn sanitize_names(names: Vec<String>) -> Vec<String> {
-    let mut out = Vec::new();
+    let mut out = Vec::with_capacity(names.len().min(MAX_DASHBOARD_NAMES));
     for n in names {
         let t = n.trim().to_string();
         if t.is_empty() {
@@ -489,6 +483,14 @@ fn sanitize_name(s: &str) -> String {
 }
 
 fn normalize_misconception_key(k: &str) -> String {
+    // Vía rápida: claves ya normalizadas (`sign`, `chain_rule`, ...) evitan
+    // `to_lowercase()` + segunda pasada. Condición exacta: `trim` no vacío,
+    // `<=64` bytes, todo ASCII minúsculo alfanumérico/`_`/`-`, sin `__` y sin
+    // `_` en bordes. Si algo no cuadra, vía lenta original (unicode intacto).
+    let trimmed = k.trim();
+    if !trimmed.is_empty() && trimmed.len() <= 64 && is_normalized_key_bytes(trimmed) {
+        return trimmed.to_string();
+    }
     let t = k.trim().to_lowercase();
     if t.is_empty() {
         return String::new();
@@ -520,6 +522,34 @@ fn normalize_misconception_key(k: &str) -> String {
         }
     }
     dedup.trim_matches('_').to_string()
+}
+
+/// ¿`s` (ya `trim`, ASCII) está normalizada? Sin alloc: minúsculas, sin
+/// espacios, sin `__`, sin `_` en bordes.
+fn is_normalized_key_bytes(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > 64 {
+        return false;
+    }
+    if bytes[0] == b'_' || bytes[bytes.len() - 1] == b'_' {
+        return false;
+    }
+    let mut prev_us = false;
+    for &b in bytes {
+        let ok = matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_' | b'-');
+        if !ok {
+            return false;
+        }
+        if b == b'_' {
+            if prev_us {
+                return false;
+            }
+            prev_us = true;
+        } else {
+            prev_us = false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]

@@ -426,17 +426,13 @@ impl SocraticFsm {
         {
             return true;
         }
-        Self::contains_verbal_answer(&lower)
+        Self::contains_verbal_answer_lowered(&lower)
     }
 
-    /// ¿El texto afirma un valor en palabras (`es dos`, `son tres`)?
-    ///
-    /// R6e: `la derivada es dos` es telling aunque no haya dígitos. Cubre
-    /// cero..veinte, `treinta` y `cien` tras `es`/`son`/`vale(n)`/`da(n)` con
-    /// borde de palabra. Conservador: una pregunta (`¿qué es dos más dos?`)
-    /// también dispara — el guard prefiere repreguntar antes que revelar.
-    /// Puro, sin regex ni `unwrap`.
-    pub fn contains_verbal_answer(text: &str) -> bool {
+    /// Núcleo de [`Self::contains_verbal_answer`] sobre texto ya en minúsculas
+    /// (hot path del guard: `contains_solution_marker` ya minúsculó una vez;
+    /// minúscular de nuevo era un segundo `String` + pasada por corrección).
+    fn contains_verbal_answer_lowered(lower: &str) -> bool {
         const NUMBERS: &[&str] = &[
             "cero",
             "uno",
@@ -465,15 +461,33 @@ impl SocraticFsm {
             "ciento",
         ];
         const FRAMES: &[&str] = &["es", "son", "vale", "valen", "da", "dan"];
-        let lower = text.to_lowercase();
-        let words: Vec<&str> = lower
+        // Ventana deslizante sin `Vec`: mismo orden que `windows(2)`.
+        let mut prev: Option<&str> = None;
+        for w in lower
             .split(|c: char| !c.is_alphabetic())
             .filter(|w| !w.is_empty())
-            .collect();
-        words.windows(2).any(|w| {
-            FRAMES.contains(&w[0]) && NUMBERS.contains(&w[1])
-                || (w[0] == "menos" && NUMBERS.contains(&w[1]))
-        })
+        {
+            if let Some(p) = prev {
+                if (FRAMES.contains(&p) && NUMBERS.contains(&w))
+                    || (p == "menos" && NUMBERS.contains(&w))
+                {
+                    return true;
+                }
+            }
+            prev = Some(w);
+        }
+        false
+    }
+
+    /// ¿El texto afirma un valor en palabras (`es dos`, `son tres`)?
+    ///
+    /// R6e: `la derivada es dos` es telling aunque no haya dígitos. Cubre
+    /// cero..veinte, `treinta` y `cien` tras `es`/`son`/`vale(n)`/`da(n)` con
+    /// borde de palabra. Conservador: una pregunta (`¿qué es dos más dos?`)
+    /// también dispara — el guard prefiere repreguntar antes que revelar.
+    /// Puro, sin regex ni `unwrap`.
+    pub fn contains_verbal_answer(text: &str) -> bool {
+        Self::contains_verbal_answer_lowered(&text.to_lowercase())
     }
 
     /// Heurística determinista: ¿el texto del LLM contiene un `=` numérico?

@@ -175,6 +175,7 @@ impl LongTermMemory {
 
     /// Render para prompt (acotado).
     pub fn render_for_prompt(&self) -> String {
+        use std::fmt::Write as _;
         if !self.enabled {
             return String::new();
         }
@@ -186,38 +187,49 @@ impl LongTermMemory {
         {
             return String::new();
         }
-        let mut out = String::new();
+        // Capacidad aproximada: evita regrows en el caso con hechos + prefs.
+        let mut out = String::with_capacity(256);
         if !self.summary.is_empty() {
-            out.push_str(&format!("Resumen charla previa: {}.\n", self.summary));
+            out.push_str("Resumen charla previa: ");
+            out.push_str(&self.summary);
+            out.push_str(".\n");
         }
         for fact in self.facts.iter().rev().take(5) {
-            out.push_str(&format!("- Recuerdo: {}.\n", fact.text));
+            out.push_str("- Recuerdo: ");
+            out.push_str(&fact.text);
+            out.push_str(".\n");
         }
         if !self.preferences.tone.is_empty() {
-            out.push_str(&format!("Preferencia tono: {}.\n", self.preferences.tone));
+            out.push_str("Preferencia tono: ");
+            out.push_str(&self.preferences.tone);
+            out.push_str(".\n");
         }
         if !self.preferences.detail_level.is_empty() {
-            out.push_str(&format!(
-                "Nivel detalle: {}.\n",
-                self.preferences.detail_level
-            ));
+            out.push_str("Nivel detalle: ");
+            out.push_str(&self.preferences.detail_level);
+            out.push_str(".\n");
         }
         if !self.preferences.language.is_empty() {
-            out.push_str(&format!("Idioma: {}.\n", self.preferences.language));
+            out.push_str("Idioma: ");
+            out.push_str(&self.preferences.language);
+            out.push_str(".\n");
         }
         if !self.preferences.goal.is_empty() {
-            out.push_str(&format!("Objetivo: {}.\n", self.preferences.goal));
+            out.push_str("Objetivo: ");
+            out.push_str(&self.preferences.goal);
+            out.push_str(".\n");
         }
         if !self.preferences.custom_instructions.is_empty() {
-            let trimmed: String = self
-                .preferences
-                .custom_instructions
-                .chars()
-                .take(MAX_CUSTOM_INSTRUCTIONS)
-                .collect();
-            out.push_str(&format!("Instrucciones: {}.\n", trimmed));
+            out.push_str("Instrucciones: ");
+            out.extend(
+                self.preferences
+                    .custom_instructions
+                    .chars()
+                    .take(MAX_CUSTOM_INSTRUCTIONS),
+            );
+            out.push_str(".\n");
         }
-        out.push_str(&format!("Vínculo: etapa {}.\n", self.relationship_stage));
+        let _ = writeln!(out, "Vínculo: etapa {}.", self.relationship_stage);
         out
     }
 }

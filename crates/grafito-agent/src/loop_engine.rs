@@ -139,16 +139,47 @@ const MAX_TOOL_ARGS_SUMMARY_CHARS: usize = 160;
 
 fn summarize_args(arguments: &Value) -> String {
     let summary = arguments.to_string();
-    if summary.chars().count() > MAX_TOOL_ARGS_SUMMARY_CHARS {
-        let mut clipped = summary
-            .chars()
-            .take(MAX_TOOL_ARGS_SUMMARY_CHARS.saturating_sub(1))
-            .collect::<String>();
-        clipped.push('…');
-        clipped
+    if summary.len() <= MAX_TOOL_ARGS_SUMMARY_CHARS {
+        return summary;
+    }
+    // Una sola pasada hasta `MAX+1` (evita `count` + `take` sobre el JSON).
+    let mut chars = summary.chars();
+    let mut buf = String::with_capacity(MAX_TOOL_ARGS_SUMMARY_CHARS);
+    for _ in 0..MAX_TOOL_ARGS_SUMMARY_CHARS {
+        match chars.next() {
+            Some(c) => buf.push(c),
+            None => return summary,
+        }
+    }
+    if chars.next().is_some() {
+        buf.pop();
+        buf.push('…');
+        buf
     } else {
         summary
     }
+}
+
+/// `contains` case-insensitive ASCII sin alocar la copia en minúsculas.
+///
+/// Equivalente a `haystack.to_ascii_lowercase().contains(needle)` cuando
+/// `needle` ya está en minúsculas ASCII (nuestras marcas del done-check lo
+/// están): pliega cada byte con `to_ascii_lowercase` al comparar.
+fn contains_folded(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    let hay = haystack.as_bytes();
+    let ndl = needle.as_bytes();
+    if ndl.len() > hay.len() {
+        return false;
+    }
+    hay.windows(ndl.len()).any(|window| {
+        window
+            .iter()
+            .zip(ndl.iter())
+            .all(|(h, n)| h.to_ascii_lowercase() == *n)
+    })
 }
 
 /// Ejecuta el loop de agente acotado, sin ledger de tarea.
@@ -206,9 +237,13 @@ where
     let mut tracked: Option<JSpaceLedger> = ledger.cloned();
     if let Some(tracked) = tracked.as_ref() {
         tracked.validate()?;
-        emit_ledger(&mut on_event, tracked);
+        // Un solo render: se reusa para el evento y para inyectar al system
+        // (antes se renderizaba dos veces por corrida).
         let render = tracked.render_bounded(MAX_LEDGER_RENDER_BYTES);
         if !render.trim().is_empty() {
+            on_event(AgentEvent::Ledger {
+                render: render.clone(),
+            });
             system_owned.push_str("\n\nLedger de tarea:\n");
             system_owned.push_str(&render);
         }
@@ -251,10 +286,9 @@ where
                 on_event(AgentEvent::Finalized {
                     text: content.clone(),
                 });
-                let lower = content.to_ascii_lowercase();
-                let text_ok = !lower.contains("pendiente")
-                    && !lower.contains("sin verificar")
-                    && !lower.contains("no pude");
+                let text_ok = !contains_folded(&content, "pendiente")
+                    && !contains_folded(&content, "sin verificar")
+                    && !contains_folded(&content, "no pude");
                 let ledger_ok = tracked
                     .as_ref()
                     .is_none_or(|tracked| !tracked.has_open_items());
@@ -412,7 +446,22 @@ where
 }
 
 fn message_chars(message: &Value) -> usize {
-    message.to_string().len()
+    // Longitud serializada sin alocar el `String` intermedio: mismo número
+    // que `message.to_string().len()` (mismo serializador), solo cuenta bytes.
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, message)
+        .map(|()| counter.0)
+        .unwrap_or(0)
 }
 
 fn completion_token_budget(max_output_chars: usize) -> usize {

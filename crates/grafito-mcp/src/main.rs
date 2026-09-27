@@ -77,8 +77,9 @@ fn write_response(
     stdout: &mut std::io::StdoutLock<'_>,
     resp: &serde_json::Value,
 ) -> Result<(), std::io::Error> {
-    let mut text = resp.to_string();
-    text.push('\n');
-    stdout.write_all(text.as_bytes())?;
+    // Serializa directo al buffer de stdout (mismo serializador y mismos
+    // bytes que `to_string`, sin el `String` intermedio de la respuesta).
+    serde_json::to_writer(&mut *stdout, resp).map_err(std::io::Error::other)?;
+    stdout.write_all(b"\n")?;
     stdout.flush()
 }

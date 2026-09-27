@@ -598,7 +598,9 @@ impl ClassroomSession {
     /// Nombres ordenados (BTreeMap ya ordena por clave: determinista).
     #[must_use]
     pub fn names_sorted(&self) -> Vec<String> {
-        self.roster.keys().cloned().collect()
+        let mut out = Vec::with_capacity(self.roster.len());
+        out.extend(self.roster.keys().cloned());
+        out
     }
 
     /// Ejercicio activo (si hay).
@@ -661,7 +663,15 @@ impl ClassroomSession {
     /// header siempre presente aunque el roster esté lleno).
     #[must_use]
     pub fn export_roster_csv(&self) -> String {
-        let mut out = String::from("name,hand_raised,joined_epoch\r\n");
+        // Reserva estimada: header + ~48 B/fila (nombre medio + flags), capada
+        // al presupuesto para no sobre-reservar en rosters chicos.
+        let header = "name,hand_raised,joined_epoch\r\n";
+        let estimate = header
+            .len()
+            .saturating_add(self.roster.len().saturating_mul(48))
+            .min(MAX_ROSTER_CSV_BYTES);
+        let mut out = String::with_capacity(estimate);
+        out.push_str(header);
         for member in self.roster.values() {
             let row = format!(
                 "{},{},{}\r\n",
@@ -719,27 +729,43 @@ impl ClassroomSession {
 /// una celda que empieza con `=`, `+`, `-`, `@`, `\t` o `\r` se exporta
 /// con `'` delante para que Excel/LibreOffice no la ejecute al abrir.
 fn escape_csv_field(raw: &str) -> String {
-    let mut value = if raw.starts_with(['=', '+', '-', '@', '\t', '\r']) {
-        let mut guarded = String::with_capacity(raw.len().saturating_add(1));
-        guarded.push('\'');
-        guarded.push_str(raw);
-        guarded
-    } else {
-        raw.to_string()
-    };
-    if value.contains([',', '"', '\n', '\r']) {
-        let mut quoted = String::with_capacity(value.len().saturating_add(2));
-        quoted.push('"');
-        for ch in value.chars() {
-            if ch == '"' {
-                quoted.push('"');
-            }
-            quoted.push(ch);
-        }
-        quoted.push('"');
-        value = quoted;
+    let needs_guard = raw.starts_with(['=', '+', '-', '@', '\t', '\r']);
+    let needs_quote = raw.contains([',', '"', '\n', '\r']);
+    // Caso común (nombre normal): una sola alloc, mismo resultado.
+    if !needs_guard && !needs_quote {
+        return raw.to_string();
     }
-    value
+    // Guardia y/o cita en una sola alloc (réplica exacta del original:
+    // primero `'` delante si hay prefijo fórmula, luego citado con `"`).
+    let extra_quotes = if needs_quote {
+        raw.chars().filter(|&c| c == '"').count()
+    } else {
+        0
+    };
+    let mut buf = String::with_capacity(
+        raw.len()
+            .saturating_add(usize::from(needs_guard))
+            .saturating_add(extra_quotes)
+            .saturating_add(2),
+    );
+    if needs_quote {
+        buf.push('"');
+    }
+    if needs_guard {
+        buf.push('\'');
+    }
+    if needs_quote {
+        for ch in raw.chars() {
+            if ch == '"' {
+                buf.push('"');
+            }
+            buf.push(ch);
+        }
+        buf.push('"');
+    } else {
+        buf.push_str(raw);
+    }
+    buf
 }
 
 #[cfg(test)]

@@ -618,7 +618,36 @@ print(json.dumps({{"verdict": bool(verdict), "check": check}}))
 // ── import_colab_result ──────────────────────────────────────────────
 
 /// Chequea un modelo contra un DIMACS (puro, barato, fuerte).
+/// Vía rápida: asignación en `Vec` indexado por variable (O(1) por literal,
+/// sin `BTreeMap`). Si el modelo trae literales gigantes se usa el mapa
+/// (misma respuesta, sin pre-allocar gigabytes ante input adverso).
 fn check_model(cnf_text: &str, model: &[i64]) -> Result<bool, String> {
+    const VEC_CAP_VARS: usize = 8_000_000;
+    let mut max_var: usize = 0;
+    for lit in model {
+        if *lit != 0 {
+            max_var = max_var.max(usize::try_from(lit.unsigned_abs()).unwrap_or(usize::MAX));
+        }
+    }
+    if max_var <= VEC_CAP_VARS {
+        // 0 = sin asignar, 1 = true, 2 = false (último gana, como el `insert`).
+        let mut assign = vec![0u8; max_var + 1];
+        for lit in model {
+            if *lit == 0 {
+                continue;
+            }
+            if let Ok(v) = usize::try_from(lit.unsigned_abs()) {
+                if v <= max_var {
+                    assign[v] = if *lit > 0 { 1 } else { 2 };
+                }
+            }
+        }
+        return check_model_against(cnf_text, |lit| {
+            usize::try_from(lit.unsigned_abs())
+                .ok()
+                .is_some_and(|v| v <= max_var && assign[v] == if lit > 0 { 1 } else { 2 })
+        });
+    }
     let mut assign = std::collections::BTreeMap::new();
     for lit in model {
         if *lit == 0 {
@@ -626,6 +655,11 @@ fn check_model(cnf_text: &str, model: &[i64]) -> Result<bool, String> {
         }
         assign.insert(lit.abs(), *lit > 0);
     }
+    check_model_against(cnf_text, |lit| assign.get(&lit.abs()) == Some(&(lit > 0)))
+}
+
+/// Barrido de cláusulas compartido por ambas representaciones de asignación.
+fn check_model_against(cnf_text: &str, mut holds: impl FnMut(i64) -> bool) -> Result<bool, String> {
     for line in cnf_text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('c') || line.starts_with('p') {
@@ -639,7 +673,7 @@ fn check_model(cnf_text: &str, model: &[i64]) -> Result<bool, String> {
             if lit == 0 {
                 break;
             }
-            if assign.get(&lit.abs()) == Some(&(lit > 0)) {
+            if holds(lit) {
                 ok = true;
                 break;
             }

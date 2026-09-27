@@ -367,16 +367,15 @@ impl StudentProfile {
 
     /// Ramas cuyo repaso venció en `now` (Leitner due).
     pub fn branches_due(&self, now: u64) -> Vec<&BranchState> {
-        self.branches
-            .iter()
-            .filter(|b| {
-                if let Some(epoch) = b.next_review_epoch {
-                    scheduler::is_due(epoch, now)
-                } else {
-                    false
-                }
-            })
-            .collect()
+        let mut out = Vec::with_capacity(self.branches.len());
+        out.extend(self.branches.iter().filter(|b| {
+            if let Some(epoch) = b.next_review_epoch {
+                scheduler::is_due(epoch, now)
+            } else {
+                false
+            }
+        }));
+        out
     }
 
     /// Ramas sin cubrir priorizando vencidas (due primero) y luego menor dominio/BKT.
@@ -388,15 +387,18 @@ impl StudentProfile {
     ///    (`None` ordena antes que cualquier `Some`, igual que `Option::cmp`);
     /// 3. desempate por menor `mastery` y luego menor `bkt_p_known`.
     pub fn recommend_next_with_scheduler(&self, now: u64) -> Vec<&BranchState> {
-        let mut pending: Vec<&BranchState> = self.branches.iter().filter(|b| !b.covered).collect();
-        pending.sort_by(|a, b| {
-            let a_due = a
+        // Precalcula `due` una vez por rama (O(n)) en lugar de re-evaluar
+        // `is_due` en cada comparación del sort (O(n log n)). Orden idéntico:
+        // due primero, luego `next_review_epoch`, luego `mastery`, luego `bkt`.
+        let mut pending: Vec<(&BranchState, bool)> = Vec::with_capacity(self.branches.len());
+        pending.extend(self.branches.iter().filter(|b| !b.covered).map(|b| {
+            let due = b
                 .next_review_epoch
                 .is_some_and(|e| scheduler::is_due(e, now));
-            let b_due = b
-                .next_review_epoch
-                .is_some_and(|e| scheduler::is_due(e, now));
-            match (a_due, b_due) {
+            (b, due)
+        }));
+        pending.sort_by(|(a, a_due), (b, b_due)| {
+            match (*a_due, *b_due) {
                 (true, false) => std::cmp::Ordering::Less,
                 (false, true) => std::cmp::Ordering::Greater,
                 _ => {
@@ -419,7 +421,7 @@ impl StudentProfile {
                 }
             }
         });
-        pending
+        pending.into_iter().map(|(b, _)| b).collect()
     }
 
     /// Helper Leitner listo para el asistente: vencidas primero.
@@ -487,12 +489,15 @@ impl StudentProfile {
             return ranked;
         }
         // Agrupa por tópico preservando el orden due-first dentro de cada grupo.
-        let mut groups: Vec<(String, Vec<&BranchState>)> = Vec::new();
+        // Sin allocs: la clave es `&str` prestada del `id` (prefijo antes de
+        // `'-'`; sin `'-'` el id completo). Mismo agrupamiento y orden que con
+        // `String`, sin 1 alloc por rama.
+        let mut groups: Vec<(&str, Vec<&BranchState>)> = Vec::new();
         for branch in ranked {
-            let topic = branch
+            let topic: &str = branch
                 .id
                 .split_once('-')
-                .map_or_else(|| branch.id.clone(), |(prefix, _)| prefix.to_string());
+                .map_or(branch.id.as_str(), |(prefix, _)| prefix);
             match groups.iter_mut().find(|(key, _)| *key == topic) {
                 Some((_, items)) => items.push(branch),
                 None => groups.push((topic, vec![branch])),
@@ -523,20 +528,19 @@ impl StudentProfile {
 
     /// Schedules actuales por rama (para UI/debug).
     pub fn review_schedules(&self) -> Vec<ReviewSchedule> {
-        self.branches
-            .iter()
-            .filter_map(|b| {
-                let epoch = b.next_review_epoch?;
-                let interval = scheduler::next_interval(b.box_level, b.mastery);
-                let days = (interval / scheduler::DAY_SECS) as u32;
-                Some(ReviewSchedule {
-                    branch_id: b.id.clone(),
-                    next_review_epoch: epoch,
-                    interval_days: days.max(1),
-                    box_level: b.box_level,
-                })
+        let mut out = Vec::with_capacity(self.branches.len());
+        out.extend(self.branches.iter().filter_map(|b| {
+            let epoch = b.next_review_epoch?;
+            let interval = scheduler::next_interval(b.box_level, b.mastery);
+            let days = (interval / scheduler::DAY_SECS) as u32;
+            Some(ReviewSchedule {
+                branch_id: b.id.clone(),
+                next_review_epoch: epoch,
+                interval_days: days.max(1),
+                box_level: b.box_level,
             })
-            .collect()
+        }));
+        out
     }
 
     pub fn display_name(&self) -> &str {
@@ -568,21 +572,26 @@ impl StudentProfile {
 
     /// Resumen comprimido para el prompt del tutor (memoria del usuario).
     pub fn memory(&self) -> String {
+        use std::fmt::Write as _;
         let mut base = if self.branches.is_empty() {
             "Estudiante nuevo: sin ramas registradas todavía.".to_string()
         } else {
             let covered = self.branches.iter().filter(|b| b.covered).count();
             let pct = covered as f32 / self.branches.len().max(1) as f32 * 100.0;
-            let mut t = format!(
-                "Nivel {}, XP {}. Racha: {}. Cobertura: {covered}/{} ({pct:.0}%).\n",
+            let mut t = String::with_capacity(256 + self.branches.len() * 48);
+            let _ = writeln!(
+                t,
+                "Nivel {}, XP {}. Racha: {}. Cobertura: {covered}/{} ({pct:.0}%).",
                 self.level,
                 self.xp,
                 self.streak,
                 self.branches.len()
             );
             for branch in &self.branches {
-                t.push_str(&format!(
-                    "- {}: {} (dominio {:.0}%).\n",
+                // `write!` directo evita el `String` temporal de `format!` por rama.
+                let _ = writeln!(
+                    t,
+                    "- {}: {} (dominio {:.0}%).",
                     branch.name,
                     if branch.covered {
                         "cubierta"
@@ -590,22 +599,22 @@ impl StudentProfile {
                         "pendiente"
                     },
                     branch.mastery * 100.0
-                ));
+                );
             }
             if let Some(event) = self.history.last() {
-                t.push_str(&format!(
-                    "Última actividad: {:?} en {}.\n",
+                let _ = writeln!(
+                    t,
+                    "Última actividad: {:?} en {}.",
                     event.kind, event.branch_id
-                ));
+                );
             }
             t
         };
         // Añadir personalidad/ánimo y memoria larga + avatar rasgos finos
         if let Some(m) = self.avatar.mascot.as_ref().or(self.mascot.as_ref()) {
-            base.push_str(&format!(
-                "Personalidad mascota: {}.\n",
-                m.personality.system_prompt_snippet()
-            ));
+            base.push_str("Personalidad mascota: ");
+            base.push_str(m.personality.system_prompt_snippet());
+            base.push_str(".\n");
             let mood = m.update_mood(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -613,42 +622,55 @@ impl StudentProfile {
                     .unwrap_or(0),
                 false,
             );
-            base.push_str(&format!("Ánimo actual: {}.\n", mood.label()));
+            base.push_str("Ánimo actual: ");
+            base.push_str(mood.label());
+            base.push_str(".\n");
         }
         if !self.avatar.custom_instructions.trim().is_empty() {
-            let ci: String = self.avatar.custom_instructions.chars().take(800).collect();
-            base.push_str(&format!("Instrucciones usuario: {ci}.\n"));
+            base.push_str("Instrucciones usuario: ");
+            base.extend(self.avatar.custom_instructions.chars().take(800));
+            base.push_str(".\n");
         }
         if self.avatar.verbosity != 50
             || self.avatar.humor != 30
             || self.avatar.formality != 50
             || self.avatar.empathy != 60
         {
-            base.push_str(&format!(
-                "Rasgos: verbosidad {} humor {} formalidad {} empatía {}.\n",
+            let _ = writeln!(
+                base,
+                "Rasgos: verbosidad {} humor {} formalidad {} empatía {}.",
                 self.avatar.verbosity,
                 self.avatar.humor,
                 self.avatar.formality,
                 self.avatar.empathy
-            ));
+            );
         }
         if !self.avatar.language.trim().is_empty() {
-            base.push_str(&format!("Idioma preferido: {}.\n", self.avatar.language));
+            base.push_str("Idioma preferido: ");
+            base.push_str(&self.avatar.language);
+            base.push_str(".\n");
         }
         let long = self.long_memory.render_for_prompt();
         if !long.is_empty() {
-            base.push_str(&format!("\n[Memoria largo plazo]\n{long}"));
+            base.push_str("\n[Memoria largo plazo]\n");
+            base.push_str(&long);
         }
         // Presupuesto real en chars (no bytes): el recorte corta en
         // MAX_MEMORY_CHARS contando el sufijo, para que la SALIDA completa
         // respete el presupuesto declarado (antes se recortaba recién sobre
         // 3200 y se devolvían ~3199 chars: 33 % sobre el presupuesto).
         const SUFIJO_RECORTE: &str = "…\n[resumen recortado]";
+        // Fast-path: si entra en bytes, entra en chars (1 char >= 1 byte).
+        // Evita `chars().count()` en perfiles chicos (caso común).
+        if base.len() <= MAX_MEMORY_CHARS {
+            return base;
+        }
         let total = base.chars().count();
         if total > MAX_MEMORY_CHARS {
             let recorte = MAX_MEMORY_CHARS.saturating_sub(SUFIJO_RECORTE.chars().count());
-            let cut: String = base.chars().take(recorte).collect();
-            format!("{cut}{SUFIJO_RECORTE}")
+            let mut cut: String = base.chars().take(recorte).collect();
+            cut.push_str(SUFIJO_RECORTE);
+            cut
         } else {
             base
         }

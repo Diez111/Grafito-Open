@@ -128,12 +128,16 @@ impl HsvColorPicker {
         let inner_radius = radius * 0.3;
         let outer_radius = radius;
 
-        // Generar malla (Mesh) para un gradiente continuo y perfecto
+        // Generar malla (Mesh) para un gradiente continuo y perfecto.
+        // `reserve` evita ~8 regrowths del `Vec` en cada frame.
         let mut mesh = egui::Mesh::default();
         let segments = 64;
+        mesh.vertices.reserve(2 * segments);
+        mesh.indices.reserve(6 * segments);
+        let step = std::f32::consts::TAU / segments as f32;
 
         for i in 0..segments {
-            let angle = (i as f32 / segments as f32) * std::f32::consts::TAU;
+            let angle = i as f32 * step;
             let hue = (i as f32 / segments as f32) * 360.0;
 
             // Color en el borde exterior (saturación máxima, brillo máximo)
@@ -478,11 +482,14 @@ impl HsvColorPicker {
                         self.save_favorite(&mut favorites[i]).favorites_changed;
                 }
 
-                // Tooltip
-                response.on_hover_text(format!(
-                    "Click: aplicar\nClick derecho: guardar\nRGB: ({:.2}, {:.2}, {:.2})",
-                    color.r, color.g, color.b
-                ));
+                // Tooltip: solo se construye en hover (antes, 5 `format!`
+                // por frame aunque nadie mirara el picker).
+                if response.hovered() {
+                    response.on_hover_text(format!(
+                        "Click: aplicar\nClick derecho: guardar\nRGB: ({:.2}, {:.2}, {:.2})",
+                        color.r, color.g, color.b
+                    ));
+                }
             }
         });
 

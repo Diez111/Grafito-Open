@@ -142,16 +142,31 @@ fn tool_defs() -> Vec<Value> {
 /// Todas las tools: 9 lab (incl. execute_command) + proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
 /// El total exacto lo verifican los tests de forma dinámica (sin pineo frágil).
 pub fn all_tool_defs() -> Vec<Value> {
-    let mut defs = tool_defs();
-    defs.extend(crate::bridge::proxied_tool_defs());
-    defs.extend(crate::lean::lean_tool_defs());
-    defs.extend(crate::policy::policy_tool_defs());
-    defs.extend(crate::gpu::gpu_tool_defs());
-    defs.extend(crate::colab::colab_tool_defs());
-    defs
+    all_tool_defs_cached().clone()
+}
+
+/// Listado cacheado: los esquemas son estáticos, reconstruirlos en cada
+/// `tools/list` (decenas de `json!` gigantes del asistente) era el costo
+/// dominante del listado. El clon por llamada preserva la firma.
+fn all_tool_defs_cached() -> &'static Vec<Value> {
+    static ALL: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut defs = tool_defs();
+        defs.extend(crate::bridge::proxied_tool_defs());
+        defs.extend(crate::lean::lean_tool_defs());
+        defs.extend(crate::policy::policy_tool_defs());
+        defs.extend(crate::gpu::gpu_tool_defs());
+        defs.extend(crate::colab::colab_tool_defs());
+        defs
+    })
 }
 
 // ── Resources ────────────────────────────────────────────────────────
+
+fn resource_defs_cached() -> &'static Vec<Value> {
+    static RES: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    RES.get_or_init(resource_defs)
+}
 
 fn resource_defs() -> Vec<Value> {
     vec![
@@ -215,11 +230,15 @@ fn resource_defs() -> Vec<Value> {
 fn read_resource(uri: &str, limits: &LabLimits) -> Result<Value, String> {
     if uri == "grafito://ledger" {
         let (all, corrupt) = ledger::read_all();
-        let lines: Vec<String> = all.iter().take(10_000).map(|e| e.to_jsonl()).collect();
+        // Solo se serializa la cola de 200 (antes: hasta 10k entradas a
+        // JSONL para descartar todo menos 200). Mismo `entries` y `tail`.
+        let end = all.len().min(10_000);
+        let start = end.saturating_sub(200);
+        let tail: Vec<String> = all[start..end].iter().map(|e| e.to_jsonl()).collect();
         return Ok(json!({
-            "entries": lines.len(),
+            "entries": end,
             "corrupt_skipped": corrupt,
-            "tail": lines.into_iter().rev().take(200).rev().collect::<Vec<_>>(),
+            "tail": tail,
         }));
     }
     if uri == "grafito://bounds/known" {
@@ -319,7 +338,11 @@ fn read_resource(uri: &str, limits: &LabLimits) -> Result<Value, String> {
 pub fn dispatch(msg: &Value, limits: &LabLimits) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
-    let params = msg.get("params").cloned().unwrap_or(json!({}));
+    // Préstamo en vez de clon profundo: `arguments` puede traer 100k puntos
+    // y se clonaba dos veces por llamada (`params` + `arguments`).
+    // `Value::Null` responde `None` a todo `get`, igual que el `{}` anterior.
+    let no_params = Value::Null;
+    let params = msg.get("params").unwrap_or(&no_params);
     // Notificaciones: sin respuesta.
     if method.starts_with("notifications/") {
         return None;
@@ -338,13 +361,13 @@ pub fn dispatch(msg: &Value, limits: &LabLimits) -> Option<Value> {
         "tools/list" => {
             Some(json!({"jsonrpc": "2.0", "id": id, "result": {"tools": all_tool_defs()}}))
         }
-        "resources/list" => {
-            Some(json!({"jsonrpc": "2.0", "id": id, "result": {"resources": resource_defs()}}))
-        }
+        "resources/list" => Some(
+            json!({"jsonrpc": "2.0", "id": id, "result": {"resources": resource_defs_cached().clone()}}),
+        ),
         "tools/call" => {
             let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-            let args = params.get("arguments").cloned().unwrap_or(json!({}));
-            match call_tool(name, &args, limits) {
+            let args = params.get("arguments").unwrap_or(&no_params);
+            match call_tool(name, args, limits) {
                 Ok(payload) => Some(json!({
                     "jsonrpc": "2.0", "id": id, "result": {
                         "content": [{"type": "text", "text": payload.to_string()}],

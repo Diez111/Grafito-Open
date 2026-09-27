@@ -117,6 +117,8 @@ pub fn rot_about(pt: Point2, pivote: Point2, ang: f64) -> Point2 {
 }
 
 /// Dedup por tolerancia preservando orden (gadF_kit.py:75-90).
+/// Hot path: distancia al cuadrado sin `sqrt` + rechazo caja por eje;
+/// misma semántica (`dist < tol` ⟺ `d2 < tol²` para tol > 0).
 fn merge_points(pts: &[Point2]) -> Result<Vec<Point2>, GadgetError> {
     if pts.len() > MAX_GADGET_POINTS * 2 {
         return Err(GadgetError::MuchosPuntos {
@@ -125,6 +127,7 @@ fn merge_points(pts: &[Point2]) -> Result<Vec<Point2>, GadgetError> {
         });
     }
     let mut coords: Vec<Point2> = Vec::with_capacity(pts.len());
+    let tol2 = TOL_DEDUP * TOL_DEDUP;
     for p in pts {
         if !p.x.is_finite() || !p.y.is_finite() {
             return Err(GadgetError::NoFinito {
@@ -132,14 +135,22 @@ fn merge_points(pts: &[Point2]) -> Result<Vec<Point2>, GadgetError> {
                 donde: "merge_points",
             });
         }
-        let mut dup: Option<usize> = None;
-        for (i, q) in coords.iter().enumerate() {
-            if p.distance(q) < TOL_DEDUP {
-                dup = Some(i);
+        let mut dup = false;
+        for q in &coords {
+            let dx = p.x - q.x;
+            if dx.abs() >= TOL_DEDUP {
+                continue;
+            }
+            let dy = p.y - q.y;
+            if dy.abs() >= TOL_DEDUP {
+                continue;
+            }
+            if dx * dx + dy * dy < tol2 {
+                dup = true;
                 break;
             }
         }
-        if dup.is_none() {
+        if !dup {
             coords.push(*p);
             if coords.len() > MAX_GADGET_POINTS * 2 {
                 return Err(GadgetError::MuchosPuntos {
@@ -158,21 +169,25 @@ fn unit_edges(pts: &[Point2]) -> Result<Vec<(usize, usize)>, GadgetError> {
 }
 
 /// Índice del punto más cercano a `teo` (el `find` con `assert` de gadF:135-144).
+/// Hot path: distancia al cuadrado sin `sqrt`; misma semántica.
 fn find_nearest(coords: &[Point2], teo: Point2, donde: &'static str) -> Result<usize, GadgetError> {
+    let tol2 = TOL_DEDUP * TOL_DEDUP;
     let mut best: Option<usize> = None;
-    let mut bd = f64::INFINITY;
+    let mut bd2 = f64::INFINITY;
     for (i, q) in coords.iter().enumerate() {
-        let d = teo.distance(q);
-        if d < bd {
-            bd = d;
+        let dx = teo.x - q.x;
+        let dy = teo.y - q.y;
+        let d2 = dx * dx + dy * dy;
+        if d2 < bd2 {
+            bd2 = d2;
             best = Some(i);
         }
     }
     match best {
-        Some(i) if bd < TOL_DEDUP => Ok(i),
+        Some(i) if bd2 < tol2 => Ok(i),
         _ => Err(GadgetError::Degenerado {
             donde,
-            detalle: format!("terminal teórico sin vértice cercano (d={bd})"),
+            detalle: format!("terminal teórico sin vértice cercano (d={})", bd2.sqrt()),
         }),
     }
 }
@@ -533,8 +548,13 @@ pub fn exo_g40() -> Result<Gadget, GadgetError> {
 pub fn exo_g40_mono113(puntos: &[Point2]) -> Result<Vec<(usize, usize)>, GadgetError> {
     check_budget(puntos.len(), "exo_g40_mono113")?;
     check_finite(puntos, "exo_g40_mono113")?;
+    // Hot path: evita 780 `sqrt` (n=40): `|sqrt(d2)−d0|<tol` ⟺
+    // `(d0−tol)² < d2 < (d0+tol)²` para d0 > tol > 0. Misma semántica
+    // salvo 1 ulp en el borde (irrelevante; paridad pineada en fixtures).
     let d0 = (11.0f64 / 3.0).sqrt();
-    let mut pares = Vec::new();
+    let (lo, hi) = (d0 - TOL_UNIT, d0 + TOL_UNIT);
+    let (lo2, hi2) = (lo * lo, hi * hi);
+    let mut pares = Vec::with_capacity(64);
     for i in 0..puntos.len() {
         let Some(pi) = puntos.get(i) else {
             return Err(GadgetError::Degenerado {
@@ -549,7 +569,10 @@ pub fn exo_g40_mono113(puntos: &[Point2]) -> Result<Vec<(usize, usize)>, GadgetE
                     detalle: "índice fuera de rango".into(),
                 });
             };
-            if (pi.distance(pj) - d0).abs() < TOL_UNIT {
+            let dx = pi.x - pj.x;
+            let dy = pi.y - pj.y;
+            let d2 = dx * dx + dy * dy;
+            if d2 > lo2 && d2 < hi2 {
                 pares.push((i, j));
             }
         }
@@ -602,7 +625,9 @@ pub fn rot_points(pts: &[Point2], ang: f64) -> Result<Vec<Point2>, GadgetError> 
 
 /// Unión con dedup por coordenada (`|dx|<tol && |dy|<tol`, sowL_gen.py:34-40).
 pub fn union_all(sets: &[Vec<Point2>]) -> Result<Vec<Point2>, GadgetError> {
-    let mut out: Vec<Point2> = Vec::new();
+    // Hot path: pre-reserva total para evitar reallocs en H^k/V31.
+    let total: usize = sets.iter().map(Vec::len).sum();
+    let mut out: Vec<Point2> = Vec::with_capacity(total.min(MAX_GADGET_POINTS + 1));
     for s in sets {
         check_finite(s, "union_all")?;
         for p in s {
@@ -627,7 +652,9 @@ pub fn minkowski_sum(a: &[Point2], b: &[Point2]) -> Result<Vec<Point2>, GadgetEr
     check_budget(b.len(), "minkowski_sum")?;
     check_finite(a, "minkowski_sum")?;
     check_finite(b, "minkowski_sum")?;
-    let mut out: Vec<Point2> = Vec::new();
+    // Hot path: pre-reserva |a|*|b| (tope presupuesto) para evitar reallocs.
+    let cap = a.len().saturating_mul(b.len()).min(MAX_GADGET_POINTS + 1);
+    let mut out: Vec<Point2> = Vec::with_capacity(cap);
     for pa in a {
         for pb in b {
             let p = Point2::new(pa.x + pb.x, pa.y + pb.y);

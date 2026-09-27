@@ -153,7 +153,7 @@ pub fn format_web_context(query: &str, results: &[WebSearchResult]) -> String {
     }
 
     let display_query = sanitize_display_query(query);
-    let mut body = String::new();
+    let mut body = String::with_capacity(2_048);
     let mut shown = 0usize;
     for result in results.iter().take(WEB_SEARCH_MAX_RESULTS) {
         let Some(url) = sanitize_url(&result.url) else {
@@ -165,9 +165,10 @@ pub fn format_web_context(query: &str, results: &[WebSearchResult]) -> String {
         }
         let snippet = sanitize_html_text_capped(&result.snippet, WEB_SEARCH_SNIPPET_MAX_CHARS);
         shown += 1;
-        body.push_str(&format!("{shown}. {title} — {url}"));
+        let _ = std::fmt::Write::write_fmt(&mut body, format_args!("{shown}. {title} — {url}"));
         if !snippet.is_empty() {
-            body.push_str(&format!("\n   {snippet}"));
+            body.push_str("\n   ");
+            body.push_str(&snippet);
         }
         body.push('\n');
     }
@@ -292,26 +293,35 @@ pub fn decode_uddg(href: &str) -> Option<String> {
         return None;
     }
     let decoded = decode_html_entities(trimmed);
-    let lower = decoded.to_ascii_lowercase();
-    if lower.starts_with("javascript:")
-        || lower.starts_with("data:")
-        || lower.starts_with("vbscript:")
+    if starts_ignore_ascii_case(&decoded, "javascript:")
+        || starts_ignore_ascii_case(&decoded, "data:")
+        || starts_ignore_ascii_case(&decoded, "vbscript:")
     {
         return None;
     }
 
-    let relative = lower.starts_with("//") || lower.starts_with('/');
-    let ddg_redirect = lower.starts_with("//duckduckgo.com/l/")
-        || lower.starts_with("https://duckduckgo.com/l/")
-        || lower.starts_with("http://duckduckgo.com/l/");
+    let relative = decoded.starts_with("//") || decoded.starts_with('/');
+    let ddg_redirect = starts_ignore_ascii_case(&decoded, "//duckduckgo.com/l/")
+        || starts_ignore_ascii_case(&decoded, "https://duckduckgo.com/l/")
+        || starts_ignore_ascii_case(&decoded, "http://duckduckgo.com/l/");
     if relative || ddg_redirect {
         let value = query_param(&decoded, "uddg")?;
         return sanitize_url(&percent_decode(&value));
     }
-    if lower.starts_with("http://") || lower.starts_with("https://") {
+    if starts_ignore_ascii_case(&decoded, "http://")
+        || starts_ignore_ascii_case(&decoded, "https://")
+    {
         return sanitize_url(&decoded);
     }
     None
+}
+
+/// Prefijo ASCII case-insensitive sin asignar (evita el `to_ascii_lowercase`
+/// por URL del camino anterior).
+fn starts_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    haystack
+        .get(..needle.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(needle))
 }
 
 /// Saneador de texto HTML: quita tags `<...>`, decodifica entidades, colapsa
@@ -548,7 +558,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> &str {
 /// Corta a `max_chars` chars y agrega `…` si hubo recorte (el resultado total
 /// nunca supera `max_chars`).
 fn truncate_chars_with_ellipsis(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+    if text.char_indices().nth(max_chars).is_none() {
         return text.to_string();
     }
     if max_chars == 0 {
@@ -575,8 +588,13 @@ fn sanitize_url(url: &str) -> Option<String> {
     if trimmed.chars().any(char::is_control) {
         return None;
     }
-    let lower = trimmed.to_ascii_lowercase();
-    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+    let is_http = trimmed
+        .get(.."http://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"));
+    let is_https = trimmed
+        .get(.."https://".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"));
+    if !(is_http || is_https) {
         return None;
     }
     Some(truncate_chars(trimmed, WEB_SEARCH_URL_MAX_CHARS).to_string())

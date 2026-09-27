@@ -22,6 +22,7 @@
 //! `Deserialize` es estricto vía `try_from` (valores, `wall` y cap de entradas).
 
 use serde::{Deserialize, Serialize};
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use crate::session::ClassroomError;
@@ -245,16 +246,15 @@ impl WhiteboardCrdt {
     /// Pares vivos ordenados por ID (`Vec` acotado por construcción a 5000).
     #[must_use]
     pub fn live_sorted(&self) -> Vec<(CrdtId, String)> {
-        self.entries
-            .iter()
-            .filter_map(|(id, e)| {
-                if e.deleted {
-                    None
-                } else {
-                    Some((*id, e.value.clone()))
-                }
-            })
-            .collect()
+        let mut out = Vec::with_capacity(self.entries.len());
+        out.extend(self.entries.iter().filter_map(|(id, e)| {
+            if e.deleted {
+                None
+            } else {
+                Some((*id, e.value.clone()))
+            }
+        }));
+        out
     }
 
     /// Inserta un valor local: genera `CrdtId` + `HlcTimestamp` y lo guarda.
@@ -316,28 +316,27 @@ impl WhiteboardCrdt {
     ) -> Result<bool, ClassroomError> {
         validate_crdt_value(value)?;
         validate_remote_ts(ts, self.site, now)?;
-        match self.entries.get(&id) {
-            Some(existing) if existing.ts >= ts => Ok(false),
-            Some(_) => {
-                if let Some(entry) = self.entries.get_mut(&id) {
-                    entry.value = value.to_string();
-                    entry.ts = ts;
-                    entry.deleted = false;
+        let len_before = self.entries.len();
+        match self.entries.entry(id) {
+            Entry::Occupied(mut slot) => {
+                if slot.get().ts >= ts {
+                    Ok(false)
+                } else {
+                    slot.get_mut().value = value.to_string();
+                    slot.get_mut().ts = ts;
+                    slot.get_mut().deleted = false;
+                    Ok(true)
                 }
-                Ok(true)
             }
-            None => {
-                if self.entries.len() >= MAX_CRDT_ENTRIES {
+            Entry::Vacant(slot) => {
+                if len_before >= MAX_CRDT_ENTRIES {
                     return Err(ClassroomError::StorageFull { what: "Crdt" });
                 }
-                self.entries.insert(
-                    id,
-                    CrdtEntry {
-                        value: value.to_string(),
-                        ts,
-                        deleted: false,
-                    },
-                );
+                slot.insert(CrdtEntry {
+                    value: value.to_string(),
+                    ts,
+                    deleted: false,
+                });
                 Ok(true)
             }
         }
@@ -393,10 +392,15 @@ impl WhiteboardCrdt {
             if validate_remote_ts(remote.ts, self.site, now).is_err() {
                 continue;
             }
-            match self.entries.get(id) {
-                Some(local) if local.ts >= remote.ts => {}
-                _ => {
-                    self.entries.insert(*id, remote.clone());
+            match self.entries.entry(*id) {
+                Entry::Occupied(mut slot) => {
+                    if slot.get().ts < remote.ts {
+                        slot.insert(remote.clone());
+                        applied = applied.saturating_add(1);
+                    }
+                }
+                Entry::Vacant(slot) => {
+                    slot.insert(remote.clone());
                     applied = applied.saturating_add(1);
                 }
             }
@@ -408,18 +412,31 @@ impl WhiteboardCrdt {
     /// Recorta a `MAX_CRDT_ENTRIES` conservando las entradas más recientes
     /// `(ts, id)` (determinista: el resultado no depende del orden de fusión).
     fn trim_to_capacity(&mut self) {
-        while self.entries.len() > MAX_CRDT_ENTRIES {
+        let overflow = self.entries.len().saturating_sub(MAX_CRDT_ENTRIES);
+        if overflow == 0 {
+            return;
+        }
+        if overflow == 1 {
             let oldest = self
                 .entries
                 .iter()
                 .min_by_key(|(id, entry)| (entry.ts, **id))
                 .map(|(id, _)| *id);
-            match oldest {
-                Some(id) => {
-                    self.entries.remove(&id);
-                }
-                None => break,
+            if let Some(id) = oldest {
+                self.entries.remove(&id);
             }
+            return;
+        }
+        // Desborde múltiple: una sola pasada O(n log n) en vez de `overflow`
+        // pasadas O(n) buscando el mínimo (mismo conjunto final: los
+        // `MAX_CRDT_ENTRIES` mayores por `(ts, id)`, claves únicas).
+        let mut ordered: Vec<(HlcTimestamp, CrdtId)> = Vec::with_capacity(self.entries.len());
+        for (id, entry) in &self.entries {
+            ordered.push((entry.ts, *id));
+        }
+        ordered.sort_unstable();
+        for (_, id) in ordered.into_iter().take(overflow) {
+            self.entries.remove(&id);
         }
     }
 
@@ -441,10 +458,20 @@ fn validate_crdt_value(value: &str) -> Result<(), ClassroomError> {
             "valor CRDT excede {MAX_CRDT_VALUE_BYTES} bytes"
         )));
     }
-    if value
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-    {
+    // Vía rápida ASCII (caso común): escaneo por bytes sin decodificar UTF-8.
+    // `u8::is_ascii_control` == `char::is_control` para ASCII; `\n\t` se
+    // admiten igual que en la vía lenta.
+    let has_control = if value.is_ascii() {
+        value
+            .as_bytes()
+            .iter()
+            .any(|&b| b.is_ascii_control() && b != b'\n' && b != b'\t')
+    } else {
+        value
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    };
+    if has_control {
         return Err(ClassroomError::InvalidMessage(
             "valor CRDT con caracteres de control".to_string(),
         ));

@@ -549,7 +549,12 @@ pub fn bkt_log_likelihood(histories: &[Vec<bool>], params: &BktParams) -> Option
 /// Retorna `None` si `probs.len() != labels.len()` o si no hay positivos/negativos
 /// o si algún prob no finito. Rango 0..1 (0.5 = azar, 1.0 = perfecto).
 ///
-/// Cálculo pairwise exacto O(P*N) sin aproximaciones.
+/// Cálculo exacto O(N log N) con la misma semántica de empates que el pairwise
+/// original: cada par (pos, neg) aporta 1.0 si `pos > neg`, 0.5 si
+/// `|pos-neg| < EPSILON` sin ser `>` (incluido el `==` exacto), 0.0 si no.
+/// Con `neg` ordenado, por cada positivo se cuentan ganados (`< pos`) y
+/// empatados (`== pos` o en `(pos, pos+EPSILON)`) con `partition_point`
+/// (búsqueda binaria) en vez del doble bucle O(P·N).
 pub fn auc_score(probs: &[f64], labels: &[bool]) -> Option<f64> {
     if probs.len() != labels.len() || probs.is_empty() {
         return None;
@@ -571,17 +576,19 @@ pub fn auc_score(probs: &[f64], labels: &[bool]) -> Option<f64> {
     if pos.is_empty() || neg.is_empty() {
         return None;
     }
+    // Orden total determinista (sin NaN: ya filtrados).
+    neg.sort_by(|a, b| a.total_cmp(b));
     let mut concordant = 0.0_f64;
+    let n_neg = neg.len() as f64;
     let mut total = 0.0_f64;
     for &pp in &pos {
-        for &pn in &neg {
-            total += 1.0;
-            if pp > pn {
-                concordant += 1.0;
-            } else if (pp - pn).abs() < f64::EPSILON {
-                concordant += 0.5;
-            }
-        }
+        total += n_neg;
+        let lo = neg.partition_point(|&pn| pn < pp);
+        let eq = neg.partition_point(|&pn| pn <= pp);
+        let hi = neg.partition_point(|&pn| pn < pp + f64::EPSILON);
+        let wins = lo as f64;
+        let ties = (eq - lo) as f64 + hi.saturating_sub(eq) as f64;
+        concordant += wins + 0.5 * ties;
     }
     if total <= f64::EPSILON {
         return None;

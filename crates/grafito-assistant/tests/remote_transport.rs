@@ -537,15 +537,11 @@ fn chat_completions_accepts_a_final_assistant_content_array_of_text_blocks() {
 #[test]
 fn chat_completions_rejects_non_final_or_non_displayable_content_without_echoing_provider_data() {
     let _serial = rate_limit_test_guard();
-    let incomplete = chat_completion_result(
+    let truncated = chat_completion_result(
         r#"{"choices":[{"finish_reason":"length","message":{"role":"assistant","content":"provider-private-partial"}}]}"#,
     )
-    .unwrap_err();
-    assert_eq!(
-        incomplete,
-        "remote assistant response schema is invalid: first choice is not a completed text response"
-    );
-    assert!(!incomplete.contains("provider-private-partial"));
+    .expect("length conserva el parcial en vez de descartarlo");
+    assert_eq!(truncated, "provider-private-partial");
 
     let tool_call = chat_completion_result(
         r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"provider-private-tool","tool_calls":[]}}]}"#,

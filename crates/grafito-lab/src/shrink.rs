@@ -149,11 +149,23 @@ fn non_colorable(n: usize, edges: &[(usize, usize)], k: usize) -> Result<bool, S
 }
 
 /// Aristas del subgrafo inducido por `alive`, reindexadas a `[0, n')`.
+/// Hot path: mapa array O(1) en stack (n ≤ 24) en vez de `binary_search`
+/// O(log n) por extremo + `Vec` heap por llamada. Misma semántica: el rango
+/// es el orden sorted de `alive`, idéntico al `binary_search` sobre `keep`.
 fn induced(edges: &[(usize, usize)], alive: &BTreeSet<usize>) -> Vec<(usize, usize)> {
-    let keep: Vec<usize> = alive.iter().copied().collect();
-    let mut out = Vec::new();
+    let mut idx_of = [usize::MAX; MAX_SHRINK_POINTS];
+    for (new, old) in alive.iter().enumerate() {
+        if *old < MAX_SHRINK_POINTS {
+            idx_of[*old] = new;
+        }
+    }
+    let mut out = Vec::with_capacity(edges.len().min(alive.len() * 2));
     for (a, b) in edges {
-        if let (Ok(ia), Ok(ib)) = (keep.binary_search(a), keep.binary_search(b)) {
+        if *a >= MAX_SHRINK_POINTS || *b >= MAX_SHRINK_POINTS {
+            continue;
+        }
+        let (ia, ib) = (idx_of[*a], idx_of[*b]);
+        if ia != usize::MAX && ib != usize::MAX {
             out.push((ia, ib));
         }
     }
@@ -199,11 +211,16 @@ fn try_remove(
     if work.tests >= config.max_tests {
         return false;
     }
-    let victims: BTreeSet<usize> = block.iter().copied().collect();
-    if victims.is_disjoint(&work.alive) {
+    // Hot path: sin `BTreeSet` temporales (`victims` + `difference` = 2 allocs
+    // por trial). `block` ⊆ `alive` se chequea por pertenencia y `trial` es un
+    // clon + removes: misma semántica (`gone` = distintos removidos).
+    if !block.iter().any(|v| work.alive.contains(v)) {
         return false;
     }
-    let trial: BTreeSet<usize> = work.alive.difference(&victims).copied().collect();
+    let mut trial = work.alive.clone();
+    for v in block {
+        trial.remove(v);
+    }
     if trial.is_empty() {
         return false;
     }
@@ -319,8 +336,10 @@ pub fn shrink_two_phase(
             if work.tests >= config.max_tests {
                 break;
             }
-            let set: BTreeSet<usize> = lot.iter().copied().collect();
-            if set == work.alive {
+            // `order` es permutación de `alive`, así que `lot ⊆ alive` con
+            // elementos distintos: `len ==` ⟺ set igual (vaciado total symI).
+            // Evita un `BTreeSet` por lote (misma semántica).
+            if lot.len() == work.alive.len() {
                 continue; // sin vaciado total (symI).
             }
             if try_remove(lot, edges, k, &config, &mut work, true) {

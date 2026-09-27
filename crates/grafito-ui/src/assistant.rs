@@ -5138,18 +5138,18 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         let inner = rect.shrink(12.0);
         crate::avatar::draw_avatar(&painter, inner, &state.avatar, time, hover_pos);
         ui.add_space(crate::tokens::SPACE_SM);
-        let display = if state.user_name.trim().is_empty() {
-            state.avatar.display_name.clone()
+        // Sin clones por frame: se elige prestado y `RichText` toma la
+        // referencia (antes `clone` + `trim` + `to_string` = 2 allocs).
+        let raw = if state.user_name.trim().is_empty() {
+            state.avatar.display_name.as_str()
         } else {
-            state.user_name.clone()
+            state.user_name.as_str()
         };
-        let display = {
-            let t = display.trim();
-            if t.is_empty() {
-                "Estudiante".to_string()
-            } else {
-                t.to_string()
-            }
+        let trimmed = raw.trim();
+        let display = if trimmed.is_empty() {
+            "Estudiante"
+        } else {
+            trimmed
         };
         ui.label(
             egui::RichText::new(display)
@@ -5159,7 +5159,7 @@ fn draw_avatar_preview_pane(ui: &mut egui::Ui, state: &AssistantPanelState) {
         );
         let assistant_name = state.avatar.assistant_name_or_default();
         ui.label(
-            egui::RichText::new(&assistant_name)
+            egui::RichText::new(assistant_name)
                 .size(crate::tokens::TYPE_XS)
                 .color(theme.text_secondary),
         );

@@ -632,7 +632,22 @@ fn stroke_runs_batched(
         }
         return;
     }
-    let shapes = stroke_runs_batched_shapes(&runs, stroke, style);
+    // PERF (hot frame): en `Solid` los runs se MUEVEN al `Shape::line`, sin
+    // el `run.clone()` por run de `stroke_runs_batched_shapes` (un alloc +
+    // memcpy O(puntos) por objeto por frame). Mismos puntos, mismos
+    // `Shape::line`, un solo `add`: píxel-idéntico. El helper con `&[Vec]`
+    // se conserva para dashed/dotted (ahí no clona runs) y para los tests.
+    let shapes = if matches!(style, LineStyle::Solid) {
+        let mut shapes = Vec::with_capacity(runs.len());
+        for run in runs {
+            if run.len() >= 2 {
+                shapes.push(Shape::line(run, stroke));
+            }
+        }
+        shapes
+    } else {
+        stroke_runs_batched_shapes(&runs, stroke, style)
+    };
     if shapes.is_empty() {
         return;
     }
@@ -807,8 +822,20 @@ pub(crate) fn paint_stats_hint_for_bytes(
 /// Construye `ClippedShape`s con clip total (el clip no afecta el conteo) y
 /// completa con `with_clipped_primitives(&[])`; el log va a `debug` con el
 /// hint de `paint_stats_hint_for_bytes`. Sin `unwrap`, sin spam.
+/// Acotado por ser solo diagnóstico: batches chicos se saltan (el hint sería
+/// "ok", sin valor) y la muestra se capa para que un frame denso no pague
+/// miles de `Shape::clone` de golpe (pico cada 60 frames). El hint es por
+/// dominancia y se preserva en la muestra.
+/// Límite inferior: batches con menos shapes no pueden dominar el frame.
+pub(crate) const AUDIT_SHAPE_BATCH_MIN: usize = 8;
+/// Límite superior: la muestra conserva las tres ramas del hint
+/// (`vec_allocs > 512` sigue alcanzable) con costo acotado.
+pub(crate) const AUDIT_SHAPE_BATCH_MAX: usize = 1024;
 pub(crate) fn audit_shape_batch(shapes: &[Shape]) {
     if shapes.is_empty() {
+        return;
+    }
+    if shapes.len() < AUDIT_SHAPE_BATCH_MIN {
         return;
     }
     let frame = paint_stats_frame_nr();
@@ -820,7 +847,12 @@ pub(crate) fn audit_shape_batch(shapes: &[Shape]) {
         return;
     }
     PAINT_STATS_LOGGED_FRAME.with(|c| c.set(frame));
-    let clipped: Vec<egui::epaint::ClippedShape> = shapes
+    let sample = if shapes.len() > AUDIT_SHAPE_BATCH_MAX {
+        &shapes[..AUDIT_SHAPE_BATCH_MAX]
+    } else {
+        shapes
+    };
+    let clipped: Vec<egui::epaint::ClippedShape> = sample
         .iter()
         .map(|shape| egui::epaint::ClippedShape {
             clip_rect: Rect::EVERYTHING,
@@ -3778,6 +3810,18 @@ pub(crate) fn decide_function_label(label: &str, expr: &str) -> FunctionLabelDra
     if label.len() + expr.len() > MAX_TEX_MTEXT_BYTES {
         return FunctionLabelDraw::Ascii;
     }
+    // PERF (hot frame, una vez por función): evita el `format!` cuando la
+    // compuesta excede el tope igual que abajo (`label + " = " + expr` en
+    // chars, suma exacta por concatenación). La guarda externa es solo
+    // `len()` en bytes (gratis, sin escanear): como `chars <= bytes`, si los
+    // bytes ya entran los chars entran seguro y no se cuenta nada; solo las
+    // etiquetas largas pagan el conteo, en vez de un `String` por frame para
+    // descartarlo. El chequeo de abajo se conserva como guarda.
+    if label.len() + expr.len() + 3 > MAX_TEX_LINE_CHARS
+        && label.chars().count() + expr.chars().count() + 3 > MAX_TEX_LINE_CHARS
+    {
+        return FunctionLabelDraw::Ascii;
+    }
     let text = format!("{label} = {expr}");
     if text.chars().count() > MAX_TEX_LINE_CHARS {
         return FunctionLabelDraw::Ascii;
@@ -3924,6 +3968,34 @@ fn thermal_colormap(t: f64) -> (f64, f64, f64) {
     let g = (1.5 - (t * 3.0 - 1.5).abs()).clamp(0.0, 1.0);
     let b = (1.5 - t * 3.0).clamp(0.0, 1.0);
     (r, g, b)
+}
+
+/// Etiqueta de tick logarítmico para exponente de un dígito, sin alocar.
+///
+/// Cubre el viewport real (1e-9..1e9 contiene cualquier zoom útil): evita el
+/// `superscript()` + `format!("10{}")` por tick por frame en ejes log.
+/// Exponentes de 2+ dígitos o 0/±1 (ya fijos en el call-site) usan el camino
+/// general. Cadenas idénticas al camino general (un dígito ⇒ un supraíndice).
+fn log_pow10_label(pow: i32) -> Option<&'static str> {
+    Some(match pow {
+        2 => "10²",
+        3 => "10³",
+        4 => "10⁴",
+        5 => "10⁵",
+        6 => "10⁶",
+        7 => "10⁷",
+        8 => "10⁸",
+        9 => "10⁹",
+        -2 => "10⁻²",
+        -3 => "10⁻³",
+        -4 => "10⁻⁴",
+        -5 => "10⁻⁵",
+        -6 => "10⁻⁶",
+        -7 => "10⁻⁷",
+        -8 => "10⁻⁸",
+        -9 => "10⁻⁹",
+        _ => return None,
+    })
 }
 
 /// Convert integer exponent to Unicode superscript (e.g. 3 → "³", -2 → "⁻²")
@@ -4202,14 +4274,16 @@ impl GrafitoApp {
                     [pos + Vec2::new(0.0, -4.0), pos + Vec2::new(0.0, 4.0)],
                     stroke,
                 );
-                let label = if pow == 0 {
+                let label: std::borrow::Cow<'static, str> = if pow == 0 {
                     "1".into()
                 } else if pow == 1 {
                     "10".into()
                 } else if pow == -1 {
                     "10⁻¹".into()
+                } else if let Some(cached) = log_pow10_label(pow) {
+                    cached.into()
                 } else {
-                    format!("10{}", superscript(pow))
+                    format!("10{}", superscript(pow)).into()
                 };
                 let _ = cached_label_text(
                     &painter,
@@ -4290,14 +4364,16 @@ impl GrafitoApp {
                     [pos + Vec2::new(-4.0, 0.0), pos + Vec2::new(4.0, 0.0)],
                     stroke,
                 );
-                let label = if pow == 0 {
+                let label: std::borrow::Cow<'static, str> = if pow == 0 {
                     "1".into()
                 } else if pow == 1 {
                     "10".into()
                 } else if pow == -1 {
                     "10⁻¹".into()
+                } else if let Some(cached) = log_pow10_label(pow) {
+                    cached.into()
                 } else {
-                    format!("10{}", superscript(pow))
+                    format!("10{}", superscript(pow)).into()
                 };
                 let _ = cached_label_text(
                     &painter,

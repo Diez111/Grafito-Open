@@ -13,7 +13,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use grafito_geometry::Point2;
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 pub mod bridge;
 pub mod colab;
@@ -175,9 +175,12 @@ pub fn sha256_hex(text: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(text.as_bytes());
     let out = hasher.finalize();
+    // Tabla manual: el `format!("{byte:02x}")` por byte era ~20× más lento.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(64);
     for byte in out {
-        s.push_str(&format!("{byte:02x}"));
+        s.push(HEX[(byte >> 4) as usize] as char);
+        s.push(HEX[(byte & 0xF) as usize] as char);
     }
     s
 }
@@ -196,16 +199,16 @@ pub fn run_id_for(family: Family, n: usize, seed: u64, unit: usize, distinct: us
 
 /// ¿`run_id` sintácticamente válido? (alfanumérico + `-`, ≤128 chars.)
 pub fn is_valid_run_id(raw: &str) -> bool {
-    !raw.is_empty()
-        && raw.len() <= 128
-        && raw
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    let b = raw.as_bytes();
+    !b.is_empty()
+        && b.len() <= 128
+        && b.iter()
+            .all(|c| c.is_ascii_alphanumeric() || *c == b'-' || *c == b'_')
 }
 
 /// ¿`cnf_hash` válido? (64 hex chars.)
 pub fn is_valid_cnf_hash(raw: &str) -> bool {
-    raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit())
+    raw.len() == 64 && raw.bytes().all(|c| c.is_ascii_hexdigit())
 }
 
 // ── Generación (delegando al motor, con topes altos) ─────────────────
@@ -288,6 +291,64 @@ pub fn generate_points(params: GenParams, limits: &LabLimits) -> Result<Vec<Poin
 
 // ── Medición escalable (índice espacial O(n)) ────────────────────────
 
+/// Hasher Fx para las celdas `(i64, i64)` del índice espacial: rotación +
+/// multiplicación (~3 ns por lookup). `RandomState`/`SipHash` (~20 ns)
+/// dominaba en datos ralos (9 lookups por punto, la mayoría fallidos).
+/// Sin riesgo HashDoS: las claves son celdas internas, el hash nunca sale.
+#[derive(Clone, Copy, Default)]
+struct CellHasher {
+    hash: usize,
+}
+
+impl CellHasher {
+    #[inline]
+    fn add(&mut self, word: usize) {
+        const K: usize = 0x51_7c_c1_b7_27_22_0a_95;
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(K);
+    }
+}
+
+impl std::hash::Hasher for CellHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        for chunk in bytes.chunks(std::mem::size_of::<usize>()) {
+            let mut buf = [0u8; std::mem::size_of::<usize>()];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            self.add(usize::from_le_bytes(buf));
+        }
+    }
+
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.add(v);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.add(v as usize);
+    }
+
+    #[inline]
+    fn write_i64(&mut self, v: i64) {
+        self.add(v as usize);
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash as u64
+    }
+}
+
+/// Mapa de celdas del índice espacial (hasher Fx, ver [`CellHasher`]).
+type CellGrid = HashMap<(i64, i64), Vec<usize>, std::hash::BuildHasherDefault<CellHasher>>;
+
+fn cell_grid_with(cap_points: usize) -> CellGrid {
+    HashMap::with_capacity_and_hasher(
+        cap_points / 4 + 16,
+        std::hash::BuildHasherDefault::default(),
+    )
+}
+
 #[inline]
 fn dist2(a: Point2, b: Point2) -> f64 {
     let dx = a.x - b.x;
@@ -319,16 +380,18 @@ pub fn unit_pairs_spatial(points: &[Point2], tol: f64) -> Result<usize, String> 
     let hi = 1.0 + tol;
     let hi2 = hi * hi;
     // Celda 1.0: un par unitario solo puede estar en celdas vecinas (3×3).
-    let mut grid: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+    // HashMap+Fx (no BTreeMap): ~2× en retículas densas, parejo o mejor en
+    // ralas. Las celdas se precomputan una vez (antes `floor` dos veces).
+    let mut grid: CellGrid = cell_grid_with(points.len());
+    let mut cells: Vec<(i64, i64)> = Vec::with_capacity(points.len());
     for (idx, p) in points.iter().enumerate() {
-        let cx = p.x.floor() as i64;
-        let cy = p.y.floor() as i64;
-        grid.entry((cx, cy)).or_default().push(idx);
+        let cell = (p.x.floor() as i64, p.y.floor() as i64);
+        cells.push(cell);
+        grid.entry(cell).or_default().push(idx);
     }
     let mut count = 0usize;
     for (idx, p) in points.iter().enumerate() {
-        let cx = p.x.floor() as i64;
-        let cy = p.y.floor() as i64;
+        let (cx, cy) = cells[idx];
         for dx in -1i64..=1 {
             for dy in -1i64..=1 {
                 let Some(bucket) = grid.get(&(cx + dx, cy + dy)) else {
@@ -372,19 +435,19 @@ pub fn unit_edges_spatial(
     let lo2 = lo * lo;
     let hi = 1.0 + tol;
     let hi2 = hi * hi;
-    let mut grid: BTreeMap<(i64, i64), Vec<usize>> = BTreeMap::new();
+    let mut grid: CellGrid = cell_grid_with(points.len());
+    let mut cells: Vec<(i64, i64)> = Vec::with_capacity(points.len());
     for (idx, p) in points.iter().enumerate() {
         if !p.x.is_finite() || !p.y.is_finite() {
             return Err(format!("harness: punto {idx} no finito"));
         }
-        let cx = p.x.floor() as i64;
-        let cy = p.y.floor() as i64;
-        grid.entry((cx, cy)).or_default().push(idx);
+        let cell = (p.x.floor() as i64, p.y.floor() as i64);
+        cells.push(cell);
+        grid.entry(cell).or_default().push(idx);
     }
     let mut edges = Vec::new();
     for (idx, p) in points.iter().enumerate() {
-        let cx = p.x.floor() as i64;
-        let cy = p.y.floor() as i64;
+        let (cx, cy) = cells[idx];
         for dx in -1i64..=1 {
             for dy in -1i64..=1 {
                 let Some(bucket) = grid.get(&(cx + dx, cy + dy)) else {

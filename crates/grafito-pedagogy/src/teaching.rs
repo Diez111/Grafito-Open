@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::{Mutex, OnceLock};
 
 use crate::exercise::{Exercise, ExerciseDifficulty, ExerciseKind, ValidatorKind};
 use crate::feedback::{Feedback, FeedbackEngine};
@@ -334,7 +335,34 @@ pub const MATH_EXPR_MAX_BYTES: usize = 200;
 /// Para la UI (MathTex overlay): lo verificado se dibuja con
 /// `grafito_ui::assistant::draw_math` (fuente `$..$`); lo no verificado cae a
 /// texto honesto y `TeachingSession::new` lo descarta (`math_expr = None`).
+///
+/// El parser del canvas es el costo dominante de `TeachingSession::for_topic`
+/// (hot path de generación): como el gate es puro y determinista sobre el
+/// texto, se cachea por expresión exacta (tope 512 entradas, sin crecimiento
+/// acotado). Misma semántica, sin reparsear lo ya visto.
 pub fn verify_math_expr(expr: &str) -> bool {
+    if let Ok(guard) = verificado_cache().lock() {
+        if let Some(&v) = guard.get(expr) {
+            return v;
+        }
+    }
+    let v = verify_math_expr_frio(expr);
+    if let Ok(mut guard) = verificado_cache().lock() {
+        if guard.len() < 512 {
+            guard.insert(expr.to_string(), v);
+        }
+    }
+    v
+}
+
+/// Caché del CAS-gate por expresión exacta.
+fn verificado_cache() -> &'static Mutex<BTreeMap<String, bool>> {
+    static CACHE: OnceLock<Mutex<BTreeMap<String, bool>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// CAS-gate sin caché (puro, determinista; ver [`verify_math_expr`]).
+fn verify_math_expr_frio(expr: &str) -> bool {
     let text = expr.trim();
     if text.contains('=') {
         // Ecuación: un solo `=`, ambos lados expresiones simples.
@@ -399,19 +427,32 @@ fn prose_claims_uncovered_numbers(
         }
         &t[..end]
     }
-    fn covered(number: &str, math_expr: Option<&str>, check_expected: Option<&str>) -> bool {
+    // Normas de cobertura una sola vez (antes se recalculaban por cada número
+    // afirmado: `replace` por claim).
+    let norm_math: Option<String> = math_expr.map(|m| m.replace([' ', '\t'], ""));
+    let norm_expected: Option<String> = check_expected.map(|e| e.replace([' ', '\t'], ""));
+    fn covered_with_norms(
+        number: &str,
+        norm_math: Option<&str>,
+        norm_expected: Option<&str>,
+    ) -> bool {
         if number.is_empty() {
             return true;
         }
-        let norm = |s: &str| s.replace([' ', '\t'], "");
-        math_expr.is_some_and(|m| norm(m).contains(number))
-            || check_expected.is_some_and(|e| norm(e).contains(number))
+        norm_math.is_some_and(|m| m.contains(number))
+            || norm_expected.is_some_and(|e| e.contains(number))
     }
     // Ocurrencias de keyword con borde de palabra (sin substring: `da` en
     // `verificada` no cuenta). Los keywords son ASCII puros, así que se
     // comparan case-insensitive sobre el ORIGINAL: los offsets de
     // `to_lowercase()` no valen cuando un char cambia de largo (p. ej.
     // `İ` → `i̇`) y cortar ahí paniquea por frontera UTF-8.
+    //
+    // Hot path: una sola pasada por palabras alfabéticas (O(N)) en vez de
+    // `KEYWORDS × posiciones` con slicing (`orig.get(abs..)`) por keyword.
+    // Equivalente exacto: una keyword ASCII solo matchea cuando la corrida
+    // alfabética máxima la iguala (`eq_ignore_ascii_case`), que es justo la
+    // condición `before_ok && after_ok` del barrido anterior.
     const KEYWORDS: &[&str] = &[
         "vale",
         "valen",
@@ -427,29 +468,31 @@ fn prose_claims_uncovered_numbers(
     ];
     let mut claimed: Vec<&str> = Vec::new();
     let orig = explanation;
-    for key in KEYWORDS {
-        for (abs, _) in orig.char_indices() {
-            let Some(candidate) = orig.get(abs..abs + key.len()) else {
-                continue;
-            };
-            if !candidate.eq_ignore_ascii_case(key) {
-                continue;
+    let mut word_start: Option<usize> = None;
+    for (idx, ch) in orig.char_indices() {
+        if ch.is_alphabetic() {
+            if word_start.is_none() {
+                word_start = Some(idx);
             }
-            let before_ok = abs == 0
-                || !orig[..abs]
-                    .chars()
-                    .next_back()
-                    .is_some_and(|c| c.is_alphabetic());
-            let after = abs + key.len();
-            let after_ok = orig[after..]
-                .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphabetic());
-            if before_ok && after_ok {
-                let tail = &orig[after..];
+            continue;
+        }
+        if let Some(start) = word_start.take() {
+            let word = &orig[start..idx];
+            if KEYWORDS.iter().any(|k| word.eq_ignore_ascii_case(k)) {
+                let tail = &orig[idx..];
                 if is_num_start(tail) {
                     claimed.push(take_number(tail));
                 }
+            }
+        }
+    }
+    // Última palabra (explanation sin terminador no alfabético).
+    if let Some(start) = word_start {
+        let word = &orig[start..];
+        if KEYWORDS.iter().any(|k| word.eq_ignore_ascii_case(k)) {
+            let tail = "";
+            if is_num_start(tail) {
+                claimed.push(take_number(tail));
             }
         }
     }
@@ -464,7 +507,7 @@ fn prose_claims_uncovered_numbers(
     }
     claimed
         .iter()
-        .any(|n| !covered(n, math_expr, check_expected))
+        .any(|n| !covered_with_norms(n, norm_math.as_deref(), norm_expected.as_deref()))
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TeachingSession {

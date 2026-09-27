@@ -219,22 +219,20 @@ fn strip_implicit_star(s: &str) -> String {
     out
 }
 
-/// ¿Equivalencia simbólica simple? (sin CAS).
+/// ¿Equivalencia simbólica simple con canónicas precomputadas? (sin CAS).
 /// Acepta `x^2`≡`x**2`≡`x²`, `2*x`≡`2x`, `sen(`≡`sin(`.
-fn symbolic_equivalent(solution: &str, answer: &str) -> bool {
-    let cs = canonical_symbolic(solution);
-    let ca = canonical_symbolic(answer);
+fn symbolic_equivalent_canon(cs: &str, ca: &str) -> bool {
     if cs == ca {
         return true;
     }
-    if strip_implicit_star(&cs) == strip_implicit_star(&ca) {
+    if strip_implicit_star(cs) == strip_implicit_star(ca) {
         return true;
     }
     false
 }
 
-fn tokenize_symbolic(s: &str) -> Vec<String> {
-    let canon = canonical_symbolic(s);
+/// Tokeniza una forma ya canónica (sin recanonicalizar).
+fn tokenize_canon(canon: &str) -> Vec<String> {
     canon
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|t| !t.is_empty())
@@ -242,13 +240,14 @@ fn tokenize_symbolic(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// ¿Parcial por solapamiento de términos? (≥50 % de términos en común).
-fn symbolic_partial(solution: &str, answer: &str) -> bool {
-    if symbolic_equivalent(solution, answer) {
+/// ¿Parcial por solapamiento de términos con canónicas precomputadas?
+/// (≥50 % de términos en común; mismo scoring, sin reparsear).
+fn symbolic_partial_canon(cs: &str, ca: &str) -> bool {
+    if symbolic_equivalent_canon(cs, ca) {
         return false;
     }
-    let sol_toks = tokenize_symbolic(solution);
-    let ans_toks = tokenize_symbolic(answer);
+    let sol_toks = tokenize_canon(cs);
+    let ans_toks = tokenize_canon(ca);
     if sol_toks.is_empty() || ans_toks.is_empty() {
         return false;
     }
@@ -298,11 +297,11 @@ fn has_power_marker(s: &str) -> bool {
         || s.contains('√')
 }
 
-/// Clave "sin notación": minúsculas canónicas sin `^`/`**`/`²`/`³`
-/// (`x^2`, `x**2`, `x²` → `x2`). Dos textos con la misma clave difieren solo
-/// en notación. Pura, sin regex ni `unwrap`.
-fn notation_key(s: &str) -> String {
-    canonical_symbolic(s).replace(['^'], "")
+/// Clave "sin notación" desde una forma ya canónica: quita `^`
+/// (`x^2` → `x2`). Dos textos con la misma clave difieren solo en notación.
+/// Pura, sin regex ni `unwrap`.
+fn notation_key_canon(canon: &str) -> String {
+    canon.replace(['^'], "")
 }
 
 /// Funciones elementales presentes en una expresión canónica.
@@ -427,7 +426,20 @@ fn terminos_con_signos_opuestos(sol: &str, ans: &str) -> bool {
 ///
 /// `Sign → Fraction → Distributive → ChainRule → Domain → Notation →
 ///  Exponent → Algebra → Concept`
-fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -> Misconception {
+#[allow(clippy::too_many_arguments)]
+fn diagnose(
+    exercise: &Exercise,
+    answer: &str,
+    sol_norm: &str,
+    ans_norm: &str,
+    sol_val: Option<f64>,
+    ans_val: Option<f64>,
+    sol_canon: &str,
+    ans_canon: &str,
+    sol_low: &str,
+    ans_low: &str,
+    prompt_low: &str,
+) -> Misconception {
     // Orden: Sign, Fraction, Distributive, ChainRule, Domain, Notation, Exponent, Algebra, Concept
 
     // Sign: '-' distinto (contenido o signo numérico o términos firmados al revés)
@@ -436,7 +448,7 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
     if sol_has_minus != ans_has_minus {
         return Misconception::Sign;
     }
-    if let (Some(sv), Some(av)) = (parse_numeric(&exercise.solution), parse_numeric(answer)) {
+    if let (Some(sv), Some(av)) = (sol_val, ans_val) {
         if sv != 0.0 && av != 0.0 && sv.signum() != av.signum() {
             return Misconception::Sign;
         }
@@ -447,8 +459,6 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
 
     // Fraction: ambas contienen '/' pero valores difieren
     if answer.contains('/') && exercise.solution.contains('/') {
-        let sol_val = parse_numeric(&exercise.solution);
-        let ans_val = parse_numeric(answer);
         match (sol_val, ans_val) {
             (Some(sv), Some(av)) => {
                 if !numeric_close(av, sv) {
@@ -459,10 +469,6 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
         }
     }
 
-    let sol_low = exercise.solution.to_lowercase();
-    let ans_low = answer.to_lowercase();
-    let prompt_low = exercise.prompt.to_lowercase();
-
     // Distributive: patrón real `(a+b)·c` (paréntesis multiplicado) en el
     // prompt, o respuesta que expandió sin paréntesis
     // (`a*c+b*c`) contra solución con paréntesis. Solo prompt (no solución):
@@ -470,7 +476,7 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
     // el error del alumno sea distributivo (p. ej. olvidar la derivada de
     // afuera). El prompt con `(x+1)^2` ya NO dispara nada: la potencia no es
     // distributiva.
-    if tiene_distributiva_multiplicada(&prompt_low) {
+    if tiene_distributiva_multiplicada(prompt_low) {
         return Misconception::Distributive;
     }
     if ans_norm.contains('+')
@@ -483,8 +489,9 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
 
     // ChainRule: la solución compone funciones elementales que la respuesta
     // dejó afuera (derivar sin(x²) y quedarse con 2x: falta cos).
-    let sol_funcs = funciones_elementales(&canonical_symbolic(&exercise.solution));
-    let ans_funcs = funciones_elementales(&canonical_symbolic(answer));
+    // Usa las canónicas ya computadas en `assess` (sin reparsear).
+    let sol_funcs = funciones_elementales(sol_canon);
+    let ans_funcs = funciones_elementales(ans_canon);
     if !sol_funcs.is_empty() && sol_funcs.iter().any(|f| !ans_funcs.contains(f)) {
         return Misconception::ChainRule;
     }
@@ -495,33 +502,31 @@ fn diagnose(exercise: &Exercise, answer: &str, sol_norm: &str, ans_norm: &str) -
     if ans_is_domain != sol_is_domain {
         return Misconception::Domain;
     }
-    if ans_is_domain && parse_numeric(&exercise.solution).is_some() {
+    if ans_is_domain && sol_val.is_some() {
         return Misconception::Domain;
     }
-    if sol_is_domain && parse_numeric(answer).is_some() {
+    if sol_is_domain && ans_val.is_some() {
         return Misconception::Domain;
     }
 
     // Notation: mismos términos con distinta notación (^ vs ², sin vs sen,
-    // sqrt vs √). Se exige que las claves "sin notación" sean IGUALES: con el
-    // chequeo viejo (`solución con ^2` y `respuesta con un "2" sin ^`),
-    // "21" contra "x^2" daba "notación".
+    // sqrt vs √). Se exige que las claves "sin notación" sean IGUALES.
     let notation_diff = sol_low.contains('^') != ans_low.contains('^')
         || (sol_low.contains("sin") && ans_low.contains("sen"))
         || (sol_low.contains("sen") && ans_low.contains("sin"))
         || sol_low.contains('²') != ans_low.contains('²')
         || (sol_low.contains("sqrt") && ans_low.contains('√'))
         || (sol_low.contains('√') && ans_low.contains("sqrt"));
-    if notation_diff && notation_key(&exercise.solution) == notation_key(answer) {
+    if notation_diff && notation_key_canon(sol_canon) == notation_key_canon(ans_canon) {
         return Misconception::Notation;
     }
 
     // Exponent: ambas con marcadores de potencia/raíz pero distinto exponente
     // (ej. x^2 vs x^3, sqrt(4) vs sqrt(9)). No roba casos de Notation
     // (exige marcador en ambas y claves distintas).
-    if has_power_marker(&sol_low)
-        && has_power_marker(&ans_low)
-        && notation_key(&exercise.solution) != notation_key(answer)
+    if has_power_marker(sol_low)
+        && has_power_marker(ans_low)
+        && notation_key_canon(sol_canon) != notation_key_canon(ans_canon)
     {
         return Misconception::Exponent;
     }
@@ -559,10 +564,13 @@ impl FeedbackEngine {
             };
         }
 
+        // Parseos y formas canónicas una sola vez (hot path: antes se
+        // recalculaban hasta 4 veces entre tolerancia, equivalencia,
+        // diagnóstico y parcial).
+        let sol_val = parse_numeric(&exercise.solution);
+        let ans_val = parse_numeric(answer);
         // 2a. Tolerancia numérica 2 % → veredicto Equivalente.
-        if let (Some(sol_val), Some(ans_val)) =
-            (parse_numeric(&exercise.solution), parse_numeric(answer))
-        {
+        if let (Some(sol_val), Some(ans_val)) = (sol_val, ans_val) {
             if numeric_close(ans_val, sol_val) {
                 return Feedback {
                     correct: true,
@@ -576,7 +584,9 @@ impl FeedbackEngine {
 
         // 2b. Equivalencia simbólica simple (sin CAS) → veredicto Equivalente.
         // Acepta x^2≡x**2≡x², 2*x≡2x, sen(≡sin(.
-        if symbolic_equivalent(&exercise.solution, answer) {
+        let sol_canon = canonical_symbolic(&exercise.solution);
+        let ans_canon = canonical_symbolic(answer);
+        if symbolic_equivalent_canon(&sol_canon, &ans_canon) {
             return Feedback {
                 correct: true,
                 verdict: Verdict::Equivalent,
@@ -586,16 +596,29 @@ impl FeedbackEngine {
             };
         }
 
-        // 3. Diagnóstico de misconception (10 tipadas).
-        let misconception = diagnose(exercise, answer, &sol_norm, &ans_norm);
+        // 3. Diagnóstico de misconception (10 tipadas, con valores precomputados).
+        let sol_low = exercise.solution.to_lowercase();
+        let ans_low = answer.to_lowercase();
+        let prompt_low = exercise.prompt.to_lowercase();
+        let misconception = diagnose(
+            exercise,
+            answer,
+            &sol_norm,
+            &ans_norm,
+            sol_val,
+            ans_val,
+            &sol_canon,
+            &ans_canon,
+            &sol_low,
+            &ans_low,
+            &prompt_low,
+        );
 
         // 4. ¿Parcial? (numérico 2–10 % o solapamiento simbólico ≥50 %).
-        let partial = if let (Some(sol_val), Some(ans_val)) =
-            (parse_numeric(&exercise.solution), parse_numeric(answer))
-        {
+        let partial = if let (Some(sol_val), Some(ans_val)) = (sol_val, ans_val) {
             numeric_partial(ans_val, sol_val)
         } else {
-            symbolic_partial(&exercise.solution, answer)
+            symbolic_partial_canon(&sol_canon, &ans_canon)
         };
 
         let (base_message, next_step) = match misconception {

@@ -131,16 +131,19 @@ impl ToastManager {
             None => 0.0,
         };
 
-        let ctx = ui.ctx().clone();
-        let theme = current_theme(&ctx);
+        let ctx = ui.ctx();
+        let theme = current_theme(ctx);
         let screen_rect = ctx.screen_rect();
         let mut y_offset = TOAST_TOP_OFFSET;
         // Leave the lower three quarters free for compact panels and their composer.
         let max_stack_y =
             (screen_rect.height() * TOAST_MAX_SCREEN_FRACTION).max(TOAST_TOP_OFFSET + SPACE_MD);
 
-        let mut hovered: Vec<usize> = Vec::new();
-        let mut clicked: Vec<usize> = Vec::new();
+        // Sin `Vec`: como mucho `TOAST_MAX_VISIBLE` marcas por frame.
+        let mut hovered: [Option<usize>; TOAST_MAX_VISIBLE] = [None; TOAST_MAX_VISIBLE];
+        let mut hovered_len = 0usize;
+        let mut clicked: [Option<usize>; TOAST_MAX_VISIBLE] = [None; TOAST_MAX_VISIBLE];
+        let mut clicked_len = 0usize;
 
         // Z3: como mucho TOAST_MAX_VISIBLE (los más recientes primero). Junto
         // al coalescing de `push`, dos jobs encadenados jamás se enciman.
@@ -184,12 +187,21 @@ impl ToastManager {
             let response = ui.interact(rect, ui.id().with(("toast", index)), egui::Sense::click());
             response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
             if response.hovered() {
-                hovered.push(index);
+                hovered[hovered_len] = Some(index);
+                hovered_len += 1;
             }
             if response.clicked() {
-                clicked.push(index);
+                clicked[clicked_len] = Some(index);
+                clicked_len += 1;
             }
-            let kind_color = toast.kind.color(&ctx);
+            // Color ya resuelto del `theme` del frame: evita un
+            // `current_theme` (lock + `Arc` del estilo) por toast.
+            let kind_color = match toast.kind {
+                ToastKind::Info => theme.toast_info,
+                ToastKind::Success => theme.toast_success,
+                ToastKind::Error => theme.toast_error,
+                ToastKind::Cas => theme.toast_cas,
+            };
             let bg_alpha = (theme.toast_bg.a() as f32 * alpha) as u8;
             let bg = Color32::from_rgba_premultiplied(
                 theme.toast_bg.r(),
@@ -221,13 +233,13 @@ impl ToastManager {
             );
         }
 
-        for index in hovered {
+        for index in hovered.into_iter().take(hovered_len).flatten() {
             if let Some(toast) = self.toasts.get_mut(index) {
                 toast.created = (toast.created + dt).min(current_time);
             }
         }
         // `clicked` llega en orden descendente (loop `.rev()`): `remove` es seguro.
-        for index in clicked {
+        for index in clicked.into_iter().take(clicked_len).flatten() {
             if index < self.toasts.len() {
                 self.toasts.remove(index);
             }

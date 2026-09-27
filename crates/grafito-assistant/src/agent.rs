@@ -33,6 +33,16 @@ use std::sync::mpsc::Receiver;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+/// ¿`text` supera `limit` caracteres? Idéntico a `chars().count() > limit`
+/// con salida temprana + fast path por bytes (hot por turno).
+#[inline]
+fn exceeds_char_limit(text: &str, limit: usize) -> bool {
+    if text.len() <= limit {
+        return false;
+    }
+    text.chars().take(limit.saturating_add(1)).count() > limit
+}
+
 /// Límite del cuerpo de la respuesta del agente.
 const MAX_AGENT_RESPONSE_BYTES: usize = 32 * 1024;
 
@@ -770,9 +780,17 @@ fn solve_poly_tool(call: &ToolCall) -> ToolResult {
 }
 
 /// Lee un vector o matriz JSON de números finitos.
+///
+/// Acotado al presupuesto del borde: como máximo 32 filas/columnas y 1024
+/// elementos en total. Sin este tope un modelo hostil podía mandar una matriz
+/// de 1000×1000 (1M de números) y el `Vec` intermedio + el solver (`O(n³)`)
+/// convertían el turno en DoS de memoria/CPU antes de que `ValidatedMatrix`
+/// pudiera rechazar (su techo es mucho mayor: 1000×1000).
 fn math_number_matrix(value: &Value) -> Option<Vec<Vec<f64>>> {
+    const MAX_MATRIX_SIDE: usize = 32;
+    const MAX_MATRIX_ELEMENTS: usize = 1_024;
     let outer = value.as_array()?;
-    if outer.is_empty() {
+    if outer.is_empty() || outer.len() > MAX_MATRIX_SIDE {
         return None;
     }
     if outer.iter().all(|item| item.as_f64().is_some()) {
@@ -783,9 +801,14 @@ fn math_number_matrix(value: &Value) -> Option<Vec<Vec<f64>>> {
         return row.map(|row| vec![row]);
     }
     let mut rows = Vec::with_capacity(outer.len());
+    let mut total = 0_usize;
     for item in outer {
         let inner = item.as_array()?;
-        if inner.is_empty() {
+        if inner.is_empty() || inner.len() > MAX_MATRIX_SIDE {
+            return None;
+        }
+        total = total.checked_add(inner.len())?;
+        if total > MAX_MATRIX_ELEMENTS {
             return None;
         }
         let row: Option<Vec<f64>> = inner
@@ -960,6 +983,23 @@ fn groebner_gate_tool(call: &ToolCall) -> ToolResult {
             "groebner_gate requiere 'polys' y 'vars' no vacíos".into(),
         );
     };
+    // Tope del borde (paridad con el motor `MAX_GROEBNER_POLYS` 12 /
+    // `MAX_GROEBNER_VARS` 6): sin esto un array de 10k polinomios se
+    // coleccionaba entero antes de que el motor pudiera rechazar.
+    if polys.len() > grafito_geometry::cas::MAX_GROEBNER_POLYS
+        || vars.len() > grafito_geometry::cas::MAX_GROEBNER_VARS
+    {
+        return math_err(
+            call,
+            format!(
+                "groebner_gate: se recibieron {} polinomios y {} variables (cota {} polys, {} vars)",
+                polys.len(),
+                vars.len(),
+                grafito_geometry::cas::MAX_GROEBNER_POLYS,
+                grafito_geometry::cas::MAX_GROEBNER_VARS,
+            ),
+        );
+    }
     match grafito_core::symbolic::groebner_gate(&polys, &vars) {
         Ok(basis) => ToolResult::text(
             &call.id,
@@ -2498,13 +2538,21 @@ pub fn parse_anim_format(raw: Option<&str>) -> Result<grafito_anim::ExportFormat
     grafito_anim::ExportFormat::from_str(canonical).map_err(|e| e.to_string())
 }
 
-/// Extrae `duration_s` (default 2.0) validada contra `AnimDuration` 0.1..=60 s.
+/// Extrae `duration_s` (default 2.0) validada contra 0.1..=60 s.
+///
+/// El contrato de la tool es 60 s máximo (schema `maximum: 60.0`); el chequeo
+/// es explícito acá y no delega el techo en `AnimDuration` del núcleo (que
+/// hoy admite hasta 120 s): sin este freno el borde aceptaría duraciones que
+/// el schema promete rechazar.
 pub fn parse_anim_duration_s(arguments: &Value) -> Result<f64, String> {
     let secs = arguments
         .get("duration_s")
         .or_else(|| arguments.get("duration"))
         .and_then(Value::as_f64)
         .unwrap_or(2.0);
+    if !secs.is_finite() || !(0.1..=60.0).contains(&secs) {
+        return Err(format!("duration_s {secs} fuera de 0.1..=60"));
+    }
     grafito_anim::AnimDuration::try_new(secs)
         .map(|d| d.as_secs())
         .map_err(|e| e.to_string())
@@ -3929,7 +3977,7 @@ fn web_search_tool(call: &ToolCall) -> ToolResult {
         Ok(results) => {
             let mut text = crate::web::format_web_context(query, &results);
             // Cap del resultado de tool (schema: 2048 chars) char-safe.
-            if text.chars().count() > 2_048 {
+            if exceeds_char_limit(&text, 2_048) {
                 text = text
                     .chars()
                     .take(2_047)
@@ -4471,10 +4519,15 @@ fn build_agent_payload(
     for tool in tools {
         tool_json.push(tool.openai_tool()?);
     }
+    // Clamp del wire (paridad con el chat simple 1024..=8192): el presupuesto
+    // ya viene acotado por `completion_token_budget` del loop, pero un
+    // llamante directo con un valor gigante no debe poder pedir tokens
+    // ilimitados al proveedor.
+    let max_tokens = max_output_tokens.clamp(1, 8_192);
     Ok(json!({
         "model": settings.model,
         "stream": false,
-        "max_tokens": max_output_tokens,
+        "max_tokens": max_tokens,
         "messages": messages,
         "tools": tool_json,
     }))
@@ -4502,12 +4555,14 @@ fn agent_http_status_error(response: reqwest::blocking::Response) -> String {
             return format!("assistant agent returned HTTP 429 (reintentá en {secs}s)");
         }
     }
-    let body: String = response
-        .text()
-        .unwrap_or_default()
-        .chars()
-        .take(200)
-        .collect();
+    // Cuerpo acotado al wire (8 KiB + truncado a 200 chars): antes se leía
+    // con `response.text()` sin cota antes de truncar.
+    let raw = crate::read_error_body_capped(response);
+    let body: String = if raw == "<no body>" {
+        String::new()
+    } else {
+        raw.chars().take(200).collect()
+    };
     if body.trim().is_empty() {
         format!("assistant agent returned HTTP {status}")
     } else {
@@ -4531,6 +4586,10 @@ fn request_agent_completion(
     if cancellation.is_cancelled() {
         return Err("assistant agent request was cancelled".into());
     }
+    // Clamp 100ms..=120s (paridad con el chat simple): `per_turn_timeout`
+    // no pasa por `RequestBudget::validate` y un cero/gigante llegaría crudo
+    // al `.timeout()` de reqwest.
+    let timeout = crate::clamp_remote_timeout(timeout);
     // Muse Spark no responde por Chat Completions (500 instantáneo verificado
     // contra el servidor real): se atiende por Responses API en un solo turno;
     // el loop exterior (`run_agent`) o `run_responses_agent_loop` re-postea con
@@ -4615,10 +4674,14 @@ fn parse_agent_completion(body: &Value) -> Result<AgentChatResponse, String> {
     if message.get("role").and_then(Value::as_str) != Some("assistant") {
         return Err("assistant agent response message is not an assistant message".into());
     }
-    let calls = grafito_agent::schema::parse_tool_calls(&Value::Object(message.clone()));
-    if let Ok(parsed) = calls {
-        if !parsed.is_empty() {
-            return Ok(AgentChatResponse::ToolCalls { calls: parsed });
+    // Fast path: los turnos de texto no traen `tool_calls`; evita clonar el
+    // objeto `message` entero (contenido incluido) sólo para parsear tools.
+    if message.contains_key("tool_calls") {
+        let calls = grafito_agent::schema::parse_tool_calls(&Value::Object(message.clone()));
+        if let Ok(parsed) = calls {
+            if !parsed.is_empty() {
+                return Ok(AgentChatResponse::ToolCalls { calls: parsed });
+            }
         }
     }
     let content = message
@@ -4714,10 +4777,28 @@ pub const MAX_AGENT_CHAT_HTTP_REQUESTS_PER_TURN: usize = 15;
 
 /// Suma el tamaño serializado del `input` Responses (paridad con
 /// `message_chars` de `loop_engine`: `Value::to_string().len()`).
+///
+/// Sin asignar el JSON por item: cuenta bytes con un writer contador (mismo
+/// serializer compacto, mismo largo, sin el `String` temporal de 48 KiB).
 fn responses_input_chars(input: &[Value]) -> usize {
+    struct CountingWriter(usize);
+    impl std::io::Write for CountingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0 = self.0.saturating_add(buf.len());
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
     input
         .iter()
-        .map(|item| item.to_string().len())
+        .map(|item| {
+            let mut counter = CountingWriter(0);
+            serde_json::to_writer(&mut counter, item)
+                .map(|()| counter.0)
+                .unwrap_or(usize::MAX)
+        })
         .fold(0_usize, |acc, len| acc.saturating_add(len))
 }
 
@@ -4750,10 +4831,13 @@ fn responses_agent_tools(tools: &[ToolSchema]) -> Result<Vec<Value>, String> {
 }
 
 /// Presupuesto `max_output_tokens` para Responses: incluye razonamiento
-/// (verificado: un "ok" consume 61 reasoning + 0 output). Duplica la lógica
-/// mínima de `responses_token_limit_for_chars` de `crate::` (privado).
+/// (verificado: un "ok" consume 61 reasoning + 0 output; un "2+2" simple
+/// consume ~2045 reasoning + 0 output). Paridad con
+/// `responses_token_limit_for_chars` del chat simple (×4, piso 2048, techo
+/// 16384): con ×2 los modelos de razonamiento cortaban en `incomplete` antes
+/// de emitir la respuesta y el turno perdía el texto visible.
 fn responses_agent_token_budget(max_output_chars: usize) -> usize {
-    max_output_chars.saturating_mul(2).clamp(2_048, 16_384)
+    max_output_chars.saturating_mul(4).clamp(2_048, 16_384)
 }
 
 /// Construye el payload Responses del agente con instructions+input+tools.
@@ -4769,12 +4853,16 @@ fn build_responses_agent_payload(
     max_output_tokens: usize,
 ) -> Result<Value, String> {
     settings.validate()?;
+    // Piso 16 = mínimo que acepta el servidor; techo 16384 = paridad con el
+    // chat simple (el llamante ya pasa por `responses_agent_token_budget`,
+    // esto es defensa en profundidad ante un valor gigante directo).
+    let max_output_tokens = max_output_tokens.clamp(16, 16_384);
     Ok(json!({
         "model": settings.model,
         "instructions": instructions,
         "input": input,
         "tools": responses_agent_tools(tools)?,
-        "max_output_tokens": max_output_tokens.max(16),
+        "max_output_tokens": max_output_tokens,
     }))
 }
 
@@ -4883,7 +4971,7 @@ fn parse_responses_tool_call(item: &Value, index: usize) -> Result<ToolCall, Str
         .unwrap_or_default()
         .trim()
         .to_owned();
-    if name.is_empty() || name.chars().count() > 64 {
+    if name.is_empty() || exceeds_char_limit(&name, 64) {
         return Err(format!(
             "assistant agent responses call {index} has an invalid name"
         ));
@@ -4893,7 +4981,7 @@ fn parse_responses_tool_call(item: &Value, index: usize) -> Result<ToolCall, Str
         Some(Value::String(text)) => text.clone(),
         Some(other) => other.to_string(),
     };
-    if raw_arguments.chars().count() > MAX_RESPONSES_ARGS_CHARS {
+    if exceeds_char_limit(&raw_arguments, MAX_RESPONSES_ARGS_CHARS) {
         return Err(format!(
             "assistant agent responses call {index} arguments exceed the budget"
         ));
@@ -4923,7 +5011,12 @@ fn parse_responses_agent_turn(body: &Value) -> Result<AgentChatResponse, String>
                 .get("message")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown provider error");
-            let detail: String = detail.chars().take(200).collect();
+            let detail: String = if detail.len() <= 200 || detail.char_indices().nth(200).is_none()
+            {
+                detail.to_owned()
+            } else {
+                detail.chars().take(200).collect()
+            };
             return Err(format!(
                 "assistant agent responses API returned an error: {detail}"
             ));
@@ -4992,6 +5085,8 @@ fn post_responses_output(
     if cancellation.is_cancelled() {
         return Err("assistant agent request was cancelled".into());
     }
+    // Mismo clamp que `request_agent_completion` (ver arriba).
+    let timeout = crate::clamp_remote_timeout(timeout);
     let client = crate::shared_http_client()?;
     let endpoint = crate::responses_endpoint(settings)?;
     let mut call = client.post(endpoint.clone()).json(payload).timeout(timeout);
@@ -5055,7 +5150,7 @@ fn request_responses_agent_turn(
 
 fn summarize_responses_args(arguments: &Value) -> String {
     let summary = arguments.to_string();
-    if summary.chars().count() > MAX_RESPONSES_ARGS_SUMMARY_CHARS {
+    if exceeds_char_limit(&summary, MAX_RESPONSES_ARGS_SUMMARY_CHARS) {
         let mut clipped = summary
             .chars()
             .take(MAX_RESPONSES_ARGS_SUMMARY_CHARS.saturating_sub(1))
@@ -5127,7 +5222,12 @@ fn run_responses_agent_loop<D: ToolDispatcher>(
         if accumulated_chars > MAX_RESPONSES_INPUT_CHARS {
             return Err("assistant agent loop exceeded its total char budget".into());
         }
-        let per_turn_timeout = budget.per_turn_timeout.min(remaining);
+        // Clamp del configurado y respeto del span restante: el clamp va
+        // primero para que un `per_turn_timeout` gigante no coma el total, y
+        // el `min` después para no exceder `total_span` (si el restante es
+        // menor al piso, el timeout diminuto falla honesto en vez de romper
+        // el invariante del loop).
+        let per_turn_timeout = crate::clamp_remote_timeout(budget.per_turn_timeout).min(remaining);
         let payload = build_responses_agent_payload(
             settings,
             &instructions_owned,
@@ -5714,14 +5814,14 @@ impl VibecoderOption {
         if clean_label.is_empty() {
             return Err("botón sin etiqueta".to_string());
         }
-        if clean_label.chars().count() > MAX_VIBE_LABEL_CHARS {
+        if exceeds_char_limit(clean_label, MAX_VIBE_LABEL_CHARS) {
             return Err(format!("etiqueta excede {MAX_VIBE_LABEL_CHARS} chars"));
         }
         let clean_hint = hint.trim();
         if clean_hint.is_empty() {
             return Err("botón sin hint".to_string());
         }
-        if clean_hint.chars().count() > MAX_VIBE_HINT_CHARS {
+        if exceeds_char_limit(clean_hint, MAX_VIBE_HINT_CHARS) {
             return Err(format!("hint excede {MAX_VIBE_HINT_CHARS} chars"));
         }
         Ok(Self {
@@ -5756,14 +5856,14 @@ impl VibecoderError {
         if clean_title.is_empty() {
             return Err("título vacío".to_string());
         }
-        if clean_title.chars().count() > MAX_VIBE_TITLE_CHARS {
+        if exceeds_char_limit(clean_title, MAX_VIBE_TITLE_CHARS) {
             return Err(format!("título excede {MAX_VIBE_TITLE_CHARS} chars"));
         }
         let clean_explanation = explanation.trim();
         if clean_explanation.is_empty() {
             return Err("explicación vacía".to_string());
         }
-        if clean_explanation.chars().count() > MAX_VIBE_EXPLANATION_CHARS {
+        if exceeds_char_limit(clean_explanation, MAX_VIBE_EXPLANATION_CHARS) {
             return Err(format!(
                 "explicación excede {MAX_VIBE_EXPLANATION_CHARS} chars"
             ));
@@ -8302,6 +8402,98 @@ mod tests {
             json!({"a": [[1.0, 2.0], [2.0, 4.0]], "b": [3.0, 6.0]}),
         ));
         assert!(!singular.ok, "singular debe fallar: {}", singular.content);
+    }
+
+    #[test]
+    fn solve_system_rejects_oversized_matrices_at_the_border() {
+        // Regresión DoS: 33 filas superan el tope del borde (32) y se
+        // rechazan sin coleccionar/solver nada pesado.
+        let big_a: Vec<Vec<f64>> = (0..33).map(|_| vec![1.0, 0.0]).collect();
+        let big_b: Vec<f64> = vec![1.0; 33];
+        let rejected =
+            dispatch_safe_tool(&math_call("solve_system", json!({"a": big_a, "b": big_b})));
+        assert!(
+            !rejected.ok,
+            "sobredimensión debe fallar: {}",
+            rejected.content
+        );
+        // 2x2 válido sigue pasando el borde (acá falla por singular, no por tamaño).
+        let small = dispatch_safe_tool(&math_call(
+            "solve_system",
+            json!({"a": [[1.0, 2.0], [2.0, 4.0]], "b": [3.0, 6.0]}),
+        ));
+        assert!(small.content.contains("singular") || !small.ok);
+    }
+
+    #[test]
+    fn groebner_gate_rejects_oversized_poly_lists_at_the_border() {
+        // Regresión DoS: 13 polinomios superan la cota del motor (12).
+        let polys: Vec<String> = (0..13).map(|index| format!("x{index}")).collect();
+        let rejected = dispatch_safe_tool(&math_call(
+            "groebner_gate",
+            json!({"polys": polys, "vars": ["x0"]}),
+        ));
+        assert!(
+            !rejected.ok,
+            "exceso de polinomios debe fallar: {}",
+            rejected.content
+        );
+    }
+
+    #[test]
+    fn responses_agent_token_budget_matches_simple_chat_parity() {
+        // Paridad ×4 con el chat simple (el razonamiento consume el mismo
+        // `max_output_tokens`): con ×2 se cortaba en `incomplete` sin texto.
+        assert_eq!(responses_agent_token_budget(2_048), 8_192);
+        assert_eq!(responses_agent_token_budget(0), 2_048);
+        assert_eq!(responses_agent_token_budget(100_000), 16_384);
+    }
+
+    #[test]
+    fn agent_payloads_clamp_giant_token_budgets() {
+        let settings = ProviderSettings::for_profile(crate::ProviderProfile::OllamaLocal, "local");
+        let tool = || {
+            ToolSchema::new(
+                "evaluate_expr",
+                "Evalúa una expresión.",
+                json!({"type": "object", "properties": {"expression": {"type": "string"}}}),
+            )
+        };
+        let chat = build_agent_payload(
+            &settings,
+            &[json!({"role": "user", "content": "hola"})],
+            &[tool()],
+            usize::MAX,
+        )
+        .expect("chat payload builds");
+        assert_eq!(chat["max_tokens"], 8_192);
+        let responses = build_responses_agent_payload(
+            &settings,
+            "instrucciones",
+            &[json!({"role": "user", "content": "hola"})],
+            &[tool()],
+            usize::MAX,
+        )
+        .expect("responses payload builds");
+        assert_eq!(responses["max_output_tokens"], 16_384);
+    }
+
+    #[test]
+    fn agent_timeouts_are_clamped_to_the_remote_budget() {
+        // `per_turn_timeout` no pasa por `RequestBudget::validate`: cero o
+        // gigante se acotan a 100ms..=120s como el chat simple.
+        assert_eq!(
+            crate::clamp_remote_timeout(Duration::from_millis(0)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            crate::clamp_remote_timeout(Duration::from_secs(3_600)),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            crate::clamp_remote_timeout(Duration::from_secs(30)),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]

@@ -139,11 +139,16 @@ pub fn classify_math_kind(problem: &str) -> MathKind {
         return MathKind::Empty;
     }
     let tokens = tokenize_words(&normalized);
-    let has_token = |words: &[&str]| {
-        tokens
-            .iter()
-            .any(|token| words.iter().any(|word| *token == *word))
-    };
+    classify_math_kind_with(&normalized, &tokens)
+}
+
+/// Núcleo de la sonda sobre texto ya normalizado/tokenizado.
+///
+/// Separa el trabajo caro (`normalize_text` + `tokenize_words`) para que
+/// `classify_route` lo compute una sola vez y lo reuse en la red de
+/// `General`: antes se normalizaba y tokenizaba dos veces en ese camino.
+fn classify_math_kind_with(normalized: &str, tokens: &[&str]) -> MathKind {
+    let has_token = |words: &[&str]| tokens.iter().any(|token| words.contains(token));
     let has_token_or_phrase = |words: &[&str], phrases: &[&str]| {
         has_token(words) || phrases.iter().any(|phrase| normalized.contains(phrase))
     };
@@ -223,47 +228,41 @@ pub fn classify_math_kind(problem: &str) -> MathKind {
             || (normalized.contains("sistema")
                 && (normalized.contains("lineal")
                     || normalized.contains("2x2")
-                    || top_level_eq_count(&normalized) >= 1))
+                    || top_level_eq_count(normalized) >= 1))
         {
             return MathKind::LinearSystem;
         }
         return MathKind::Matrix;
     }
-    if has_token(&["sistema"]) && top_level_eq_count(&normalized) >= 1 {
+    if has_token(&["sistema"]) && top_level_eq_count(normalized) >= 1 {
         return MathKind::LinearSystem;
     }
     // Ecuaciones por aridad: un `=` a profundidad 0 + grado. Sin marcadores
     // de grado pero con variable se asume polinómica (el solver decide
     // fail-closed si no lo es); sin letras es aritmética/general.
-    if top_level_eq_count(&normalized) == 1 {
-        return match probe_poly_degree(&normalized) {
+    if top_level_eq_count(normalized) == 1 {
+        return match probe_poly_degree(normalized) {
             Some(degree) if degree <= 2 => MathKind::PolyEq,
             Some(_) => MathKind::General,
             None if normalized.chars().any(|c| c.is_alphabetic()) => MathKind::PolyEq,
             None => MathKind::General,
         };
     }
-    if is_plain_arithmetic(&normalized, &tokens) {
+    if is_plain_arithmetic(normalized, tokens) {
         return MathKind::Arithmetic;
     }
     MathKind::General
 }
 
 /// Tokeniza en corridas alfanuméricas (sin tildes, ya normalizado).
-fn tokenize_words(normalized: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut current = String::new();
-    for character in normalized.chars() {
-        if character.is_alphanumeric() || character == '_' {
-            current.push(character);
-        } else if !current.is_empty() {
-            tokens.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        tokens.push(current);
-    }
-    tokens
+///
+/// Devuelve slices prestados (sin alocar un `String` por token): el contenido
+/// es idéntico al de la versión anterior (agrupar `alphanumeric∣_`).
+fn tokenize_words(normalized: &str) -> Vec<&str> {
+    normalized
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 /// Cuenta `=` a profundidad 0 de paréntesis (aridad de la ecuación).
@@ -326,7 +325,7 @@ fn probe_poly_degree(normalized: &str) -> Option<u8> {
 
 /// Aritmética plana: dígitos, operadores, paréntesis y como mucho la
 /// variable `x` aislada (muestras tipo `f(2)` no cuentan).
-fn is_plain_arithmetic(normalized: &str, tokens: &[String]) -> bool {
+fn is_plain_arithmetic(normalized: &str, tokens: &[&str]) -> bool {
     if !normalized.chars().all(|character| {
         character.is_ascii_digit()
             || character.is_whitespace()
@@ -339,7 +338,7 @@ fn is_plain_arithmetic(normalized: &str, tokens: &[String]) -> bool {
     normalized.chars().any(|c| c.is_ascii_digit())
         && tokens
             .iter()
-            .all(|token| token == "x" || token.chars().all(|c| c.is_ascii_digit()))
+            .all(|token| *token == "x" || token.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Clasifica una pregunta de forma local y determinista para el enrutamiento.
@@ -348,7 +347,12 @@ fn is_plain_arithmetic(normalized: &str, tokens: &[String]) -> bool {
 /// pistas de razonamiento queda como red para `General` (compatibilidad con
 /// "demostrá/justificá/porqué" sin forma matemática explícita).
 pub fn classify_route(problem: &str) -> ModelRoute {
-    match classify_math_kind(problem) {
+    let normalized = normalize_text(problem);
+    if normalized.trim().is_empty() {
+        return ModelRoute::Fast;
+    }
+    let tokens = tokenize_words(&normalized);
+    match classify_math_kind_with(&normalized, &tokens) {
         MathKind::Empty | MathKind::Arithmetic | MathKind::Graph => ModelRoute::Fast,
         MathKind::PolyEq
         | MathKind::LinearSystem
@@ -359,12 +363,11 @@ pub fn classify_route(problem: &str) -> ModelRoute {
             // Red de compatibilidad: igualdad o prefijo por token (cubre
             // "demostrar"/"resuelve" sin el falso positivo "anywhere"→"why"
             // del `contains` histórico sobre la palabra completa).
-            let normalized = normalize_text(problem);
-            let tokens = tokenize_words(&normalized);
+            // Reusa `normalized`/`tokens` ya computados (antes se hacía dos veces).
             let hit = tokens.iter().any(|word| {
                 REASONING_HINTS
                     .iter()
-                    .any(|hint| *word == **hint || word.starts_with(hint))
+                    .any(|hint| *word == *hint || word.starts_with(hint))
             });
             if hit {
                 ModelRoute::Reasoner

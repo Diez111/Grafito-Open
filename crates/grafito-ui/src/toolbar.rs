@@ -299,6 +299,29 @@ impl ToolGroupId {
 
 /// Grupos de la toolbar clásica (15, sin `ThreeD`/`FourD`/`Dynamics` a propósito:
 /// disclosure progresivo — ver `UNIVERSITY_TOOL_GROUPS` para los 18).
+///
+/// Grupos en modo 3D: `ALL_GROUPS` + `ThreeD` + `FourD` en ese orden (lo que
+/// `toolbar_localized` construía con `to_vec` + `push`). `&'static` para no
+/// asignar un `Vec` en cada frame.
+pub const ALL_GROUPS_3D: &[ToolGroupId] = &[
+    ToolGroupId::Move,
+    ToolGroupId::Point,
+    ToolGroupId::Line,
+    ToolGroupId::Circle,
+    ToolGroupId::Polygon,
+    ToolGroupId::Pencil,
+    ToolGroupId::Eraser,
+    ToolGroupId::Conic,
+    ToolGroupId::Curve,
+    ToolGroupId::Transform,
+    ToolGroupId::Measure,
+    ToolGroupId::Analysis,
+    ToolGroupId::Constraint,
+    ToolGroupId::Boolean,
+    ToolGroupId::Advanced,
+    ToolGroupId::ThreeD,
+    ToolGroupId::FourD,
+];
 pub const ALL_GROUPS: &[ToolGroupId] = &[
     ToolGroupId::Move,
     ToolGroupId::Point,
@@ -1367,10 +1390,7 @@ pub fn toolbar_localized(
     locale: Locale,
 ) -> egui::Response {
     if is_3d {
-        let mut groups: Vec<ToolGroupId> = ALL_GROUPS.to_vec();
-        groups.push(ToolGroupId::ThreeD);
-        groups.push(ToolGroupId::FourD);
-        toolbar_filtered_localized(ui, current_tool, &groups, locale)
+        toolbar_filtered_localized(ui, current_tool, ALL_GROUPS_3D, locale)
     } else {
         toolbar_filtered_localized(ui, current_tool, ALL_GROUPS, locale)
     }

@@ -219,18 +219,26 @@ pub fn draw_math_keypad(
         ui.label(egui::RichText::new("Recientes").size(TYPE_XS).weak());
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(SPACE_XS, SPACE_XS);
-            let recent = state.recent.clone();
-            for item in &recent {
-                if ui
-                    .add_sized(
-                        [TYPE_BASE * 2.4, TYPE_BASE + SPACE_XS],
-                        egui::Button::new(egui::RichText::new(item.as_str()).size(TYPE_SM))
-                            .rounding(RADIUS_SM),
-                    )
-                    .on_hover_text(format!("Reinsertar «{item}»"))
-                    .clicked()
-                {
-                    on_insert(item);
+            // Sin `recent.clone()` por frame: se itera prestado y el único
+            // clic posible del frame se aplica después (un puntero = un clic,
+            // mismo frame, mismo orden observable).
+            let mut pending: Option<String> = None;
+            let mut clear = false;
+            for item in state.recent.iter() {
+                let response = ui.add_sized(
+                    [TYPE_BASE * 2.4, TYPE_BASE + SPACE_XS],
+                    egui::Button::new(egui::RichText::new(item.as_str()).size(TYPE_SM))
+                        .rounding(RADIUS_SM),
+                );
+                // El `format!` del tooltip solo cuando hay hover: antes se
+                // construía para las 8 recientes en cada frame.
+                let response = if response.hovered() {
+                    response.on_hover_text(format!("Reinsertar «{item}»"))
+                } else {
+                    response
+                };
+                if response.clicked() {
+                    pending = Some(item.clone());
                 }
             }
             if ui
@@ -238,6 +246,12 @@ pub fn draw_math_keypad(
                 .on_hover_text("Olvida los símbolos recientes de esta sesión")
                 .clicked()
             {
+                clear = true;
+            }
+            if let Some(item) = pending {
+                on_insert(&item);
+            }
+            if clear {
                 state.clear_recent();
             }
         });

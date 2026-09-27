@@ -144,9 +144,13 @@ impl WorkingMemory {
 
     /// Resumen legible para prompt/debug (acotado).
     pub fn summary(&self) -> String {
+        use std::fmt::Write as _;
         let topic = self.current_topic.as_deref().unwrap_or("sin tema");
         let last = self.last_concept.as_deref().unwrap_or("ninguno");
-        let mut s = format!(
+        // Capacidad aproximada: cabecera + ~10 chars por clave.
+        let mut s = String::with_capacity(96 + self.misconception_counts.len() * 10);
+        let _ = write!(
+            s,
             "Tema: {topic}, pasos: {}, último: {last}, sesión: {}",
             self.steps_tried, self.session_epoch
         );
@@ -156,8 +160,15 @@ impl WorkingMemory {
             s.push_str(", misconceptions: ");
             let mut pairs: Vec<(&String, &u8)> = self.misconception_counts.iter().collect();
             pairs.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
-            let parts: Vec<String> = pairs.into_iter().map(|(k, v)| format!("{k}={v}")).collect();
-            s.push_str(&parts.join(", "));
+            // Escribe directo sin el `Vec<String>` + `join` intermedios.
+            for (i, (k, v)) in pairs.into_iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(k);
+                s.push('=');
+                let _ = write!(s, "{v}");
+            }
         }
         s
     }

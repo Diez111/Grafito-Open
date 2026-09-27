@@ -13,6 +13,7 @@ use crate::schema::{ToolCall, ToolResult, ToolSchema};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::LazyLock;
 
 // ── Constantes ──────────────────────────────────────────────────────────────
 
@@ -133,6 +134,17 @@ fn string_arg(call: &ToolCall, key: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Vista prestada de `string_arg` (mismos filtros, sin clonar).
+///
+/// Para búsquedas/parseos que solo necesitan `&str` (niveles, ids, queries
+/// en camino feliz): evita un `String` temporal por argumento y turno.
+fn arg_str<'a>(call: &'a ToolCall, key: &str) -> Option<&'a str> {
+    call.arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|v| !v.trim().is_empty() && v.len() <= MAX_ARG_BYTES)
+}
+
 /// Rechaza cualquier string >2000 bytes (recursivo en objetos/arrays anidados:
 /// `{"a":[{"b":"<5000 bytes>"}]}` también cae, no solo el nivel plano).
 fn reject_oversized_string_args(call: &ToolCall) -> Option<ToolResult> {
@@ -241,527 +253,545 @@ struct Lo {
     hours: f32,
 }
 
-fn all_los() -> Vec<Lo> {
-    vec![
-        // Primaria 5
-        Lo {
-            id: "pri-conteo",
-            title: "Conteo",
-            description: "Conteo, números naturales, orden y comparación",
-            program: None,
-            level_min: 1,
-            requires: &[],
-            tags: &["conteo", "numeros", "orden", "primaria"],
-            hours: 2.0,
-        },
-        Lo {
-            id: "pri-fracc-vis",
-            title: "Fracciones visuales",
-            description: "Fracciones con dibujos, mitad y cuarto, representación pictórica",
-            program: None,
-            level_min: 1,
-            requires: &["pri-conteo"],
-            tags: &["fraccion", "visual", "mitad", "primaria"],
-            hours: 2.5,
-        },
-        Lo {
-            id: "pri-perim-area",
-            title: "Perímetro y área",
-            description: "Perímetro y área de figuras simples, cuadrados y rectángulos",
-            program: None,
-            level_min: 2,
-            requires: &["pri-conteo"],
-            tags: &["perimetro", "area", "geometria", "primaria"],
-            hours: 3.0,
-        },
-        Lo {
-            id: "pri-proporciones",
-            title: "Proporciones simples",
-            description: "Doble, mitad, proporcionalidad simple con ejemplos concretos",
-            program: None,
-            level_min: 2,
-            requires: &["pri-fracc-vis"],
-            tags: &["proporcion", "doble", "mitad", "primaria"],
-            hours: 2.0,
-        },
-        Lo {
-            id: "pri-datos",
-            title: "Datos simples",
-            description: "Tablas, gráficos de barras, promedio simple y recolección de datos",
-            program: None,
-            level_min: 2,
-            requires: &["pri-conteo"],
-            tags: &["datos", "tablas", "barras", "primaria", "estadistica"],
-            hours: 2.0,
-        },
-        // Secundaria 11
-        Lo {
-            id: "sec-fracc",
-            title: "Fracciones",
-            description: "Operaciones con fracciones, simplificación, fracciones equivalentes",
-            program: None,
-            level_min: 4,
-            requires: &["pri-fracc-vis"],
-            tags: &["fraccion", "simplificacion", "equivalente", "secundaria"],
-            hours: 3.0,
-        },
-        Lo {
-            id: "sec-prop",
-            title: "Proporciones",
-            description: "Razones, proporciones, regla de tres, porcentaje",
-            program: None,
-            level_min: 5,
-            requires: &["sec-fracc"],
-            tags: &["proporcion", "razon", "regla de tres", "porcentaje"],
-            hours: 3.0,
-        },
-        Lo {
-            id: "sec-ec",
-            title: "Ecuaciones",
-            description: "Ecuaciones lineales y cuadráticas, sistemas de ecuaciones",
-            program: None,
-            level_min: 6,
-            requires: &["sec-prop"],
-            tags: &["ecuacion", "lineal", "cuadratica", "sistema"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "sec-lineal",
-            title: "Funciones lineales",
-            description: "Recta, pendiente, ordenada al origen, gráfica de función lineal",
-            program: None,
-            level_min: 6,
-            requires: &["sec-ec"],
-            tags: &["funcion", "lineal", "recta", "pendiente", "grafica"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "sec-cuad",
-            title: "Funciones cuadráticas",
-            description: "Parábola, vértice, raíces, discriminante, gráfica cuadrática",
-            program: None,
-            level_min: 7,
-            requires: &["sec-lineal"],
-            tags: &["funcion", "cuadratica", "parabola", "vertice", "raiz"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "sec-pend",
-            title: "Pendiente",
-            description: "Pendiente de recta, tangente intuitiva, inclinación",
-            program: None,
-            level_min: 6,
-            requires: &["sec-lineal"],
-            tags: &["pendiente", "recta", "tangente", "inclinacion"],
-            hours: 2.0,
-        },
-        Lo {
-            id: "sec-area",
-            title: "Área",
-            description: "Área bajo curva, aproximación, área de figuras",
-            program: None,
-            level_min: 6,
-            requires: &["pri-perim-area"],
-            tags: &["area", "curva", "aproximacion", "figura"],
-            hours: 2.5,
-        },
-        Lo {
-            id: "sec-trig",
-            title: "Trigonometría",
-            description: "Seno, coseno, círculo unitario, identidades trigonométricas",
-            program: None,
-            level_min: 7,
-            requires: &["sec-lineal"],
-            tags: &["trigonometria", "seno", "coseno", "circulo", "identidad"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "sec-vect",
-            title: "Vectores intro",
-            description: "Vectores, componentes, suma, noción geométrica",
-            program: None,
-            level_min: 6,
-            requires: &["sec-pend"],
-            tags: &["vector", "componente", "suma", "geometrico"],
-            hours: 3.0,
-        },
-        Lo {
-            id: "sec-prob",
-            title: "Probabilidad básica secundaria",
-            description: "Eventos, probabilidad simple, diagramas, frecuencia",
-            program: None,
-            level_min: 5,
-            requires: &["sec-prop", "pri-datos"],
-            tags: &[
-                "probabilidad",
-                "evento",
-                "diagrama",
-                "frecuencia",
-                "secundaria",
-            ],
-            hours: 3.0,
-        },
-        Lo {
-            id: "sec-pitagoras",
-            title: "Teorema de Pitágoras",
-            description:
-                "Triángulo rectángulo, catetos e hipotenusa, c²=a²+b², demostración y aplicaciones",
-            program: None,
-            level_min: 8,
-            requires: &["sec-area"],
-            tags: &[
-                "pitagoras",
-                "triangulo",
-                "hipotenusa",
-                "cateto",
-                "secundaria",
-                "geometria",
-            ],
-            hours: 3.0,
-        },
-        // AM1 8
-        Lo {
-            id: "am1-func",
-            title: "Funciones",
-            description: "Dominio, imagen, composición, inversa, clasificación",
-            program: Some("UTN AM1"),
-            level_min: 10,
-            requires: &[],
-            tags: &["funcion", "dominio", "imagen", "composicion", "inversa"],
-            hours: 6.0,
-        },
-        Lo {
-            id: "am1-lim",
-            title: "Límites",
-            description: "Límites laterales, indeterminaciones, asintotas, límites infinitos",
-            program: Some("UTN AM1"),
-            level_min: 11,
-            requires: &["am1-func"],
-            tags: &["limite", "asintota", "indeterminacion", "continuidad"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "am1-cont",
-            title: "Continuidad",
-            description: "Continuidad, teorema de Bolzano, clasificación de discontinuidades",
-            program: Some("UTN AM1"),
-            level_min: 11,
-            requires: &["am1-lim"],
-            tags: &["continuidad", "bolzano", "discontinuidad", "limite"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "am1-der",
-            title: "Derivadas",
-            description: "Definición, reglas, recta tangente, extremos, derivada",
-            program: Some("UTN AM1"),
-            level_min: 12,
-            requires: &["am1-cont"],
-            tags: &["derivada", "tangente", "extremos", "reglas"],
-            hours: 7.0,
-        },
-        Lo {
-            id: "am1-der-aplic",
-            title: "Aplicaciones de derivadas",
-            description: "Crecimiento, concavidad, máximos y mínimos, L'Hôpital, optimización",
-            program: Some("UTN AM1"),
-            level_min: 12,
-            requires: &["am1-der"],
-            tags: &[
-                "derivada",
-                "optimizacion",
-                "extremos",
-                "concavidad",
-                "lhopital",
-            ],
-            hours: 6.0,
-        },
-        Lo {
-            id: "am1-int",
-            title: "Integrales",
-            description: "Primitivas, área, Barrow, impropias, integral definida",
-            program: Some("UTN AM1"),
-            level_min: 12,
-            requires: &["am1-der"],
-            tags: &["integral", "primitiva", "barrow", "area", "impropia"],
-            hours: 7.0,
-        },
-        Lo {
-            id: "am1-int-aplic",
-            title: "Aplicaciones de integrales",
-            description: "Área entre curvas, volumen de revolución, longitud de arco",
-            program: Some("UTN AM1"),
-            level_min: 12,
-            requires: &["am1-int"],
-            tags: &["integral", "area", "volumen", "revolucion", "arco"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "am1-sucesiones",
-            title: "Sucesiones",
-            description: "Sucesiones numéricas, convergencia, criterio, límite de sucesión",
-            program: Some("UTN AM1"),
-            level_min: 11,
-            requires: &["am1-lim"],
-            tags: &["sucesion", "convergencia", "limite", "numerica"],
-            hours: 4.0,
-        },
-        // AM2 7
-        Lo {
-            id: "am2-edo",
-            title: "EDO",
-            description: "Variables separables, lineales, aplicaciones, ecuaciones diferenciales",
-            program: Some("UTN AM2"),
-            level_min: 13,
-            requires: &["am1-der", "am1-int"],
-            tags: &["edo", "diferencial", "separable", "lineal"],
-            hours: 8.0,
-        },
-        Lo {
-            id: "am2-series",
-            title: "Series numéricas",
-            description: "Criterios de convergencia, series alternadas, geométricas",
-            program: Some("UTN AM2"),
-            level_min: 13,
-            requires: &["am1-sucesiones"],
-            tags: &["serie", "convergencia", "numerica", "criterio"],
-            hours: 6.0,
-        },
-        Lo {
-            id: "am2-taylor",
-            title: "Taylor y Fourier",
-            description: "Series de Taylor, Fourier, aproximación, convergencia",
-            program: Some("UTN AM2"),
-            level_min: 14,
-            requires: &["am2-series"],
-            tags: &["taylor", "fourier", "serie", "aproximacion"],
-            hours: 6.0,
-        },
-        Lo {
-            id: "am2-multivariable",
-            title: "Cálculo multivariable",
-            description: "Funciones de varias variables, derivadas parciales, gradiente",
-            program: Some("UTN AM2"),
-            level_min: 13,
-            requires: &["am1-der"],
-            tags: &["multivariable", "parcial", "gradiente", "varias variables"],
-            hours: 7.0,
-        },
-        Lo {
-            id: "am2-int-multi",
-            title: "Integrales dobles y triples",
-            description: "Integrales dobles, triples, cambio de variables, Jacobiano",
-            program: Some("UTN AM2"),
-            level_min: 14,
-            requires: &["am2-multivariable"],
-            tags: &[
-                "integral",
-                "doble",
-                "triple",
-                "jacobiano",
-                "cambio variable",
-            ],
-            hours: 7.0,
-        },
-        Lo {
-            id: "am2-campos",
-            title: "Campos vectoriales",
-            description: "Campos vectoriales, rotacional, divergencia, potencial",
-            program: Some("UTN AM2"),
-            level_min: 14,
-            requires: &["am2-multivariable", "alg-vectores"],
-            tags: &[
-                "campo",
-                "vectorial",
-                "rotacional",
-                "divergencia",
-                "gradiente",
-            ],
-            hours: 6.0,
-        },
-        Lo {
-            id: "am2-teoremas",
-            title: "Teoremas integrales",
-            description: "Green, Stokes, Gauss (divergencia), aplicaciones",
-            program: Some("UTN AM2"),
-            level_min: 14,
-            requires: &["am2-campos", "am2-int-multi"],
-            tags: &["green", "stokes", "gauss", "teorema", "integral"],
-            hours: 6.0,
-        },
-        // Álgebra 6
-        Lo {
-            id: "alg-vectores",
-            title: "Vectores",
-            description: "Vectores en R2/R3, producto escalar y vectorial, norma",
-            program: Some("UTN Álgebra"),
-            level_min: 11,
-            requires: &["sec-vect"],
-            tags: &["vector", "escalar", "vectorial", "norma", "r2", "r3"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "alg-rectas-planos",
-            title: "Rectas y planos",
-            description: "Ecuaciones de rectas y planos, posiciones relativas, distancias",
-            program: Some("UTN Álgebra"),
-            level_min: 12,
-            requires: &["alg-vectores"],
-            tags: &["recta", "plano", "ecuacion", "posicion", "distancia"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "alg-matrices",
-            title: "Matrices",
-            description: "Operaciones, rango, sistemas lineales, Gauss-Jordan",
-            program: Some("UTN Álgebra"),
-            level_min: 11,
-            requires: &["sec-ec"],
-            tags: &["matriz", "rango", "sistema", "gauss", "lineal"],
-            hours: 6.0,
-        },
-        Lo {
-            id: "alg-determinantes",
-            title: "Determinantes",
-            description: "Propiedades, cálculo, matriz inversa, regla de Cramer",
-            program: Some("UTN Álgebra"),
-            level_min: 12,
-            requires: &["alg-matrices"],
-            tags: &["determinante", "inversa", "cramer", "matriz"],
-            hours: 4.0,
-        },
-        Lo {
-            id: "alg-conicas",
-            title: "Cónicas",
-            description: "Circunferencia, elipse, parábola, hipérbola, ecuaciones canónicas",
-            program: Some("UTN Álgebra"),
-            level_min: 12,
-            requires: &["alg-rectas-planos"],
-            tags: &[
-                "conica",
-                "elipse",
-                "parabola",
-                "hiperbola",
-                "circunferencia",
-            ],
-            hours: 5.0,
-        },
-        Lo {
-            id: "alg-transformaciones",
-            title: "Transformaciones lineales",
-            description: "Núcleo, imagen, matriz asociada, autovalores y autovectores",
-            program: Some("UTN Álgebra"),
-            level_min: 13,
-            requires: &["alg-matrices", "alg-determinantes"],
-            tags: &["transformacion", "lineal", "nucleo", "imagen", "autovalor"],
-            hours: 6.0,
-        },
-        // Probabilidad 6
-        Lo {
-            id: "prob-basica",
-            title: "Probabilidad básica",
-            description: "Espacio muestral, eventos, probabilidad condicional, Bayes",
-            program: Some("UTN Probabilidad"),
-            level_min: 11,
-            requires: &["sec-prob"],
-            tags: &["probabilidad", "muestral", "bayes", "condicional", "evento"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "prob-var",
-            title: "Variables aleatorias",
-            description: "Variables aleatorias discretas y continuas, esperanza, varianza",
-            program: Some("UTN Probabilidad"),
-            level_min: 12,
-            requires: &["prob-basica"],
-            tags: &["variable", "aleatoria", "esperanza", "varianza", "discreta"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "prob-distribuciones",
-            title: "Distribuciones",
-            description: "Binomial, Poisson, Normal, exponencial, propiedades",
-            program: Some("UTN Probabilidad"),
-            level_min: 12,
-            requires: &["prob-var"],
-            tags: &[
-                "distribucion",
-                "binomial",
-                "poisson",
-                "normal",
-                "exponencial",
-            ],
-            hours: 6.0,
-        },
-        Lo {
-            id: "prob-inferencia",
-            title: "Inferencia estadística",
-            description: "Estimación puntual, intervalos de confianza, test de hipótesis",
-            program: Some("UTN Probabilidad"),
-            level_min: 13,
-            requires: &["prob-distribuciones"],
-            tags: &[
-                "inferencia",
-                "estimacion",
-                "confianza",
-                "hipotesis",
-                "intervalo",
-            ],
-            hours: 6.0,
-        },
-        Lo {
-            id: "prob-regresion",
-            title: "Regresión",
-            description: "Regresión lineal, correlación, mínimos cuadrados, predicción",
-            program: Some("UTN Probabilidad"),
-            level_min: 13,
-            requires: &["prob-distribuciones"],
-            tags: &["regresion", "correlacion", "lineal", "minimos cuadrados"],
-            hours: 5.0,
-        },
-        Lo {
-            id: "prob-muestreo",
-            title: "Muestreo",
-            description:
-                "Técnicas de muestreo, teorema central del límite, distribuciones muestrales",
-            program: Some("UTN Probabilidad"),
-            level_min: 13,
-            requires: &["prob-inferencia"],
-            tags: &["muestreo", "central limite", "muestral", "tecnica"],
-            hours: 4.0,
-        },
-    ]
+/// Currículum estático (43 LOs): evita reconstruir un `Vec` por búsqueda.
+///
+/// `all_los()` devolvía `Vec<Lo>` y cada `curriculum_get/find` (hasta 6× por
+/// `suggest_next`) realocaba los 43. El slice estático es la misma tabla.
+static ALL_LOS: &[Lo] = &[
+    // Primaria 5
+    Lo {
+        id: "pri-conteo",
+        title: "Conteo",
+        description: "Conteo, números naturales, orden y comparación",
+        program: None,
+        level_min: 1,
+        requires: &[],
+        tags: &["conteo", "numeros", "orden", "primaria"],
+        hours: 2.0,
+    },
+    Lo {
+        id: "pri-fracc-vis",
+        title: "Fracciones visuales",
+        description: "Fracciones con dibujos, mitad y cuarto, representación pictórica",
+        program: None,
+        level_min: 1,
+        requires: &["pri-conteo"],
+        tags: &["fraccion", "visual", "mitad", "primaria"],
+        hours: 2.5,
+    },
+    Lo {
+        id: "pri-perim-area",
+        title: "Perímetro y área",
+        description: "Perímetro y área de figuras simples, cuadrados y rectángulos",
+        program: None,
+        level_min: 2,
+        requires: &["pri-conteo"],
+        tags: &["perimetro", "area", "geometria", "primaria"],
+        hours: 3.0,
+    },
+    Lo {
+        id: "pri-proporciones",
+        title: "Proporciones simples",
+        description: "Doble, mitad, proporcionalidad simple con ejemplos concretos",
+        program: None,
+        level_min: 2,
+        requires: &["pri-fracc-vis"],
+        tags: &["proporcion", "doble", "mitad", "primaria"],
+        hours: 2.0,
+    },
+    Lo {
+        id: "pri-datos",
+        title: "Datos simples",
+        description: "Tablas, gráficos de barras, promedio simple y recolección de datos",
+        program: None,
+        level_min: 2,
+        requires: &["pri-conteo"],
+        tags: &["datos", "tablas", "barras", "primaria", "estadistica"],
+        hours: 2.0,
+    },
+    // Secundaria 11
+    Lo {
+        id: "sec-fracc",
+        title: "Fracciones",
+        description: "Operaciones con fracciones, simplificación, fracciones equivalentes",
+        program: None,
+        level_min: 4,
+        requires: &["pri-fracc-vis"],
+        tags: &["fraccion", "simplificacion", "equivalente", "secundaria"],
+        hours: 3.0,
+    },
+    Lo {
+        id: "sec-prop",
+        title: "Proporciones",
+        description: "Razones, proporciones, regla de tres, porcentaje",
+        program: None,
+        level_min: 5,
+        requires: &["sec-fracc"],
+        tags: &["proporcion", "razon", "regla de tres", "porcentaje"],
+        hours: 3.0,
+    },
+    Lo {
+        id: "sec-ec",
+        title: "Ecuaciones",
+        description: "Ecuaciones lineales y cuadráticas, sistemas de ecuaciones",
+        program: None,
+        level_min: 6,
+        requires: &["sec-prop"],
+        tags: &["ecuacion", "lineal", "cuadratica", "sistema"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "sec-lineal",
+        title: "Funciones lineales",
+        description: "Recta, pendiente, ordenada al origen, gráfica de función lineal",
+        program: None,
+        level_min: 6,
+        requires: &["sec-ec"],
+        tags: &["funcion", "lineal", "recta", "pendiente", "grafica"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "sec-cuad",
+        title: "Funciones cuadráticas",
+        description: "Parábola, vértice, raíces, discriminante, gráfica cuadrática",
+        program: None,
+        level_min: 7,
+        requires: &["sec-lineal"],
+        tags: &["funcion", "cuadratica", "parabola", "vertice", "raiz"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "sec-pend",
+        title: "Pendiente",
+        description: "Pendiente de recta, tangente intuitiva, inclinación",
+        program: None,
+        level_min: 6,
+        requires: &["sec-lineal"],
+        tags: &["pendiente", "recta", "tangente", "inclinacion"],
+        hours: 2.0,
+    },
+    Lo {
+        id: "sec-area",
+        title: "Área",
+        description: "Área bajo curva, aproximación, área de figuras",
+        program: None,
+        level_min: 6,
+        requires: &["pri-perim-area"],
+        tags: &["area", "curva", "aproximacion", "figura"],
+        hours: 2.5,
+    },
+    Lo {
+        id: "sec-trig",
+        title: "Trigonometría",
+        description: "Seno, coseno, círculo unitario, identidades trigonométricas",
+        program: None,
+        level_min: 7,
+        requires: &["sec-lineal"],
+        tags: &["trigonometria", "seno", "coseno", "circulo", "identidad"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "sec-vect",
+        title: "Vectores intro",
+        description: "Vectores, componentes, suma, noción geométrica",
+        program: None,
+        level_min: 6,
+        requires: &["sec-pend"],
+        tags: &["vector", "componente", "suma", "geometrico"],
+        hours: 3.0,
+    },
+    Lo {
+        id: "sec-prob",
+        title: "Probabilidad básica secundaria",
+        description: "Eventos, probabilidad simple, diagramas, frecuencia",
+        program: None,
+        level_min: 5,
+        requires: &["sec-prop", "pri-datos"],
+        tags: &[
+            "probabilidad",
+            "evento",
+            "diagrama",
+            "frecuencia",
+            "secundaria",
+        ],
+        hours: 3.0,
+    },
+    Lo {
+        id: "sec-pitagoras",
+        title: "Teorema de Pitágoras",
+        description:
+            "Triángulo rectángulo, catetos e hipotenusa, c²=a²+b², demostración y aplicaciones",
+        program: None,
+        level_min: 8,
+        requires: &["sec-area"],
+        tags: &[
+            "pitagoras",
+            "triangulo",
+            "hipotenusa",
+            "cateto",
+            "secundaria",
+            "geometria",
+        ],
+        hours: 3.0,
+    },
+    // AM1 8
+    Lo {
+        id: "am1-func",
+        title: "Funciones",
+        description: "Dominio, imagen, composición, inversa, clasificación",
+        program: Some("UTN AM1"),
+        level_min: 10,
+        requires: &[],
+        tags: &["funcion", "dominio", "imagen", "composicion", "inversa"],
+        hours: 6.0,
+    },
+    Lo {
+        id: "am1-lim",
+        title: "Límites",
+        description: "Límites laterales, indeterminaciones, asintotas, límites infinitos",
+        program: Some("UTN AM1"),
+        level_min: 11,
+        requires: &["am1-func"],
+        tags: &["limite", "asintota", "indeterminacion", "continuidad"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "am1-cont",
+        title: "Continuidad",
+        description: "Continuidad, teorema de Bolzano, clasificación de discontinuidades",
+        program: Some("UTN AM1"),
+        level_min: 11,
+        requires: &["am1-lim"],
+        tags: &["continuidad", "bolzano", "discontinuidad", "limite"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "am1-der",
+        title: "Derivadas",
+        description: "Definición, reglas, recta tangente, extremos, derivada",
+        program: Some("UTN AM1"),
+        level_min: 12,
+        requires: &["am1-cont"],
+        tags: &["derivada", "tangente", "extremos", "reglas"],
+        hours: 7.0,
+    },
+    Lo {
+        id: "am1-der-aplic",
+        title: "Aplicaciones de derivadas",
+        description: "Crecimiento, concavidad, máximos y mínimos, L'Hôpital, optimización",
+        program: Some("UTN AM1"),
+        level_min: 12,
+        requires: &["am1-der"],
+        tags: &[
+            "derivada",
+            "optimizacion",
+            "extremos",
+            "concavidad",
+            "lhopital",
+        ],
+        hours: 6.0,
+    },
+    Lo {
+        id: "am1-int",
+        title: "Integrales",
+        description: "Primitivas, área, Barrow, impropias, integral definida",
+        program: Some("UTN AM1"),
+        level_min: 12,
+        requires: &["am1-der"],
+        tags: &["integral", "primitiva", "barrow", "area", "impropia"],
+        hours: 7.0,
+    },
+    Lo {
+        id: "am1-int-aplic",
+        title: "Aplicaciones de integrales",
+        description: "Área entre curvas, volumen de revolución, longitud de arco",
+        program: Some("UTN AM1"),
+        level_min: 12,
+        requires: &["am1-int"],
+        tags: &["integral", "area", "volumen", "revolucion", "arco"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "am1-sucesiones",
+        title: "Sucesiones",
+        description: "Sucesiones numéricas, convergencia, criterio, límite de sucesión",
+        program: Some("UTN AM1"),
+        level_min: 11,
+        requires: &["am1-lim"],
+        tags: &["sucesion", "convergencia", "limite", "numerica"],
+        hours: 4.0,
+    },
+    // AM2 7
+    Lo {
+        id: "am2-edo",
+        title: "EDO",
+        description: "Variables separables, lineales, aplicaciones, ecuaciones diferenciales",
+        program: Some("UTN AM2"),
+        level_min: 13,
+        requires: &["am1-der", "am1-int"],
+        tags: &["edo", "diferencial", "separable", "lineal"],
+        hours: 8.0,
+    },
+    Lo {
+        id: "am2-series",
+        title: "Series numéricas",
+        description: "Criterios de convergencia, series alternadas, geométricas",
+        program: Some("UTN AM2"),
+        level_min: 13,
+        requires: &["am1-sucesiones"],
+        tags: &["serie", "convergencia", "numerica", "criterio"],
+        hours: 6.0,
+    },
+    Lo {
+        id: "am2-taylor",
+        title: "Taylor y Fourier",
+        description: "Series de Taylor, Fourier, aproximación, convergencia",
+        program: Some("UTN AM2"),
+        level_min: 14,
+        requires: &["am2-series"],
+        tags: &["taylor", "fourier", "serie", "aproximacion"],
+        hours: 6.0,
+    },
+    Lo {
+        id: "am2-multivariable",
+        title: "Cálculo multivariable",
+        description: "Funciones de varias variables, derivadas parciales, gradiente",
+        program: Some("UTN AM2"),
+        level_min: 13,
+        requires: &["am1-der"],
+        tags: &["multivariable", "parcial", "gradiente", "varias variables"],
+        hours: 7.0,
+    },
+    Lo {
+        id: "am2-int-multi",
+        title: "Integrales dobles y triples",
+        description: "Integrales dobles, triples, cambio de variables, Jacobiano",
+        program: Some("UTN AM2"),
+        level_min: 14,
+        requires: &["am2-multivariable"],
+        tags: &[
+            "integral",
+            "doble",
+            "triple",
+            "jacobiano",
+            "cambio variable",
+        ],
+        hours: 7.0,
+    },
+    Lo {
+        id: "am2-campos",
+        title: "Campos vectoriales",
+        description: "Campos vectoriales, rotacional, divergencia, potencial",
+        program: Some("UTN AM2"),
+        level_min: 14,
+        requires: &["am2-multivariable", "alg-vectores"],
+        tags: &[
+            "campo",
+            "vectorial",
+            "rotacional",
+            "divergencia",
+            "gradiente",
+        ],
+        hours: 6.0,
+    },
+    Lo {
+        id: "am2-teoremas",
+        title: "Teoremas integrales",
+        description: "Green, Stokes, Gauss (divergencia), aplicaciones",
+        program: Some("UTN AM2"),
+        level_min: 14,
+        requires: &["am2-campos", "am2-int-multi"],
+        tags: &["green", "stokes", "gauss", "teorema", "integral"],
+        hours: 6.0,
+    },
+    // Álgebra 6
+    Lo {
+        id: "alg-vectores",
+        title: "Vectores",
+        description: "Vectores en R2/R3, producto escalar y vectorial, norma",
+        program: Some("UTN Álgebra"),
+        level_min: 11,
+        requires: &["sec-vect"],
+        tags: &["vector", "escalar", "vectorial", "norma", "r2", "r3"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "alg-rectas-planos",
+        title: "Rectas y planos",
+        description: "Ecuaciones de rectas y planos, posiciones relativas, distancias",
+        program: Some("UTN Álgebra"),
+        level_min: 12,
+        requires: &["alg-vectores"],
+        tags: &["recta", "plano", "ecuacion", "posicion", "distancia"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "alg-matrices",
+        title: "Matrices",
+        description: "Operaciones, rango, sistemas lineales, Gauss-Jordan",
+        program: Some("UTN Álgebra"),
+        level_min: 11,
+        requires: &["sec-ec"],
+        tags: &["matriz", "rango", "sistema", "gauss", "lineal"],
+        hours: 6.0,
+    },
+    Lo {
+        id: "alg-determinantes",
+        title: "Determinantes",
+        description: "Propiedades, cálculo, matriz inversa, regla de Cramer",
+        program: Some("UTN Álgebra"),
+        level_min: 12,
+        requires: &["alg-matrices"],
+        tags: &["determinante", "inversa", "cramer", "matriz"],
+        hours: 4.0,
+    },
+    Lo {
+        id: "alg-conicas",
+        title: "Cónicas",
+        description: "Circunferencia, elipse, parábola, hipérbola, ecuaciones canónicas",
+        program: Some("UTN Álgebra"),
+        level_min: 12,
+        requires: &["alg-rectas-planos"],
+        tags: &[
+            "conica",
+            "elipse",
+            "parabola",
+            "hiperbola",
+            "circunferencia",
+        ],
+        hours: 5.0,
+    },
+    Lo {
+        id: "alg-transformaciones",
+        title: "Transformaciones lineales",
+        description: "Núcleo, imagen, matriz asociada, autovalores y autovectores",
+        program: Some("UTN Álgebra"),
+        level_min: 13,
+        requires: &["alg-matrices", "alg-determinantes"],
+        tags: &["transformacion", "lineal", "nucleo", "imagen", "autovalor"],
+        hours: 6.0,
+    },
+    // Probabilidad 6
+    Lo {
+        id: "prob-basica",
+        title: "Probabilidad básica",
+        description: "Espacio muestral, eventos, probabilidad condicional, Bayes",
+        program: Some("UTN Probabilidad"),
+        level_min: 11,
+        requires: &["sec-prob"],
+        tags: &["probabilidad", "muestral", "bayes", "condicional", "evento"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "prob-var",
+        title: "Variables aleatorias",
+        description: "Variables aleatorias discretas y continuas, esperanza, varianza",
+        program: Some("UTN Probabilidad"),
+        level_min: 12,
+        requires: &["prob-basica"],
+        tags: &["variable", "aleatoria", "esperanza", "varianza", "discreta"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "prob-distribuciones",
+        title: "Distribuciones",
+        description: "Binomial, Poisson, Normal, exponencial, propiedades",
+        program: Some("UTN Probabilidad"),
+        level_min: 12,
+        requires: &["prob-var"],
+        tags: &[
+            "distribucion",
+            "binomial",
+            "poisson",
+            "normal",
+            "exponencial",
+        ],
+        hours: 6.0,
+    },
+    Lo {
+        id: "prob-inferencia",
+        title: "Inferencia estadística",
+        description: "Estimación puntual, intervalos de confianza, test de hipótesis",
+        program: Some("UTN Probabilidad"),
+        level_min: 13,
+        requires: &["prob-distribuciones"],
+        tags: &[
+            "inferencia",
+            "estimacion",
+            "confianza",
+            "hipotesis",
+            "intervalo",
+        ],
+        hours: 6.0,
+    },
+    Lo {
+        id: "prob-regresion",
+        title: "Regresión",
+        description: "Regresión lineal, correlación, mínimos cuadrados, predicción",
+        program: Some("UTN Probabilidad"),
+        level_min: 13,
+        requires: &["prob-distribuciones"],
+        tags: &["regresion", "correlacion", "lineal", "minimos cuadrados"],
+        hours: 5.0,
+    },
+    Lo {
+        id: "prob-muestreo",
+        title: "Muestreo",
+        description: "Técnicas de muestreo, teorema central del límite, distribuciones muestrales",
+        program: Some("UTN Probabilidad"),
+        level_min: 13,
+        requires: &["prob-inferencia"],
+        tags: &["muestreo", "central limite", "muestral", "tecnica"],
+        hours: 4.0,
+    },
+];
+
+fn all_los() -> &'static [Lo] {
+    ALL_LOS
 }
 
 fn curriculum_get(id: &str) -> Option<Lo> {
-    all_los().into_iter().find(|lo| lo.id == id)
+    all_los().iter().find(|lo| lo.id == id).cloned()
 }
+
+/// Título/descripción en minúsculas, precomputados una vez.
+///
+/// `curriculum_find` hacía `to_lowercase()` por campo y por LO en cada
+/// búsqueda (43×3 alocaciones + tags). El cache es idéntico (mismo
+/// `to_lowercase`, misma comparación) pero sin alocar por búsqueda.
+static CURRICULUM_LOWER: LazyLock<Vec<(String, String)>> = LazyLock::new(|| {
+    all_los()
+        .iter()
+        .map(|lo| (lo.title.to_lowercase(), lo.description.to_lowercase()))
+        .collect()
+});
 
 fn curriculum_find(concept: &str) -> Vec<Lo> {
     let q = concept.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
     }
+    // `id` y `tags` están pineados en minúsculas: `contains` directo es
+    // idéntico a `to_lowercase().contains` y evita ~200 alocaciones por
+    // búsqueda. Título/descripción usan el cache precomputado.
+    let lowers = &*CURRICULUM_LOWER;
     let mut scored: Vec<(usize, Lo)> = all_los()
-        .into_iter()
-        .filter_map(|lo| {
+        .iter()
+        .zip(lowers.iter())
+        .filter_map(|(lo, (title_lower, desc_lower))| {
             let mut score = 0usize;
-            if lo.title.to_lowercase().contains(&q) {
+            if title_lower.contains(&q) {
                 score += 1;
             }
-            if lo.description.to_lowercase().contains(&q) {
+            if desc_lower.contains(&q) {
                 score += 1;
             }
-            if lo.id.to_lowercase().contains(&q) {
+            if lo.id.contains(&q) {
                 score += 1;
             }
-            score += lo
-                .tags
-                .iter()
-                .filter(|t| t.to_lowercase().contains(&q))
-                .count();
+            score += lo.tags.iter().filter(|t| t.contains(&q)).count();
             if score > 0 {
-                Some((score, lo))
+                Some((score, lo.clone()))
             } else {
                 None
             }
@@ -1351,6 +1381,29 @@ pub fn parse_anim_quality(raw: Option<&str>) -> Result<&'static str, ToolError> 
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("media");
+    // Fast-path sin alocar para el caso común ASCII (equivale a `to_lowercase`
+    // en ASCII; el fallback cubre plegados Unicode exóticos como 'K' Kelvin).
+    if text.eq_ignore_ascii_case("baja")
+        || text.eq_ignore_ascii_case("baja calidad")
+        || text.eq_ignore_ascii_case("low")
+    {
+        return Ok("baja");
+    }
+    if text.eq_ignore_ascii_case("media") || text.eq_ignore_ascii_case("medium") {
+        return Ok("media");
+    }
+    if text.eq_ignore_ascii_case("alta")
+        || text.eq_ignore_ascii_case("alta calidad")
+        || text.eq_ignore_ascii_case("high")
+    {
+        return Ok("alta");
+    }
+    if text.is_ascii() {
+        return Err(ToolError::CampoInvalido {
+            campo: "quality",
+            motivo: format!("calidad desconocida '{text}' (válidas: baja, media, alta)"),
+        });
+    }
     let lower = text.to_lowercase();
     match lower.as_str() {
         "baja" | "baja calidad" | "low" => Ok("baja"),
@@ -1378,6 +1431,26 @@ pub fn parse_anim_view(raw: Option<&str>) -> Result<&'static str, ToolError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("plana");
+    if text.eq_ignore_ascii_case("plana")
+        || text.eq_ignore_ascii_case("plano")
+        || text.eq_ignore_ascii_case("2d")
+        || text.eq_ignore_ascii_case("flat")
+    {
+        return Ok("plana");
+    }
+    if text.eq_ignore_ascii_case("orbita")
+        || text.eq_ignore_ascii_case("órbita")
+        || text.eq_ignore_ascii_case("orbit")
+        || text.eq_ignore_ascii_case("3d")
+    {
+        return Ok("orbita");
+    }
+    if text.is_ascii() {
+        return Err(ToolError::CampoInvalido {
+            campo: "view",
+            motivo: format!("vista desconocida '{text}' (válidas: plana, orbita)"),
+        });
+    }
     let lower = text.to_lowercase();
     match lower.as_str() {
         "plana" | "plano" | "2d" | "flat" => Ok("plana"),
@@ -1395,6 +1468,53 @@ pub fn parse_anim_effect(raw: Option<&str>) -> Result<&'static str, ToolError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("none");
+    if text.eq_ignore_ascii_case("create")
+        || text.eq_ignore_ascii_case("crear")
+        || text.eq_ignore_ascii_case("traza")
+    {
+        return Ok("create");
+    }
+    if text.eq_ignore_ascii_case("write")
+        || text.eq_ignore_ascii_case("escribir")
+        || text.eq_ignore_ascii_case("revelado")
+    {
+        return Ok("write");
+    }
+    if text.eq_ignore_ascii_case("fade")
+        || text.eq_ignore_ascii_case("alfa")
+        || text.eq_ignore_ascii_case("aparicion")
+        || text.eq_ignore_ascii_case("aparición")
+    {
+        return Ok("fade");
+    }
+    if text.eq_ignore_ascii_case("grow")
+        || text.eq_ignore_ascii_case("growfromcenter")
+        || text.eq_ignore_ascii_case("grow_from_center")
+        || text.eq_ignore_ascii_case("crecer")
+    {
+        return Ok("grow");
+    }
+    if text.eq_ignore_ascii_case("indicate")
+        || text.eq_ignore_ascii_case("pulso")
+        || text.eq_ignore_ascii_case("indicar")
+    {
+        return Ok("indicate");
+    }
+    if text.eq_ignore_ascii_case("none")
+        || text.eq_ignore_ascii_case("ninguno")
+        || text.eq_ignore_ascii_case("morph")
+        || text.eq_ignore_ascii_case("transform")
+    {
+        return Ok("none");
+    }
+    if text.is_ascii() {
+        return Err(ToolError::CampoInvalido {
+            campo: "effect",
+            motivo: format!(
+                "efecto desconocido '{text}' (válidos: create, write, fade, grow, indicate, none)"
+            ),
+        });
+    }
     let lower = text.to_lowercase();
     match lower.as_str() {
         "create" | "crear" | "traza" => Ok("create"),
@@ -1430,6 +1550,29 @@ pub fn parse_anim_format(raw: Option<&str>) -> Result<&'static str, ToolError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("gif");
+    if text.eq_ignore_ascii_case("gif") {
+        return Ok("gif");
+    }
+    if text.eq_ignore_ascii_case("png")
+        || text.eq_ignore_ascii_case("png-sequence")
+        || text.eq_ignore_ascii_case("pngsequence")
+        || text.eq_ignore_ascii_case("pngdir")
+        || text.eq_ignore_ascii_case("secuencia")
+    {
+        return Ok("png");
+    }
+    if text.eq_ignore_ascii_case("mp4") || text.eq_ignore_ascii_case("h264") {
+        return Ok("mp4");
+    }
+    if text.eq_ignore_ascii_case("webm") || text.eq_ignore_ascii_case("vp9") {
+        return Ok("webm");
+    }
+    if text.is_ascii() {
+        return Err(ToolError::CampoInvalido {
+            campo: "format",
+            motivo: format!("formato desconocido '{text}' (válidos: gif, png, mp4, webm)"),
+        });
+    }
     let lower = text.to_lowercase();
     match lower.as_str() {
         "gif" => Ok("gif"),
@@ -1511,18 +1654,45 @@ pub fn parse_anim_tracker(call: &ToolCall) -> Result<Option<(f64, f64, &'static 
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or("opacity");
-    let map = match map_raw.to_lowercase().as_str() {
-        "opacity" | "opacidad" | "alfa" => "opacity",
-        "scale" | "escala" => "scale",
-        "center_x" | "centerx" | "x" => "center_x",
-        "center_y" | "centery" | "y" => "center_y",
-        _ => {
-            return Err(ToolError::CampoInvalido {
-                campo: "tracker.map",
-                motivo: format!(
-                    "mapa desconocido '{map_raw}' (válidos: opacity, scale, center_x, center_y)"
-                ),
-            });
+    // Fast-path ASCII sin alocar; fallback Unicode para "opacidad/órbita"-like.
+    let map = if map_raw.eq_ignore_ascii_case("opacity")
+        || map_raw.eq_ignore_ascii_case("opacidad")
+        || map_raw.eq_ignore_ascii_case("alfa")
+    {
+        "opacity"
+    } else if map_raw.eq_ignore_ascii_case("scale") || map_raw.eq_ignore_ascii_case("escala") {
+        "scale"
+    } else if map_raw.eq_ignore_ascii_case("center_x")
+        || map_raw.eq_ignore_ascii_case("centerx")
+        || map_raw.eq_ignore_ascii_case("x")
+    {
+        "center_x"
+    } else if map_raw.eq_ignore_ascii_case("center_y")
+        || map_raw.eq_ignore_ascii_case("centery")
+        || map_raw.eq_ignore_ascii_case("y")
+    {
+        "center_y"
+    } else if map_raw.is_ascii() {
+        return Err(ToolError::CampoInvalido {
+            campo: "tracker.map",
+            motivo: format!(
+                "mapa desconocido '{map_raw}' (válidos: opacity, scale, center_x, center_y)"
+            ),
+        });
+    } else {
+        match map_raw.to_lowercase().as_str() {
+            "opacity" | "opacidad" | "alfa" => "opacity",
+            "scale" | "escala" => "scale",
+            "center_x" | "centerx" | "x" => "center_x",
+            "center_y" | "centery" | "y" => "center_y",
+            _ => {
+                return Err(ToolError::CampoInvalido {
+                    campo: "tracker.map",
+                    motivo: format!(
+                        "mapa desconocido '{map_raw}' (válidos: opacity, scale, center_x, center_y)"
+                    ),
+                });
+            }
         }
     };
     Ok(Some((start, end, map)))
@@ -1665,34 +1835,58 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ToolError> {
             "la expresión excede {MAX_ARG_BYTES} bytes"
         )));
     }
+    // Sin `Vec<char>` intermedio: se recorre por `char_indices` y se trocea
+    // por byte-pos (mismo autómata que antes; los números se parsean desde
+    // el slice sin `String` temporal).
     let mut tokens = Vec::new();
-    let chars: Vec<char> = expr.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
+    let mut chars = expr.char_indices().peekable();
+    while let Some((pos, c)) = chars.next() {
         if c.is_whitespace() {
-            i += 1;
             continue;
         }
-        if c.is_ascii_digit() || (c == '.' && i + 1 < chars.len() && chars[i + 1].is_ascii_digit())
+        if c.is_ascii_digit()
+            || (c == '.' && matches!(chars.peek(), Some((_, next)) if next.is_ascii_digit()))
         {
-            let start = i;
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.') {
-                i += 1;
-            }
-            if i < chars.len() && (chars[i] == 'e' || chars[i] == 'E') {
-                let mut j = i + 1;
-                if j < chars.len() && (chars[j] == '+' || chars[j] == '-') {
-                    j += 1;
+            let start = pos;
+            let mut end = pos + c.len_utf8();
+            while let Some((next_pos, next)) = chars.peek() {
+                if next.is_ascii_digit() || *next == '.' {
+                    end = *next_pos + next.len_utf8();
+                    chars.next();
+                } else {
+                    break;
                 }
-                if j < chars.len() && chars[j].is_ascii_digit() {
-                    i = j;
-                    while i < chars.len() && chars[i].is_ascii_digit() {
-                        i += 1;
+            }
+            // Exponente `e/E[+-]?digits` (misma regla: sin dígito no se consume).
+            if matches!(chars.peek(), Some((_, e)) if *e == 'e' || *e == 'E') {
+                let mut probe = chars.clone();
+                probe.next();
+                if let Some((_, sign)) = probe.peek() {
+                    if *sign == '+' || *sign == '-' {
+                        probe.next();
+                    }
+                }
+                if matches!(probe.peek(), Some((_, d)) if d.is_ascii_digit()) {
+                    if let Some((epos, _)) = chars.next() {
+                        end = epos + 1;
+                        if let Some((spos, sign)) = chars.peek() {
+                            if *sign == '+' || *sign == '-' {
+                                end = *spos + 1;
+                                chars.next();
+                            }
+                        }
+                        while let Some((dpos, digit)) = chars.peek() {
+                            if digit.is_ascii_digit() {
+                                end = *dpos + 1;
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
                     }
                 }
             }
-            let text: String = chars[start..i].iter().collect();
+            let text = &expr[start..end];
             match text.parse::<f64>() {
                 Ok(v) if v.is_finite() => tokens.push(Token::Number(v)),
                 Ok(_) => {
@@ -1711,14 +1905,17 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ToolError> {
             continue;
         }
         if c.is_alphabetic() || c == '_' || c == 'π' {
-            let start = i;
-            while i < chars.len()
-                && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == 'π')
-            {
-                i += 1;
+            let start = pos;
+            let mut end = pos + c.len_utf8();
+            while let Some((next_pos, next)) = chars.peek() {
+                if next.is_alphanumeric() || *next == '_' || *next == 'π' {
+                    end = *next_pos + next.len_utf8();
+                    chars.next();
+                } else {
+                    break;
+                }
             }
-            let name: String = chars[start..i].iter().collect();
-            tokens.push(Token::Ident(name));
+            tokens.push(Token::Ident(expr[start..end].to_owned()));
             continue;
         }
         match c {
@@ -1738,7 +1935,6 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, ToolError> {
                 });
             }
         }
-        i += 1;
     }
     if tokens.is_empty() {
         return Err(ToolError::FaltaCampo {
@@ -2199,26 +2395,40 @@ const DOC_CATALOG: &[DocEntry] = &[
     },
 ];
 
-fn docs_catalog_search(query: &str, max_bytes: usize) -> String {
-    let q = query.to_lowercase();
-    let terms: Vec<String> = q
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.chars().count() >= 3 || *t == "3d" || *t == "4d")
-        .map(str::to_owned)
-        .collect();
-    if terms.is_empty() {
-        return String::new();
-    }
-    let mut scored: Vec<(usize, &DocEntry)> = DOC_CATALOG
+/// Haystacks en minúsculas del catálogo, precomputados una vez.
+///
+/// Antes se hacía `format!` + 3×`to_lowercase` + `join` por entrada y por
+/// búsqueda (18×4 alocaciones). El cache es la misma cadena y comparación.
+static DOCS_LOWER: LazyLock<Vec<String>> = LazyLock::new(|| {
+    DOC_CATALOG
         .iter()
-        .filter_map(|entry| {
-            let haystack = format!(
+        .map(|entry| {
+            format!(
                 "{} {} {} {}",
                 entry.canonical.to_lowercase(),
                 entry.syntax.to_lowercase(),
                 entry.description.to_lowercase(),
                 entry.keywords.join(" ")
-            );
+            )
+        })
+        .collect()
+});
+
+fn docs_catalog_search(query: &str, max_bytes: usize) -> String {
+    let q = query.to_lowercase();
+    // Slices prestados de `q` (sin un `String` por término).
+    let terms: Vec<&str> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 3 || *t == "3d" || *t == "4d")
+        .collect();
+    if terms.is_empty() {
+        return String::new();
+    }
+    let lowers = &*DOCS_LOWER;
+    let mut scored: Vec<(usize, &DocEntry)> = DOC_CATALOG
+        .iter()
+        .zip(lowers.iter())
+        .filter_map(|(entry, haystack)| {
             let mut score = 0usize;
             for term in &terms {
                 if haystack.contains(term) {
@@ -2264,7 +2474,7 @@ fn docs_catalog_search(query: &str, max_bytes: usize) -> String {
 // ── Tools base ──────────────────────────────────────────────────────────────
 
 fn evaluate_expr_tool(call: &ToolCall) -> ToolResult {
-    let Some(expression) = string_arg(call, "expression") else {
+    let Some(expression) = arg_str(call, "expression") else {
         return err_result(
             &call.id,
             ToolError::FaltaCampo {
@@ -2282,17 +2492,17 @@ fn evaluate_expr_tool(call: &ToolCall) -> ToolResult {
             }
         }
     }
-    match evaluate_expression(&expression, &vars) {
+    match evaluate_expression(expression, &vars) {
         Ok(v) => ToolResult::text(&call.id, true, format_number(v)),
         Err(e) => err_result(&call.id, e),
     }
 }
 
 fn grafito_docs_tool(call: &ToolCall) -> ToolResult {
-    let Some(query) = string_arg(call, "query") else {
+    let Some(query) = arg_str(call, "query") else {
         return err_result(&call.id, ToolError::FaltaCampo { campo: "query" });
     };
-    let catalog = docs_catalog_search(&query, 2_048);
+    let catalog = docs_catalog_search(query, 2_048);
     if catalog.trim().is_empty() {
         return err_result(
             &call.id,
@@ -2492,10 +2702,10 @@ fn ask_user_tool(call: &ToolCall) -> ToolResult {
 // ── Tools pedagógicas ───────────────────────────────────────────────────────
 
 fn scaffold_tool(call: &ToolCall) -> ToolResult {
-    let Some(concept) = string_arg(call, "concept") else {
+    let Some(concept) = arg_str(call, "concept") else {
         return err_result(&call.id, ToolError::FaltaCampo { campo: "concept" });
     };
-    let level = parse_level(string_arg(call, "level").as_deref());
+    let level = parse_level(arg_str(call, "level"));
     let (question, hint, explanation) = scaffold_inner(concept.trim(), level);
     let payload = json!({
         "concept": concept.trim(),
@@ -2508,18 +2718,18 @@ fn scaffold_tool(call: &ToolCall) -> ToolResult {
 }
 
 fn resolve_lo(call: &ToolCall) -> Result<Lo, ToolError> {
-    let lo_id = string_arg(call, "lo_id")
-        .or_else(|| string_arg(call, "learning_objective_id"))
-        .or_else(|| string_arg(call, "exercise_id"))
-        .or_else(|| string_arg(call, "id"))
-        .or_else(|| string_arg(call, "concept"));
+    let lo_id = arg_str(call, "lo_id")
+        .or_else(|| arg_str(call, "learning_objective_id"))
+        .or_else(|| arg_str(call, "exercise_id"))
+        .or_else(|| arg_str(call, "id"))
+        .or_else(|| arg_str(call, "concept"));
     let Some(lo_id) = lo_id else {
         return Err(ToolError::FaltaCampo { campo: "lo_id" });
     };
     if let Some(lo) = curriculum_get(lo_id.trim()) {
         return Ok(lo);
     }
-    let mut candidates = curriculum_find(&lo_id);
+    let mut candidates = curriculum_find(lo_id);
     if candidates.is_empty() {
         return Err(ToolError::NoEncontrado(format!(
             "LearningObjective no encontrado: '{lo_id}'"
@@ -2533,7 +2743,7 @@ fn generate_exercise_tool(call: &ToolCall) -> ToolResult {
         Ok(lo) => lo,
         Err(e) => return err_result(&call.id, e),
     };
-    let level = parse_level(string_arg(call, "level").as_deref());
+    let level = parse_level(arg_str(call, "level"));
     let seed = call
         .arguments
         .get("seed")
@@ -2570,15 +2780,15 @@ fn assess_answer_tool(call: &ToolCall) -> ToolResult {
     let Some(answer) = string_arg(call, "answer") else {
         return err_result(&call.id, ToolError::FaltaCampo { campo: "answer" });
     };
-    let lo_id_opt = string_arg(call, "exercise_id")
-        .or_else(|| string_arg(call, "lo_id"))
-        .or_else(|| string_arg(call, "learning_objective_id"))
-        .or_else(|| string_arg(call, "id"));
+    let lo_id_opt = arg_str(call, "exercise_id")
+        .or_else(|| arg_str(call, "lo_id"))
+        .or_else(|| arg_str(call, "learning_objective_id"))
+        .or_else(|| arg_str(call, "id"));
     if let Some(lo_id) = lo_id_opt {
         let lo = if let Some(found) = curriculum_get(lo_id.trim()) {
             found
         } else {
-            let mut c = curriculum_find(&lo_id);
+            let mut c = curriculum_find(lo_id);
             if c.is_empty() {
                 return err_result(
                     &call.id,
@@ -2594,7 +2804,7 @@ fn assess_answer_tool(call: &ToolCall) -> ToolResult {
             .get("seed")
             .and_then(Value::as_u64)
             .unwrap_or(0);
-        let level = parse_level(string_arg(call, "level").as_deref());
+        let level = parse_level(arg_str(call, "level"));
         let _ = level;
         let gen = generate_exercise_inner(lo.id, seed);
         let a = assess_inner(&gen.prompt, &gen.solution, &answer);
@@ -2625,14 +2835,14 @@ fn assess_answer_tool(call: &ToolCall) -> ToolResult {
 }
 
 fn get_curriculum_tool(call: &ToolCall) -> ToolResult {
-    let query = string_arg(call, "query")
-        .or_else(|| string_arg(call, "concept"))
-        .or_else(|| string_arg(call, "q"))
+    let query = arg_str(call, "query")
+        .or_else(|| arg_str(call, "concept"))
+        .or_else(|| arg_str(call, "q"))
         .unwrap_or_default();
     if query.trim().is_empty() {
         return err_result(&call.id, ToolError::FaltaCampo { campo: "query" });
     }
-    let results = curriculum_find(&query);
+    let results = curriculum_find(query);
     if results.is_empty() {
         return err_result(
             &call.id,
@@ -2653,7 +2863,7 @@ fn get_curriculum_tool(call: &ToolCall) -> ToolResult {
 }
 
 fn suggest_next_tool(call: &ToolCall) -> ToolResult {
-    let _ = string_arg(call, "branch_id");
+    let _ = arg_str(call, "branch_id");
     // Perfil mock determinista ordenado por mastery ascendente (más débil primero),
     // enlazado a LOs reales del currículum.
     let mut branches: Vec<(&str, &str, f64, bool, u32, u64)> = vec![
@@ -2700,8 +2910,8 @@ fn suggest_next_tool(call: &ToolCall) -> ToolResult {
 }
 
 fn generate_animation_tool(call: &ToolCall) -> ToolResult {
-    let template_raw = string_arg(call, "template").unwrap_or_default();
-    let concept_raw = string_arg(call, "concept").unwrap_or_default();
+    let template_raw = arg_str(call, "template").unwrap_or_default();
+    let concept_raw = arg_str(call, "concept").unwrap_or_default();
     let mut params_map = BTreeMap::new();
     if let Some(obj) = call.arguments.get("params").and_then(Value::as_object) {
         for (k, v) in obj {
@@ -2721,11 +2931,11 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
         );
     }
     let concept = if concept_raw.trim().is_empty() {
-        template_raw.clone()
+        template_raw
     } else {
-        concept_raw.clone()
+        concept_raw
     };
-    let template = match sanitize_template(&template_raw, &concept) {
+    let template = match sanitize_template(template_raw, concept) {
         Ok(valid) => valid,
         Err(error) => return err_result(&call.id, error),
     };
@@ -2738,7 +2948,7 @@ fn generate_animation_tool(call: &ToolCall) -> ToolResult {
             },
         );
     }
-    let concept_norm = normalize_concept(&concept);
+    let concept_norm = normalize_concept(concept);
     if template.len() > 64 {
         return err_result(
             &call.id,

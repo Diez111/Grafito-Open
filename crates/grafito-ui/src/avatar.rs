@@ -285,7 +285,7 @@ pub fn draw_avatar_with_bg(
                     pts.push(eye_center + vec2(t.cos() * w * 0.5, t.sin() * h));
                 }
                 painter.add(Shape::convex_polygon(
-                    pts.clone(),
+                    pts,
                     Color32::WHITE,
                     Stroke::new(1.0, theme_accent.gamma_multiply(0.25)),
                 ));

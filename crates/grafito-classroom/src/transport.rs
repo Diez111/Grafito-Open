@@ -122,7 +122,13 @@ impl ClassroomMessage {
                 "remitente inválido".to_string(),
             ));
         }
-        if self.from.chars().any(char::is_control) {
+        // Vía rápida ASCII para controles (caso común sin alloc ni UTF-8).
+        let from_control = if self.from.is_ascii() {
+            self.from.as_bytes().iter().any(|b| b.is_ascii_control())
+        } else {
+            self.from.chars().any(char::is_control)
+        };
+        if from_control {
             return Err(ClassroomError::InvalidMessage(
                 "remitente con caracteres de control".to_string(),
             ));
@@ -133,11 +139,17 @@ impl ClassroomMessage {
             )));
         }
         // Rechazar controles (salvo \n\t) para evitar inyección en UI.
-        if self
-            .body
-            .chars()
-            .any(|c| c.is_control() && c != '\n' && c != '\t')
-        {
+        let body_control = if self.body.is_ascii() {
+            self.body
+                .as_bytes()
+                .iter()
+                .any(|&b| b.is_ascii_control() && b != b'\n' && b != b'\t')
+        } else {
+            self.body
+                .chars()
+                .any(|c| c.is_control() && c != '\n' && c != '\t')
+        };
+        if body_control {
             return Err(ClassroomError::InvalidMessage(
                 "cuerpo con caracteres de control".to_string(),
             ));
@@ -252,6 +264,13 @@ impl LoopbackTransport {
         msg: ClassroomMessage,
         budget: RetryBudget,
     ) -> Result<usize, ClassroomError> {
+        // Vía rápida (éxito al primer intento, caso caliente): mueve el mensaje
+        // sin clonar. Si hay lugar y conexión, el `send` con move equivale al
+        // primer intento del bucle (`Ok(1)` o `InvalidMessage` rápido).
+        // NOTA: mantener en sync con `ClassroomTransport::send`.
+        if self.connected && self.queue.len() < MAX_TRANSPORT_QUEUE {
+            return self.send(msg).map(|()| 1);
+        }
         let max = budget.as_u8();
         let mut last_err = ClassroomError::QueueFull;
         for attempt in 1..=max {

@@ -144,6 +144,433 @@ fn contar(conteo: &mut usize) -> Result<(), GgbError> {
     }
     Ok(())
 }
+/// Error de sintaxis de atributo → `XmlMalformado` (misma forma que antes).
+fn err_attr(e: impl std::fmt::Display) -> GgbError {
+    GgbError::XmlMalformado {
+        detalle: GgbError::recorta(&e.to_string()),
+    }
+}
+/// Cota anti-quadratic-blowup para tags sin extracción (construction,
+/// ggbscript, cascell, desconocidos y contenido CAS salteado): una sola pasada
+/// que valida sintaxis y cuenta, sin normalizar valores.
+fn verificar_tope(e: &BytesStart<'_>, nombre: &str) -> Result<(), GgbError> {
+    let mut n: usize = 0;
+    for resultado in e.attributes() {
+        resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+/// Normaliza un valor de atributo (des-escapa entidades) con el mismo error
+/// que `attr` original.
+fn normalizar(a: &quick_xml::events::attributes::Attribute<'_>) -> Result<String, GgbError> {
+    let v = a
+        .normalized_value(XmlVersion::default())
+        .map_err(err_attr)?;
+    Ok(v.into_owned())
+}
+/// Parsea un numérico desde el atributo ya matcheado: fast-path sin alloc
+/// cuando el crudo no trae `&` (99.9%: `x="1.5"`); fallback a normalizado
+/// (mismo error que antes) si hay entidades o UTF-8 inválido. Fallo de parse
+/// → `None`, igual que `num_attr` original.
+fn numero_desde_attr(
+    a: &quick_xml::events::attributes::Attribute<'_>,
+) -> Result<Option<f64>, GgbError> {
+    if a.value.len() > MAX_ATTR_BYTES {
+        return Err(GgbError::XmlMalformado {
+            detalle: "atributo sobredimensionado".to_string(),
+        });
+    }
+    // Fast-path sin alloc: `value` ya es `&str` prestado del buffer; si parsea
+    // directo no hay nada que normalizar (el 99.9%: `x="1.5"`). Sin `&`, el
+    // normalizado es idéntico al crudo, así que un fallo de parse es `None`
+    // sin llamar a `normalized_value`. Con `&` (`&#49;`) se cae al normalizado
+    // para preservar la semántica original exacta.
+    if let Ok(v) = a.value.trim().parse::<f64>() {
+        return Ok(Some(v));
+    }
+    if !a.value.contains('&') {
+        return Ok(None);
+    }
+    let v = normalizar(a)?;
+    match v.trim().parse::<f64>() {
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Ok(None),
+    }
+}
+/// Extrae un string opcional en la misma pasada de conteo. Solo normaliza la
+/// clave pedida; las demás solo cuentan (misma semántica que `attr`: el tope
+/// de tamaño solo aplica a la clave buscada).
+fn extraer_str1(e: &BytesStart<'_>, nombre: &str, clave: &str) -> Result<Option<String>, GgbError> {
+    let mut n: usize = 0;
+    let mut fuera: Option<String> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        if a.key.as_ref() == clave && fuera.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            fuera = Some(normalizar(&a)?);
+        }
+    }
+    Ok(fuera)
+}
+/// `type`+`label` de `<element>` en una sola pasada (antes: conteo + 2×`attr`).
+fn extraer_element_attrs(e: &BytesStart<'_>, nombre: &str) -> Result<(String, String), GgbError> {
+    let mut n: usize = 0;
+    let mut tipo: Option<String> = None;
+    let mut etiqueta: Option<String> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        if k == "type" && tipo.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            tipo = Some(normalizar(&a)?);
+        } else if k == "label" && etiqueta.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            etiqueta = Some(normalizar(&a)?);
+        }
+    }
+    Ok((tipo.unwrap_or_default(), etiqueta.unwrap_or_default()))
+}
+/// `label`+`exp`+`type` de `<expression>` en una sola pasada (antes: 1+3).
+fn extraer_expression_attrs(
+    e: &BytesStart<'_>,
+    nombre: &str,
+) -> Result<(String, String, String), GgbError> {
+    let mut n: usize = 0;
+    let mut etiqueta: Option<String> = None;
+    let mut exp: Option<String> = None;
+    let mut tipo: Option<String> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        if k == "label" && etiqueta.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            etiqueta = Some(normalizar(&a)?);
+        } else if k == "exp" && exp.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            exp = Some(normalizar(&a)?);
+        } else if k == "type" && tipo.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            tipo = Some(normalizar(&a)?);
+        }
+    }
+    Ok((
+        etiqueta.unwrap_or_default(),
+        exp.unwrap_or_default(),
+        tipo.unwrap_or_default(),
+    ))
+}
+/// `x/y/z/w` de `<coords>` en una sola pasada (antes: 1+4 con 4 Strings).
+#[allow(clippy::type_complexity)]
+fn extraer_coords(
+    e: &BytesStart<'_>,
+    nombre: &str,
+) -> Result<(Option<f64>, Option<f64>, Option<f64>, Option<f64>), GgbError> {
+    let mut n: usize = 0;
+    let mut x: Option<f64> = None;
+    let mut y: Option<f64> = None;
+    let mut z: Option<f64> = None;
+    let mut w: Option<f64> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        if k == "x" && x.is_none() {
+            x = numero_desde_attr(&a)?;
+        } else if k == "y" && y.is_none() {
+            y = numero_desde_attr(&a)?;
+        } else if k == "z" && z.is_none() {
+            z = numero_desde_attr(&a)?;
+        } else if k == "w" && w.is_none() {
+            w = numero_desde_attr(&a)?;
+        }
+    }
+    Ok((x, y, z, w))
+}
+/// `min/max` de `<slider>` en una pasada.
+fn extraer_min_max(
+    e: &BytesStart<'_>,
+    nombre: &str,
+) -> Result<(Option<f64>, Option<f64>), GgbError> {
+    let mut n: usize = 0;
+    let mut min: Option<f64> = None;
+    let mut max: Option<f64> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        if k == "min" && min.is_none() {
+            min = numero_desde_attr(&a)?;
+        } else if k == "max" && max.is_none() {
+            max = numero_desde_attr(&a)?;
+        }
+    }
+    Ok((min, max))
+}
+/// `A0..A5` de `<matrix>` en una pasada (antes: 1+6).
+fn extraer_matrix(e: &BytesStart<'_>, nombre: &str) -> Result<[Option<f64>; 6], GgbError> {
+    let mut n: usize = 0;
+    let mut fuera: [Option<f64>; 6] = [None, None, None, None, None, None];
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        let idx = if k == "A0" {
+            Some(0)
+        } else if k == "A1" {
+            Some(1)
+        } else if k == "A2" {
+            Some(2)
+        } else if k == "A3" {
+            Some(3)
+        } else if k == "A4" {
+            Some(4)
+        } else if k == "A5" {
+            Some(5)
+        } else {
+            None
+        };
+        if let Some(i) = idx {
+            if fuera[i].is_none() {
+                fuera[i] = numero_desde_attr(&a)?;
+            }
+        }
+    }
+    Ok(fuera)
+}
+/// `x0/y0/x1/y1` de `<eigenvectors>` en una pasada.
+fn extraer_eigen(e: &BytesStart<'_>, nombre: &str) -> Result<[Option<f64>; 4], GgbError> {
+    let mut n: usize = 0;
+    let mut fuera: [Option<f64>; 4] = [None, None, None, None];
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        let idx = if k == "x0" {
+            Some(0)
+        } else if k == "y0" {
+            Some(1)
+        } else if k == "x1" {
+            Some(2)
+        } else if k == "y1" {
+            Some(3)
+        } else {
+            None
+        };
+        if let Some(i) = idx {
+            if fuera[i].is_none() {
+                fuera[i] = numero_desde_attr(&a)?;
+            }
+        }
+    }
+    Ok(fuera)
+}
+/// Un numérico suelto (`<value val>`) en una pasada con fast-path sin alloc.
+fn extraer_num1(e: &BytesStart<'_>, nombre: &str, clave: &str) -> Result<Option<f64>, GgbError> {
+    let mut n: usize = 0;
+    let mut fuera: Option<f64> = None;
+    let mut visto = false;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        if a.key.as_ref() == clave && !visto {
+            visto = true;
+            fuera = numero_desde_attr(&a)?;
+        }
+    }
+    Ok(fuera)
+}
+/// `x/y/exp` de `<startPoint>` en una pasada. `exp` solo se normaliza si
+/// viene (antes se pedía solo cuando x/y faltaban; normalizarlo siempre que
+/// está es el mismo valor ignorado, sin cambio observable).
+#[allow(clippy::type_complexity)]
+fn extraer_startpoint(
+    e: &BytesStart<'_>,
+    nombre: &str,
+) -> Result<(Option<f64>, Option<f64>, Option<String>), GgbError> {
+    let mut n: usize = 0;
+    let mut x: Option<f64> = None;
+    let mut y: Option<f64> = None;
+    let mut exp: Option<String> = None;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        if k == "x" && x.is_none() {
+            x = numero_desde_attr(&a)?;
+        } else if k == "y" && y.is_none() {
+            y = numero_desde_attr(&a)?;
+        } else if k == "exp" && exp.is_none() {
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            exp = Some(normalizar(&a)?);
+        }
+    }
+    Ok((x, y, exp))
+}
+/// `<cell>`: 5 strings + num `val` en una pasada (antes: 1+6 pasadas).
+/// Preserva el orden de claves original (`val,value,content,exp,input`) y
+/// "primera ocurrencia gana" por clave, igual que `attr` repetido.
+/// `val` aporta doble como antes: string no vacío y, si parsea, `format!(n)`.
+fn extraer_cell(e: &BytesStart<'_>, nombre: &str) -> Result<Vec<String>, GgbError> {
+    let mut n: usize = 0;
+    let mut ranuras: [Option<String>; 5] = [None, None, None, None, None];
+    let mut val_num: Option<f64> = None;
+    let mut val_visto = false;
+    for resultado in e.attributes() {
+        let a = resultado.map_err(err_attr)?;
+        n = n.saturating_add(1);
+        if n > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
+        let k: &str = a.key.as_ref();
+        let idx = if k == "val" {
+            Some(0)
+        } else if k == "value" {
+            Some(1)
+        } else if k == "content" {
+            Some(2)
+        } else if k == "exp" {
+            Some(3)
+        } else if k == "input" {
+            Some(4)
+        } else {
+            None
+        };
+        if let Some(i) = idx {
+            if ranuras[i].is_some() {
+                continue; // primera ocurrencia gana, como `attr`
+            }
+            if a.value.len() > MAX_ATTR_BYTES {
+                return Err(GgbError::XmlMalformado {
+                    detalle: "atributo sobredimensionado".to_string(),
+                });
+            }
+            let v = normalizar(&a)?;
+            if i == 0 && !val_visto {
+                val_visto = true;
+                if let Ok(num) = v.trim().parse::<f64>() {
+                    val_num = Some(num);
+                }
+            }
+            ranuras[i] = Some(v);
+        }
+    }
+    let mut fila: Vec<String> = Vec::new();
+    for slot in ranuras.into_iter().flatten() {
+        if !slot.is_empty() && slot.len() <= super::MAX_ATTR_BYTES {
+            fila.push(slot);
+        }
+    }
+    if let Some(num) = val_num {
+        fila.push(format!("{num}"));
+    }
+    Ok(fila)
+}
 #[allow(clippy::too_many_arguments)]
 fn manejar_apertura(
     e: &BytesStart<'_>,
@@ -157,27 +584,17 @@ fn manejar_apertura(
 ) -> Result<(), GgbError> {
     let qname = e.name();
     let nombre: &str = qname.as_ref();
-    // Cota anti-quadratic-blowup por elemento: falla antes de normalizar
-    // valores cuando un tag trae una lluvia de atributos.
-    let mut n_attrs: usize = 0;
-    for resultado in e.attributes() {
-        resultado.map_err(|e| GgbError::XmlMalformado {
-            detalle: GgbError::recorta(&e.to_string()),
-        })?;
-        n_attrs = n_attrs.saturating_add(1);
-        if n_attrs > MAX_XML_ATTRS_PER_ELEMENT {
-            return Err(GgbError::XmlMalformado {
-                detalle: format!(
-                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
-                ),
-            });
-        }
-    }
+    // Contenido CAS salteado: igual se aplica la cota anti-quadratic-blowup
+    // (antes el conteo corría antes del early-return; se preserva con una
+    // pasada barata sin normalizar).
     if *prof_cas > 0 {
-        return Ok(());
+        return verificar_tope(e, nombre);
     }
     match nombre {
-        "construction" => *en_construccion = true,
+        "construction" => {
+            verificar_tope(e, nombre)?;
+            *en_construccion = true;
+        }
         "element" if *en_construccion => {
             contar(conteo)?;
             if let Some(mut g) = elem.take() {
@@ -185,8 +602,7 @@ fn manejar_apertura(
                 c.orden.push(ItemOrden::Elemento(c.elementos.len()));
                 c.elementos.push(g);
             }
-            let tipo = attr(e, "type")?.unwrap_or_default();
-            let etiqueta = attr(e, "label")?.unwrap_or_default();
+            let (tipo, etiqueta) = extraer_element_attrs(e, nombre)?;
             *elem = Some(GgbElemento {
                 tipo,
                 etiqueta,
@@ -213,7 +629,7 @@ fn manejar_apertura(
                 c.orden.push(ItemOrden::Comando(c.comandos.len()));
                 c.comandos.push(g);
             }
-            let nombre_cmd = attr(e, "name")?.unwrap_or_default();
+            let nombre_cmd = extraer_str1(e, nombre, "name")?.unwrap_or_default();
             *cmd = Some(GgbComando {
                 nombre: nombre_cmd,
                 entradas: Vec::new(),
@@ -228,32 +644,31 @@ fn manejar_apertura(
         }
         "expression" if *en_construccion => {
             contar(conteo)?;
+            let (etiqueta, exp, tipo) = extraer_expression_attrs(e, nombre)?;
             c.expresiones.push(GgbExpresion {
-                etiqueta: attr(e, "label")?.unwrap_or_default(),
-                exp: attr(e, "exp")?.unwrap_or_default(),
-                tipo: attr(e, "type")?.unwrap_or_default(),
+                etiqueta,
+                exp,
+                tipo,
             });
         }
         "coords" => {
             if let Some(g) = elem.as_mut() {
-                let x = num_attr(e, "x")?;
-                let y = num_attr(e, "y")?;
+                let (x, y, z, w) = extraer_coords(e, nombre)?;
                 if let (Some(x), Some(y)) = (x, y) {
-                    let z = num_attr(e, "z")?.unwrap_or(1.0);
-                    let w = num_attr(e, "w")?.unwrap_or(1.0);
+                    let z = z.unwrap_or(1.0);
+                    let w = w.unwrap_or(1.0);
                     g.coords = Some([x, y, z, w]);
                 }
             }
         }
         "value" => {
             if let Some(g) = elem.as_mut() {
-                g.valor = num_attr(e, "val")?;
+                g.valor = extraer_num1(e, nombre, "val")?;
             }
         }
         "slider" => {
             if let Some(g) = elem.as_mut() {
-                let min = num_attr(e, "min")?;
-                let max = num_attr(e, "max")?;
+                let (min, max) = extraer_min_max(e, nombre)?;
                 if let (Some(min), Some(max)) = (min, max) {
                     g.deslizador = Some((min, max));
                 }
@@ -261,15 +676,8 @@ fn manejar_apertura(
         }
         "matrix" => {
             if let Some(g) = elem.as_mut() {
-                let a0 = num_attr(e, "A0")?;
-                let a1 = num_attr(e, "A1")?;
-                let a2 = num_attr(e, "A2")?;
-                let a3 = num_attr(e, "A3")?;
-                let a4 = num_attr(e, "A4")?;
-                let a5 = num_attr(e, "A5")?;
-                if let (Some(a0), Some(a1), Some(a2), Some(a3), Some(a4), Some(a5)) =
-                    (a0, a1, a2, a3, a4, a5)
-                {
+                let m = extraer_matrix(e, nombre)?;
+                if let [Some(a0), Some(a1), Some(a2), Some(a3), Some(a4), Some(a5)] = m {
                     if a0.is_finite()
                         && a1.is_finite()
                         && a2.is_finite()
@@ -284,11 +692,8 @@ fn manejar_apertura(
         }
         "eigenvectors" => {
             if let Some(g) = elem.as_mut() {
-                let x0 = num_attr(e, "x0")?;
-                let y0 = num_attr(e, "y0")?;
-                let x1 = num_attr(e, "x1")?;
-                let y1 = num_attr(e, "y1")?;
-                if let (Some(x0), Some(y0), Some(x1), Some(y1)) = (x0, y0, x1, y1) {
+                let ev = extraer_eigen(e, nombre)?;
+                if let [Some(x0), Some(y0), Some(x1), Some(y1)] = ev {
                     if x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite() {
                         g.eigen = Some([x0, y0, x1, y1]);
                     }
@@ -297,7 +702,7 @@ fn manejar_apertura(
         }
         "coefficients" => {
             if let Some(g) = elem.as_mut() {
-                if let Some(data) = attr(e, "data")? {
+                if let Some(data) = extraer_str1(e, nombre, "data")? {
                     if data.len() <= MAX_ATTR_BYTES {
                         if let Some(mat) = parse_coefficients_data(&data) {
                             g.matrix = Some(mat);
@@ -308,20 +713,19 @@ fn manejar_apertura(
         }
         "startPoint" => {
             if let Some(g) = elem.as_mut() {
-                let x = num_attr(e, "x")?;
-                let y = num_attr(e, "y")?;
+                let (x, y, exp) = extraer_startpoint(e, nombre)?;
                 if let (Some(x), Some(y)) = (x, y) {
                     if x.is_finite() && y.is_finite() {
                         g.vector_start = Some([x, y]);
                     }
-                } else if let Some(exp) = attr(e, "exp")? {
+                } else if let Some(exp) = exp {
                     let _ = exp;
                 }
             }
         }
         "caption" => {
             if let Some(g) = elem.as_mut() {
-                if let Some(val) = attr(e, "val")? {
+                if let Some(val) = extraer_str1(e, nombre, "val")? {
                     if val.len() <= MAX_ATTR_BYTES {
                         g.texto = Some(val);
                     }
@@ -329,39 +733,35 @@ fn manejar_apertura(
             }
         }
         "cell" => {
-            let mut fila: Vec<String> = Vec::new();
-            for key in ["val", "value", "content", "exp", "input"] {
-                if let Some(v) = attr(e, key)? {
-                    if !v.is_empty() && v.len() <= super::MAX_ATTR_BYTES {
-                        fila.push(v);
-                    }
-                }
-            }
-            if let Some(n) = num_attr(e, "val")? {
-                fila.push(format!("{n}"));
-            }
+            let fila = extraer_cell(e, nombre)?;
             if !fila.is_empty() && c.hoja_celdas.len() < crate::MAX_DATA_TABLE_ROWS {
                 c.hoja_celdas.push(fila);
             }
         }
         "input" => {
             if let Some(g) = cmd.as_mut() {
-                g.entradas = io_attrs(e)?;
+                g.entradas = io_attrs(e, nombre)?;
             }
         }
         "output" => {
             if let Some(g) = cmd.as_mut() {
-                g.salidas = io_attrs(e)?;
+                g.salidas = io_attrs(e, nombre)?;
             }
         }
-        "ggbscript" if *en_construccion => c.con_script = true,
+        "ggbscript" if *en_construccion => {
+            verificar_tope(e, nombre)?;
+            c.con_script = true;
+        }
         "cascell" if *en_construccion => {
+            verificar_tope(e, nombre)?;
             c.con_cas = true;
             if !autocerrado {
                 *prof_cas = prof_cas.saturating_add(1);
             }
         }
-        _ => {}
+        _ => {
+            verificar_tope(e, nombre)?;
+        }
     }
     Ok(())
 }
@@ -374,62 +774,42 @@ fn parse_coefficients_data(data: &str) -> Option<[f64; 6]> {
     if trimmed.is_empty() {
         return None;
     }
-    let mut vals: Vec<f64> = Vec::new();
+    let mut vals = [0.0f64; 6];
+    let mut n = 0usize;
     for tok in trimmed.split([',', ' ', ';']) {
         let t = tok.trim();
         if t.is_empty() {
             continue;
         }
         match t.parse::<f64>() {
-            Ok(v) if v.is_finite() => vals.push(v),
+            Ok(v) if v.is_finite() => {
+                vals[n] = v;
+                n += 1;
+            }
             _ => return None,
         }
-        if vals.len() >= 6 {
+        if n >= 6 {
             break;
         }
     }
-    if vals.len() < 6 {
+    if n < 6 {
         return None;
     }
-    Some([vals[0], vals[1], vals[2], vals[3], vals[4], vals[5]])
+    Some(vals)
 }
-fn attr(e: &BytesStart<'_>, clave: &str) -> Result<Option<String>, GgbError> {
-    for resultado in e.attributes() {
-        let a = resultado.map_err(|e| GgbError::XmlMalformado {
-            detalle: GgbError::recorta(&e.to_string()),
-        })?;
-        if a.key.as_ref() == clave {
-            if a.value.len() > MAX_ATTR_BYTES {
-                return Err(GgbError::XmlMalformado {
-                    detalle: "atributo sobredimensionado".to_string(),
-                });
-            }
-            let v =
-                a.normalized_value(XmlVersion::default())
-                    .map_err(|e| GgbError::XmlMalformado {
-                        detalle: GgbError::recorta(&e.to_string()),
-                    })?;
-            return Ok(Some(v.into_owned()));
-        }
-    }
-    Ok(None)
-}
-fn num_attr(e: &BytesStart<'_>, clave: &str) -> Result<Option<f64>, GgbError> {
-    let texto = match attr(e, clave)? {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    match texto.trim().parse::<f64>() {
-        Ok(v) => Ok(Some(v)),
-        Err(_) => Ok(None),
-    }
-}
-fn io_attrs(e: &BytesStart<'_>) -> Result<Vec<String>, GgbError> {
+fn io_attrs(e: &BytesStart<'_>, nombre: &str) -> Result<Vec<String>, GgbError> {
     let mut pares: Vec<(u32, String)> = Vec::new();
+    let mut total: usize = 0;
     for resultado in e.attributes() {
-        let a = resultado.map_err(|e| GgbError::XmlMalformado {
-            detalle: GgbError::recorta(&e.to_string()),
-        })?;
+        let a = resultado.map_err(err_attr)?;
+        total = total.saturating_add(1);
+        if total > MAX_XML_ATTRS_PER_ELEMENT {
+            return Err(GgbError::XmlMalformado {
+                detalle: format!(
+                    "demasiados atributos en <{nombre}: límite {MAX_XML_ATTRS_PER_ELEMENT}"
+                ),
+            });
+        }
         let clave: &str = a.key.as_ref();
         let resto = match clave.strip_prefix('a') {
             Some(r) if !r.is_empty() => r,
@@ -446,9 +826,7 @@ fn io_attrs(e: &BytesStart<'_>) -> Result<Vec<String>, GgbError> {
         }
         let v = a
             .normalized_value(XmlVersion::default())
-            .map_err(|e| GgbError::XmlMalformado {
-                detalle: GgbError::recorta(&e.to_string()),
-            })?;
+            .map_err(err_attr)?;
         pares.push((indice, v.into_owned()));
         if pares.len() > MAX_IO_ATTRS {
             return Err(GgbError::XmlMalformado {
@@ -456,7 +834,17 @@ fn io_attrs(e: &BytesStart<'_>) -> Result<Vec<String>, GgbError> {
             });
         }
     }
-    pares.sort_by_key(|(i, _)| *i);
+    // Los comandos bien formados ya vienen `a0,a1,…` en orden: evita el sort.
+    let mut ordenado = true;
+    for w in pares.windows(2) {
+        if w[0].0 > w[1].0 {
+            ordenado = false;
+            break;
+        }
+    }
+    if !ordenado {
+        pares.sort_by_key(|(i, _)| *i);
+    }
     Ok(pares.into_iter().map(|(_, v)| v).collect())
 }
 /// Fail-closed ante `<!DOCTYPE`/`<!ENTITY` en cualquier combinación de
@@ -480,6 +868,22 @@ fn contiene_ignorando_mayusculas(hay: &[u8], aguja: &[u8]) -> bool {
     if aguja.is_empty() || hay.len() < aguja.len() {
         return false;
     }
-    hay.windows(aguja.len())
-        .any(|v| v.eq_ignore_ascii_case(aguja))
+    // Fast-path: filtra por primer byte (`<`, sin variante de mayúsculas) y
+    // solo compara el resto en las posiciones candidatas. El XML típico trae
+    // miles de `<element` pero ningún `<!DOCTYPE`; pasar de O(n·m) con
+    // `windows().any()` a O(n) con chequeo barato da ~10-15x en este filtro.
+    let primer = aguja[0];
+    let mut i = 0;
+    let tope = hay.len() - aguja.len();
+    while i <= tope {
+        if hay[i].eq_ignore_ascii_case(&primer) {
+            if hay[i..i + aguja.len()].eq_ignore_ascii_case(aguja) {
+                return true;
+            }
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    false
 }

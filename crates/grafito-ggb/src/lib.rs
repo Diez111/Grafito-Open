@@ -65,6 +65,20 @@ impl ImportReport {
         )
     }
 }
+/// Número con 6 decimales recortados (igual que `fmt_num` del importador).
+/// Reusa la alocación de `format!` vía `truncate` (un alloc menos por número).
+fn fmt_num(v: f64) -> String {
+    if !v.is_finite() {
+        return "0".to_string();
+    }
+    let mut s = format!("{v:.6}");
+    let recortado = s.trim_end_matches('0').trim_end_matches('.');
+    if recortado.is_empty() || recortado == "-0" {
+        return "0".to_string();
+    }
+    s.truncate(recortado.len());
+    s
+}
 pub fn import_ggb_bytes(bytes: &[u8]) -> Result<ImportReport, GgbError> {
     let extraido = zip_read::extraer(bytes)?;
     let construccion = parse::parsear(&extraido.xml)?;
@@ -75,36 +89,12 @@ pub fn import_ggb_bytes(bytes: &[u8]) -> Result<ImportReport, GgbError> {
             if !already_has_table && xs.len() >= 2 && xs.len() <= MAX_DATA_TABLE_ROWS {
                 let xs_str = xs
                     .iter()
-                    .map(|v| {
-                        if !v.is_finite() {
-                            "0".to_string()
-                        } else {
-                            let s = format!("{v:.6}");
-                            let s = s.trim_end_matches('0').trim_end_matches('.');
-                            if s.is_empty() || s == "-0" {
-                                "0".to_string()
-                            } else {
-                                s.to_string()
-                            }
-                        }
-                    })
+                    .map(|v| fmt_num(*v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let ys_str = ys
                     .iter()
-                    .map(|v| {
-                        if !v.is_finite() {
-                            "0".to_string()
-                        } else {
-                            let s = format!("{v:.6}");
-                            let s = s.trim_end_matches('0').trim_end_matches('.');
-                            if s.is_empty() || s == "-0" {
-                                "0".to_string()
-                            } else {
-                                s.to_string()
-                            }
-                        }
-                    })
+                    .map(|v| fmt_num(*v))
                     .collect::<Vec<_>>()
                     .join(", ");
                 let dt_cmd = format!("DataTable[{{{xs_str}}}, {{{ys_str}}}]");

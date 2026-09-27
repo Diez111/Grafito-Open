@@ -8,6 +8,32 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// ¿`text` supera `limit` caracteres? Equivalente a
+/// `text.chars().count() > limit` pero con salida temprana.
+///
+/// Fast path: `chars <= bytes` siempre, así que si `len() <= limit` no se
+/// cuenta nada. Si no, se cuenta hasta `limit + 1` en vez de todo el string
+/// (los rechazos por exceso no escanean los 8 KiB enteros).
+#[inline]
+fn exceeds_char_limit(text: &str, limit: usize) -> bool {
+    if text.len() <= limit {
+        return false;
+    }
+    text.chars().take(limit.saturating_add(1)).count() > limit
+}
+
+/// Largo en caracteres para presupuestos de display. Idéntico a
+/// `text.chars().count()`; en ASCII usa `len()` (memcpy-fast, sin decodificar
+/// UTF-8).
+#[inline]
+fn display_char_len(text: &str) -> usize {
+    if text.is_ascii() {
+        text.len()
+    } else {
+        text.chars().count()
+    }
+}
+
 /// Versión de las estructuras públicas del asistente.
 pub const ASSISTANT_SCHEMA_VERSION: u32 = 1;
 
@@ -137,21 +163,43 @@ impl AssistantRepairFailure {
         Ok(())
     }
 
-    fn prompt_line(&self) -> String {
-        let mut line = format!("- `{}`: {}.", self.command, self.kind.prompt_label());
+    fn prompt_line_len(&self) -> usize {
+        let mut len = 3_usize
+            .saturating_add(self.command.len())
+            .saturating_add(3)
+            .saturating_add(self.kind.prompt_label().len())
+            .saturating_add(1);
         if !self.expected_syntax.is_empty() {
-            line.push_str(" Expected syntax: ");
+            len = len.saturating_add(" Expected syntax: ".len());
             for (index, syntax) in self.expected_syntax.iter().enumerate() {
                 if index > 0 {
-                    line.push_str(" or ");
+                    len = len.saturating_add(" or ".len());
                 }
-                line.push('`');
-                line.push_str(syntax);
-                line.push('`');
+                len = len.saturating_add(2).saturating_add(syntax.len());
             }
-            line.push('.');
+            len = len.saturating_add(1);
         }
-        line
+        len
+    }
+
+    fn push_prompt_line(&self, out: &mut String) {
+        out.push_str("- `");
+        out.push_str(&self.command);
+        out.push_str("`: ");
+        out.push_str(self.kind.prompt_label());
+        out.push('.');
+        if !self.expected_syntax.is_empty() {
+            out.push_str(" Expected syntax: ");
+            for (index, syntax) in self.expected_syntax.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(" or ");
+                }
+                out.push('`');
+                out.push_str(syntax);
+                out.push('`');
+            }
+            out.push('.');
+        }
     }
 }
 
@@ -171,7 +219,7 @@ impl AssistantRepairFeedback {
         for failure in &self.failures {
             failure.validate()?;
             bytes = bytes
-                .checked_add(failure.prompt_line().len())
+                .checked_add(failure.prompt_line_len())
                 .and_then(|total| total.checked_add(1))
                 .ok_or_else(|| "assistant repair feedback budget overflow".to_string())?;
         }
@@ -181,13 +229,33 @@ impl AssistantRepairFeedback {
         Ok(())
     }
 
+    /// Largo exacto de [`Self::prompt_text`] sin construirlo (para reservar).
+    pub fn prompt_text_len(&self) -> usize {
+        let mut total = 0_usize;
+        for (index, failure) in self.failures.iter().enumerate() {
+            if index > 0 {
+                total = total.saturating_add(1);
+            }
+            total = total.saturating_add(failure.prompt_line_len());
+        }
+        total
+    }
+
+    /// Agrega el texto al buffer sin el `Vec`+`join` intermedio.
+    pub fn push_prompt_text(&self, out: &mut String) {
+        for (index, failure) in self.failures.iter().enumerate() {
+            if index > 0 {
+                out.push('\n');
+            }
+            failure.push_prompt_line(out);
+        }
+    }
+
     /// Texto seguro que el transporte añade después del catálogo de herramientas.
     pub fn prompt_text(&self) -> String {
-        self.failures
-            .iter()
-            .map(AssistantRepairFailure::prompt_line)
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut out = String::with_capacity(self.prompt_text_len());
+        self.push_prompt_text(&mut out);
+        out
     }
 }
 
@@ -526,11 +594,11 @@ impl AssistantFocus {
     /// Comprueba que el resumen sea seguro de incluir en una solicitud remota.
     pub fn validate(&self) -> Result<(), String> {
         if self.label.trim().is_empty()
-            || self.label.chars().count() > 256
+            || exceeds_char_limit(&self.label, 256)
             || self.kind.trim().is_empty()
-            || self.kind.chars().count() > 128
+            || exceeds_char_limit(&self.kind, 128)
             || self.summary.trim().is_empty()
-            || self.summary.chars().count() > MAX_FOCUS_SUMMARY_CHARS
+            || exceeds_char_limit(&self.summary, MAX_FOCUS_SUMMARY_CHARS)
         {
             return Err("assistant focus is outside the allowed size".into());
         }
@@ -674,13 +742,13 @@ impl ConversationTurn {
     /// Comprueba el presupuesto individual del turno, incluida su media.
     pub fn validate(&self) -> Result<(), String> {
         if self.content.trim().is_empty()
-            || self.content.chars().count() > MAX_CONVERSATION_TURN_CHARS
+            || exceeds_char_limit(&self.content, MAX_CONVERSATION_TURN_CHARS)
         {
             return Err("assistant conversation turn is outside the allowed size".into());
         }
         if let Some(reasoning) = &self.reasoning {
             if reasoning.trim().is_empty()
-                || reasoning.chars().count() > MAX_CONVERSATION_REASONING_CHARS
+                || exceeds_char_limit(reasoning, MAX_CONVERSATION_REASONING_CHARS)
             {
                 return Err("assistant conversation reasoning is outside the allowed size".into());
             }
@@ -882,7 +950,7 @@ impl TurnMediaRef {
             if field.trim().is_empty() {
                 return Err(format!("assistant turn media '{name}' is empty"));
             }
-            if field.chars().count() > MAX_TURN_MEDIA_FIELD_CHARS {
+            if exceeds_char_limit(field, MAX_TURN_MEDIA_FIELD_CHARS) {
                 return Err(format!("assistant turn media '{name}' is too long"));
             }
         }
@@ -990,7 +1058,9 @@ pub fn trim_conversation_with_owners(
                 && matches!(pair[1].role, ConversationRole::Assistant)
         }) {
             let len_antes = conversation.len();
-            let _dropped: Vec<ConversationTurn> = conversation.drain(index..index + 2).collect();
+            // Sin `Vec` intermedio: el drain ya suelta los turnos (con su media)
+            // al consumirse; evita una asignación por cada par dropeado.
+            for _ in conversation.drain(index..index + 2) {}
             for owner in owners.iter_mut() {
                 *owner = rebase_owner_index(*owner, index, 2, len_antes);
             }
@@ -1171,7 +1241,7 @@ impl DerivationStep {
             if field.trim().is_empty() {
                 return Err(format!("assistant derivation step '{name}' is empty"));
             }
-            if field.chars().count() > MAX_STEP_FIELD_CHARS {
+            if exceeds_char_limit(field, MAX_STEP_FIELD_CHARS) {
                 return Err(format!("assistant derivation step '{name}' is too long"));
             }
         }
@@ -1255,7 +1325,7 @@ pub fn validate_run_command_texto(texto: &str) -> Result<(), String> {
     if texto.trim().is_empty() {
         return Err("assistant run_command texto is empty".into());
     }
-    if texto.chars().count() > MAX_RUN_COMMAND_CHARS {
+    if exceeds_char_limit(texto, MAX_RUN_COMMAND_CHARS) {
         return Err("assistant run_command texto exceeds 2000 characters".into());
     }
     if texto.contains('\0') {
@@ -1293,7 +1363,7 @@ impl ProposedPlan {
         if self.schema_version != ASSISTANT_SCHEMA_VERSION {
             return Err("assistant plan schema version is unsupported".into());
         }
-        if self.summary.chars().count() > 1_024 {
+        if exceeds_char_limit(&self.summary, 1_024) {
             return Err("assistant plan summary exceeds the allowed size".into());
         }
         if self.operations.is_empty() || self.operations.len() > MAX_PROPOSED_PLAN_OPERATIONS {
@@ -1581,7 +1651,7 @@ impl AssistantRequest {
         if self
             .web_context
             .as_ref()
-            .is_some_and(|context| context.chars().count() > MAX_WEB_CONTEXT_CHARS)
+            .is_some_and(|context| exceeds_char_limit(context, MAX_WEB_CONTEXT_CHARS))
         {
             return Err("assistant web context exceeds the configured limit".into());
         }
@@ -1667,8 +1737,7 @@ impl AssistantRequest {
                     .as_ref()
                     .map(|feedback| {
                         feedback
-                            .prompt_text()
-                            .len()
+                            .prompt_text_len()
                             .saturating_add(REMOTE_REPAIR_FEEDBACK_PROMPT_OVERHEAD_BYTES)
                     })
                     .unwrap_or_default(),
@@ -1793,7 +1862,7 @@ impl AssistantResponse {
 
 fn add_display_characters(total: &mut usize, text: &str) -> Result<(), String> {
     *total = total
-        .checked_add(text.chars().count())
+        .checked_add(display_char_len(text))
         .ok_or_else(|| "assistant response display size overflow".to_string())?;
     Ok(())
 }

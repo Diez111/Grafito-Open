@@ -33,6 +33,7 @@
 use crate::exercise::ValidatorKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 /// Ítem IRT 3PL calibrado (demo).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -102,11 +103,17 @@ impl IrtItem {
 /// respuesta es un número (acepta redondeos tipo `0.3333333333`), `Exact`
 /// para respuestas simbólicas o de texto.
 fn validator_for_answer(answer: &str) -> ValidatorKind {
-    let t = answer.trim().replace(',', ".");
-    match t.parse::<f64>() {
-        Ok(_) => ValidatorKind::NumericTol(0.02),
-        Err(_) => ValidatorKind::Exact,
+    // Sin `replace` en el camino caliente: las respuestas del banco con `,`
+    // decimal son inexistentes; primero el parse directo (cero allocs), luego
+    // la variante con coma solo si hace falta.
+    let t = answer.trim();
+    if t.parse::<f64>().is_ok() {
+        return ValidatorKind::NumericTol(0.02);
     }
+    if t.contains(',') && t.replace(',', ".").parse::<f64>().is_ok() {
+        return ValidatorKind::NumericTol(0.02);
+    }
+    ValidatorKind::Exact
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -185,17 +192,16 @@ pub fn eap_estimate(responses: &[(IrtItem, bool)]) -> (f64, f64) {
     }
 
     const LO: f64 = -4.0;
-    const HI: f64 = 4.0;
     const STEP: f64 = 0.08;
-    let n_points = ((HI - LO) / STEP).round() as usize + 1;
-
-    let mut thetas = Vec::with_capacity(n_points);
-    let mut log_post = Vec::with_capacity(n_points);
+    // Cuadratura uniforme en [-4,4] paso 0.08: 101 puntos fijos.
+    // ((4-(-4))/0.08).round()+1 = 101 puntos fijos: buffers en stack, sin
+    // `Vec` (hot path del CAT: antes 3 `Vec` de ~101 por estimación).
+    const N_POINTS: usize = 101;
+    let mut log_post = [f64::NEG_INFINITY; N_POINTS];
     let mut max_log = f64::NEG_INFINITY;
 
-    for i in 0..n_points {
+    for (i, slot) in log_post.iter_mut().enumerate() {
         let theta = LO + i as f64 * STEP;
-        thetas.push(theta);
         // log prior N(0,1): -0.5*theta^2 -0.5*ln(2pi) (constante cancela)
         let log_prior = -0.5 * theta * theta;
         let mut log_like = 0.0_f64;
@@ -221,39 +227,38 @@ pub fn eap_estimate(responses: &[(IrtItem, bool)]) -> (f64, f64) {
         if lp > max_log {
             max_log = lp;
         }
-        log_post.push(lp);
+        *slot = lp;
     }
 
     if !max_log.is_finite() {
         return (0.0, 1.0);
     }
 
-    // exp(log_post - max_log) y normalizar
-    let mut post = Vec::with_capacity(n_points);
+    // exp(log_post - max_log) y normalizar (reusa el mismo buffer en stack)
     let mut sum = 0.0_f64;
-    for &lp in &log_post {
+    for lp in log_post.iter_mut() {
         let v = if lp.is_finite() {
-            (lp - max_log).exp()
+            (*lp - max_log).exp()
         } else {
             0.0
         };
-        post.push(v);
+        *lp = v;
         sum += v;
     }
     if !sum.is_finite() || sum <= f64::EPSILON {
         return (0.0, 1.0);
     }
-    for v in &mut post {
+    for v in log_post.iter_mut() {
         *v /= sum;
     }
 
     let mut eap = 0.0_f64;
-    for (theta, w) in thetas.iter().zip(post.iter()) {
-        eap += theta * w;
+    for (i, w) in log_post.iter().enumerate() {
+        eap += (LO + i as f64 * STEP) * w;
     }
     let mut var = 0.0_f64;
-    for (theta, w) in thetas.iter().zip(post.iter()) {
-        var += w * (theta - eap).powi(2);
+    for (i, w) in log_post.iter().enumerate() {
+        var += w * (LO + i as f64 * STEP - eap).powi(2);
     }
     let se = var.max(0.0).sqrt().max(0.05);
     // clamp theta a rango
@@ -524,6 +529,10 @@ fn item_for_branch(branch: &str, idx: usize) -> (String, String, f64, &'static s
 /// Generación determinista: `a` y `c` con dispersión via hash para evitar
 /// constantes; `b` desde la tabla razonada por pregunta (ver
 /// [`item_for_branch`], FIX 6). Validado por `bank_has_fifteen_items_per_branch`.
+///
+/// Los bancos son estáticos: se construyen una vez (`OnceLock`) y cada llamada
+/// clona el de su familia (misma semántica, sin `format!`/`parse` por ítem en
+/// el camino caliente del CAT/scheduler).
 pub fn cat_bank(branch_id: &str) -> Vec<IrtItem> {
     let norm = branch_id.trim().to_lowercase();
     let branch = if BRANCHES.contains(&norm.as_str()) {
@@ -533,15 +542,20 @@ pub fn cat_bank(branch_id: &str) -> Vec<IrtItem> {
         // genérico: `cat_bank("am1-der")` servía "Pregunta general N").
         branch_family_for_lo(&norm)
     };
+    banco_cacheado(branch).clone()
+}
+
+/// Construye el banco de una familia (solo en la primera llamada por familia).
+fn construir_banco(familia: &str) -> Vec<IrtItem> {
     let mut items = Vec::with_capacity(16);
     for idx in 0..15usize {
-        let (q, ans, b, lo) = item_for_branch(branch, idx);
+        let (q, ans, b, lo) = item_for_branch(familia, idx);
         let a = det_a_for_index(idx);
-        let c = det_c_for_index(idx.wrapping_add(branch.len()));
-        let id = format!("{branch}-{idx:02}");
+        let c = det_c_for_index(idx.wrapping_add(familia.len()));
+        let id = format!("{familia}-{idx:02}");
         items.push(IrtItem {
             id,
-            branch_id: branch.to_string(),
+            branch_id: familia.to_string(),
             lo_id: lo.to_string(),
             a,
             b,
@@ -552,6 +566,25 @@ pub fn cat_bank(branch_id: &str) -> Vec<IrtItem> {
         });
     }
     items
+}
+
+/// Caché estático de los 8 bancos por familia.
+fn banco_cacheado(familia: &str) -> &'static Vec<IrtItem> {
+    static CACHE: OnceLock<BTreeMap<&'static str, Vec<IrtItem>>> = OnceLock::new();
+    static FALLBACK: OnceLock<Vec<IrtItem>> = OnceLock::new();
+    let mapa = CACHE.get_or_init(|| {
+        let mut m = BTreeMap::new();
+        for f in BRANCHES {
+            m.insert(*f, construir_banco(f));
+        }
+        m
+    });
+    // `familia` siempre es una de BRANCHES (resuelta arriba); el fallback
+    // inalcanzable construye al vuelo (sin pánico) si algo imprevisto llega.
+    match mapa.get(familia) {
+        Some(v) => v,
+        None => FALLBACK.get_or_init(|| construir_banco(familia)),
+    }
 }
 
 /// Cantidad de ítems en banco para rama.

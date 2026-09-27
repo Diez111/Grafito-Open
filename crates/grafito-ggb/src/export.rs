@@ -11,7 +11,6 @@
 //! importador); ida y vuelta dentro de 1e-6.
 
 use crate::error::GgbError;
-use crate::map::sanitize_etiqueta;
 use crate::parse::MAX_IO_ATTRS;
 use crate::GGB_XML_NAME;
 use crate::MAX_ELEMS;
@@ -117,13 +116,15 @@ fn fmt_num(v: f64) -> String {
     if !v.is_finite() {
         return "0".to_string();
     }
-    let s = format!("{v:.6}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    if s.is_empty() || s == "-0" {
-        "0".to_string()
-    } else {
-        s.to_string()
+    let mut s = format!("{v:.6}");
+    let recortado = s.trim_end_matches('0').trim_end_matches('.');
+    if recortado.is_empty() || recortado == "-0" {
+        return "0".to_string();
     }
+    // Reusa la alocación de `format!`: trunca en su lugar en vez de
+    // `to_string()` (un alloc menos por número; mismo string observable).
+    s.truncate(recortado.len());
+    s
 }
 
 /// Etiqueta exportable: charset estricto del importador + punto fijo de
@@ -135,7 +136,7 @@ fn fmt_num(v: f64) -> String {
 /// con la `A_B` real). Ahora: o la etiqueta sobrevive idéntica ida y vuelta,
 /// o se **omite con motivo** en [`ExportReport`].
 fn clean_label(raw: &str) -> Result<String, String> {
-    let label = raw.trim().to_string();
+    let label = raw.trim();
     if label.is_empty() {
         return Err("etiqueta vacía".to_string());
     }
@@ -153,10 +154,13 @@ fn clean_label(raw: &str) -> Result<String, String> {
     if !charset_ok {
         return Err("etiqueta fuera de [A-Za-z0-9_'] (XML y roundtrip seguros)".to_string());
     }
-    if sanitize_etiqueta(&label) != label {
+    // Tras el charset estricto solo quedan `[A-Za-z0-9_']`: `sanitize_etiqueta`
+    // sería identidad salvo truncado a 64 bytes. Chequeo de longitud sin alloc
+    // con el mismo mensaje observable que antes.
+    if label.len() > 64 {
         return Err("etiqueta no canónica: el importador la renombraría (colisión)".to_string());
     }
-    Ok(label)
+    Ok(label.to_string())
 }
 
 fn finite(value: f64, what: &str) -> Result<f64, String> {
@@ -423,11 +427,20 @@ pub fn export_ggb_bytes(items: &[GgbExportItem]) -> Result<(Vec<u8>, ExportRepor
 /// la normalización de valores de atributo no los convierta en espacios.
 fn push_attr(elem: &mut BytesStart<'_>, key: &str, value: &str) {
     let escaped = quick_xml::escape::escape(value);
-    let escaped = escaped.replace('\n', "&#10;").replace('\t', "&#9;");
-    elem.push_attribute(Attribute {
-        key: QName(key),
-        value: escaped.into(),
-    });
+    // `\n`/`\t` casi nunca aparecen (etiquetas con charset estricto y
+    // literales numéricos): solo se paga el `replace` (2 allocs) si están.
+    if value.contains(['\n', '\t']) {
+        let escaped = escaped.replace('\n', "&#10;").replace('\t', "&#9;");
+        elem.push_attribute(Attribute {
+            key: QName(key),
+            value: escaped.into(),
+        });
+    } else {
+        elem.push_attribute(Attribute {
+            key: QName(key),
+            value: escaped,
+        });
+    }
 }
 
 fn write_open(
@@ -524,6 +537,17 @@ fn write_element_numeric(
     write_close(writer, "element")
 }
 
+/// Claves `a0..a63` precomputadas: evita `format!("a{i}")` (un alloc por
+/// entrada; 64 allocs en un polígono al tope). Paridad exacta con el
+/// importador (`MAX_IO_ATTRS`).
+const A_KEYS: [&str; 64] = [
+    "a0", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "a8", "a9", "a10", "a11", "a12", "a13", "a14",
+    "a15", "a16", "a17", "a18", "a19", "a20", "a21", "a22", "a23", "a24", "a25", "a26", "a27",
+    "a28", "a29", "a30", "a31", "a32", "a33", "a34", "a35", "a36", "a37", "a38", "a39", "a40",
+    "a41", "a42", "a43", "a44", "a45", "a46", "a47", "a48", "a49", "a50", "a51", "a52", "a53",
+    "a54", "a55", "a56", "a57", "a58", "a59", "a60", "a61", "a62", "a63",
+];
+
 fn write_command(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: &str,
@@ -533,7 +557,14 @@ fn write_command(
     write_open(writer, "command", &[("name", name)])?;
     let mut elem = BytesStart::new("input");
     for (i, input) in inputs.iter().enumerate() {
-        push_attr(&mut elem, &format!("a{i}"), input);
+        // El exportador nunca supera 64 vértices (tope verificado antes de
+        // llamar); fuera de contrato se falla honesto, jamás XML inválido.
+        let Some(&key) = A_KEYS.get(i) else {
+            return Err(GgbError::XmlMalformado {
+                detalle: "demasiadas entradas en un comando".to_string(),
+            });
+        };
+        push_attr(&mut elem, key, input);
     }
     writer
         .write_event(Event::Empty(elem))

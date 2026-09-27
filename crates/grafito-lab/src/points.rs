@@ -70,20 +70,22 @@ fn tokenize(s: &str, line: usize) -> Result<Vec<Tok>, PointsError> {
         msg: msg.into(),
     };
     let bytes = s.as_bytes();
-    let mut toks = Vec::new();
+    // Hot path: pre-reserva (~1 token cada 4 bytes) para evitar 2-3
+    // reallocs por coordenada en fixtures grandes (2000 líneas).
+    let mut toks = Vec::with_capacity(bytes.len() / 4 + 4);
     let mut i = 0;
     while i < bytes.len() {
         let c = bytes[i] as char;
         if c.is_whitespace() {
             i += 1;
-        } else if s[i..].starts_with("Sqrt") {
+        } else if c == 'S' && s[i..].starts_with("Sqrt") {
             toks.push(Tok::Sqrt);
             i += 4;
         } else if c.is_ascii_digit() || c == '.' {
             let mut j = i + 1;
             while j < bytes.len() {
-                let d = bytes[j] as char;
-                if d.is_ascii_digit() || d == '.' {
+                let d = bytes[j];
+                if d.is_ascii_digit() || d == b'.' {
                     j += 1;
                 } else {
                     break;
@@ -250,7 +252,10 @@ pub fn parse_pt_line(line: &str) -> Result<Point2, PointsError> {
 /// (el `.py` asumía 874 líneas vía `assert`, acá el conteo lo valida el
 /// llamador).
 pub fn parse_pt_text(text: &str) -> Result<Vec<Point2>, PointsError> {
-    let mut out = Vec::new();
+    // Hot path: una pasada O(n) sobre bytes para reservar exacto y evitar
+    // reallocs en fixtures de miles de líneas (misma semántica).
+    let cap = text.as_bytes().iter().filter(|&&b| b == b'\n').count() + 1;
+    let mut out = Vec::with_capacity(cap);
     for (idx, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;

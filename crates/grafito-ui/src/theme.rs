@@ -398,7 +398,7 @@ fn theme_galley_shared(
         size_bits,
         color: u32::from_be_bytes([color.r(), color.g(), color.b(), color.a()]),
     };
-    let ctx = painter.ctx().clone();
+    let ctx = painter.ctx();
     if let Some(hit) = ctx.data_mut(|mapa| {
         mapa.get_persisted::<ThemeGalleyCache>(theme_galley_cache_id())
             .and_then(|caché| caché.entradas.get(&key).cloned())

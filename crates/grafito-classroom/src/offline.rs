@@ -12,7 +12,7 @@
 //! nunca pánico ni dato a medias. PII siempre local: nada sale del proceso.
 
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::session::ClassroomError;
 
@@ -351,15 +351,18 @@ pub fn decode_persist(json: &str) -> PersistLoad {
     };
     let mut kept: Vec<OfflineEnvelope> = Vec::new();
     let mut discarded = 0_usize;
+    // Dedup O(1) por `id` (antes O(n²) con `kept.iter().any`): contrato UI
+    // "nunca dos filas con el mismo id" intacto, gana el primero.
+    let mut seen: HashSet<u64> = HashSet::with_capacity(raw.queue.len().min(MAX_OFFLINE_QUEUE));
     for envelope in raw.queue {
         // Dedup real por `id`: el contrato de la UI lo asume (nunca dos filas
         // con el mismo id en el panel).
         match OfflineEnvelope::try_from(envelope) {
             Ok(clean) => {
-                if kept.iter().any(|existing| existing.id == clean.id) {
-                    discarded = discarded.saturating_add(1);
-                } else {
+                if seen.insert(clean.id) {
                     kept.push(clean);
+                } else {
+                    discarded = discarded.saturating_add(1);
                 }
             }
             Err(_) => discarded = discarded.saturating_add(1),
@@ -426,10 +429,17 @@ fn validate_body(body: &str) -> Result<(), ClassroomError> {
             "cuerpo offline excede {MAX_OFFLINE_BODY_BYTES} bytes"
         )));
     }
-    if body
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t')
-    {
+    // Vía rápida ASCII: bytes sin decodificar UTF-8 (mismo criterio que
+    // `char::is_control` para ASCII; `\n\t` admitidos).
+    let has_control = if body.is_ascii() {
+        body.as_bytes()
+            .iter()
+            .any(|&b| b.is_ascii_control() && b != b'\n' && b != b'\t')
+    } else {
+        body.chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+    };
+    if has_control {
         return Err(ClassroomError::InvalidMessage(
             "cuerpo offline con caracteres de control".to_string(),
         ));

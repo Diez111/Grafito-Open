@@ -22,6 +22,7 @@ pub mod tpl_am1;
 pub mod tpl_am2;
 pub mod tpl_chaos;
 pub mod tpl_edo;
+pub mod tpl_extra;
 pub mod tpl_graphs;
 pub mod tpl_linalg;
 pub mod tpl_pipeline;
