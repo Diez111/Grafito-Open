@@ -164,8 +164,12 @@ impl SocraticFsm {
     }
 
     /// Push acotado al historial: si está lleno descarta la entrada más vieja.
+    ///
+    /// En `while` (no un solo `pop_front`): `history` es campo `pub` y una
+    /// deserialización o escritura directa puede dejarlo por encima del tope;
+    /// un solo push debe volver a acotarlo igual.
     fn push_history(&mut self, entry: String) {
-        if self.history.len() >= MAX_HISTORY_ENTRIES {
+        while self.history.len() >= MAX_HISTORY_ENTRIES {
             self.history.pop_front();
         }
         self.history.push_back(entry);
@@ -1404,6 +1408,26 @@ mod tests {
             }
         }
         assert!(fsm.history.len() <= super::MAX_HISTORY_ENTRIES);
+    }
+
+    #[test]
+    fn history_sobredimensionado_se_reacota_en_un_push() {
+        // `history` es campo `pub`: una deserialización o escritura directa
+        // puede dejarlo por encima del tope. Un solo push debe reacotarlo
+        // (antes un único `pop_front` lo dejaba excedido para siempre).
+        let mut fsm = SocraticFsm::new("derivada");
+        for i in 0..(super::MAX_HISTORY_ENTRIES + 10) {
+            fsm.history.push_back(format!("externo {i}"));
+        }
+        assert!(fsm.history.len() > super::MAX_HISTORY_ENTRIES);
+        fsm.ask().expect("ask");
+        assert_eq!(fsm.history.len(), super::MAX_HISTORY_ENTRIES);
+        assert!(
+            fsm.history
+                .back()
+                .is_some_and(|h| h.starts_with("ask heuristic")),
+            "el push nuevo queda al final"
+        );
     }
 
     #[test]

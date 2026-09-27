@@ -168,6 +168,7 @@ const VECTOR_FIELD_STREAMLINE_CACHE_CAP: usize = 16;
 const TEX_LABEL_TEXTURE_CACHE_CAP: usize = 256;
 const FRACTAL_TEXTURE_CACHE_CAP: usize = 8;
 const DISPLAY_OVERRIDE_CACHE_CAP: usize = 64;
+#[allow(dead_code)]
 const TEXT_GALLEY_CACHE_CAP: usize = 64;
 const DOMAIN_GRID_CACHE_CAP: usize = 8;
 // Tamaños `NonZeroUsize` para `lru::LruCache::new` (misma API que
@@ -197,6 +198,7 @@ const DISPLAY_OVERRIDE_CACHE_SIZE: std::num::NonZeroUsize =
 const STAT_MEMO_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(STAT_MEMO_CACHE_CAP) };
 #[allow(clippy::useless_nonzero_new_unchecked)]
+#[allow(dead_code)]
 const TEXT_GALLEY_CACHE_SIZE: std::num::NonZeroUsize =
     unsafe { std::num::NonZeroUsize::new_unchecked(TEXT_GALLEY_CACHE_CAP) };
 #[allow(clippy::useless_nonzero_new_unchecked)]
@@ -238,6 +240,9 @@ thread_local! {
 /// Galley compartido para un objeto `Text`: en hit ni se clona el `String`
 /// ni se re-resuelve el layout. El color va horneado en el galley pero
 /// también está cubierto por la versión (cambia solo con commit).
+/// Conservado como respaldo versionado; el camino activo usa
+/// `label_galley_shared` por (texto, estilo, escala-cuantizada).
+#[allow(dead_code)]
 fn text_galley_shared(
     painter: &egui::Painter,
     id: ObjectId,
@@ -269,6 +274,584 @@ fn stat_memo_put(tag: u8, id: ObjectId, version: u64, value: StatMemoValue) {
     STAT_MEMO.with(|c| {
         c.borrow_mut().put((id, version, tag), value);
     });
+}
+
+// ── Perf polilíneas: vista cuantizada + diezmado + batch + budget labels ──
+// Tolerancia ~0.5px: pan/zoom dentro del quantum reutiliza sin re-muestrear
+// ni re-proyectar. Invalidación por (nonce, versión) como
+// `cached_ordered_visible_ids`, más tag de calidad (los steps dependen de
+// ella) y vista cuantizada (origen/escala por buckets).
+/// Tolerancia de cuantización de vista en px de pantalla.
+pub(crate) const POLYLINE_VIEW_QUANT_PX: f64 = 0.5;
+/// Ancho del bucket en ln(escala): error relativo <0.05% ⇒ <0.5px en 800px.
+const POLYLINE_SCALE_LN_EPS: f64 = 0.0005;
+/// Entradas del caché de polilíneas proyectadas (una por objeto visible).
+pub(crate) const PROJECTED_POLYLINE_CACHE_CAP: usize = 32;
+/// Tope de rótulos por frame (cull por cantidad).
+pub(crate) const MAX_LABELS_PER_FRAME: usize = 512;
+/// Piso de tamaño de fuente visible (cull por tamaño en pantalla).
+pub(crate) const MIN_LABEL_FONT_PX: f32 = 6.0;
+/// Piso de extensión de objeto para mostrar su rótulo (px).
+pub(crate) const MIN_LABEL_EXTENT_PX: f32 = 8.0;
+/// Entradas del caché de galleys por (texto, estilo, escala).
+pub(crate) const LABEL_GALLEY_CACHE_CAP: usize = 128;
+
+/// Vista cuantizada por buckets de origen/escala (tolerancia ~0.5px).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct QuantizedView {
+    ox: i64,
+    oy: i64,
+    scale_q: i64,
+    w: i32,
+    h: i32,
+    xlog: bool,
+    ylog: bool,
+}
+
+/// Cuantiza una escala a bucket de `POLYLINE_SCALE_LN_EPS` en ln(escala).
+/// No-finita o ≤0 ⇒ 0 (honesto, nunca NaN al hashear).
+pub(crate) fn quantize_scale_ln(scale: f64) -> i64 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return 0;
+    }
+    (scale.ln() / POLYLINE_SCALE_LN_EPS).round() as i64
+}
+
+/// Cuantiza origen (buckets de 0.5px), escala (bucket relativo),
+/// tamaño y modos log. Dos vistas dentro del quantum dan la misma clave.
+pub(crate) fn quantize_view(view: &ViewTransform) -> QuantizedView {
+    let bucket = |v: f64| {
+        if v.is_finite() {
+            (v / POLYLINE_VIEW_QUANT_PX).round() as i64
+        } else {
+            0
+        }
+    };
+    let dim = |v: f32| {
+        if v.is_finite() {
+            v.round().clamp(0.0, 16_384.0) as i32
+        } else {
+            0
+        }
+    };
+    QuantizedView {
+        ox: bucket(view.offset.x),
+        oy: bucket(view.offset.y),
+        scale_q: quantize_scale_ln(view.scale),
+        w: dim(view.screen_size.x),
+        h: dim(view.screen_size.y),
+        xlog: view.x_log,
+        ylog: view.y_log,
+    }
+}
+
+/// Tag compacto de calidad (los steps de muestreo dependen de ella).
+pub(crate) fn render_quality_tag(quality: grafito_core::RenderQuality) -> u8 {
+    match quality {
+        grafito_core::RenderQuality::Preview => 0,
+        grafito_core::RenderQuality::Normal => 1,
+        grafito_core::RenderQuality::High => 2,
+    }
+}
+
+/// Clave del caché de polilíneas: `(objeto, nonce, versión, calidad, vista)`.
+/// El nonce distingue documentos con igual versión (igual que
+/// `cached_ordered_visible_ids`).
+type ProjectedPolylineKey = (ObjectId, u64, u64, u8, QuantizedView);
+
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const PROJECTED_POLYLINE_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(PROJECTED_POLYLINE_CACHE_CAP) };
+#[allow(clippy::useless_nonzero_new_unchecked)]
+const LABEL_GALLEY_CACHE_SIZE: std::num::NonZeroUsize =
+    unsafe { std::num::NonZeroUsize::new_unchecked(LABEL_GALLEY_CACHE_CAP) };
+
+thread_local! {
+    /// Polilíneas muestreadas+proyectadas en coords view-screen (sin offset
+    /// de canvas): en hit no se toca el sampler ni se re-proyecta, solo se
+    /// suma `canvas_rect.min` al blitear.
+    static PROJECTED_POLYLINE_CACHE: RefCell<lru::LruCache<ProjectedPolylineKey, Arc<Vec<Vec<Pos2>>>>> =
+        RefCell::new(lru::LruCache::new(PROJECTED_POLYLINE_CACHE_SIZE));
+    /// Presupuesto de rótulos consumido en el frame en curso.
+    static LABEL_BUDGET_USED: RefCell<usize> = const { RefCell::new(0) };
+    /// Galleys por (texto, estilo, escala-cuantizada): textos repetidos
+    /// (ticks, rótulos iguales) comparten layout sin re-resolver.
+    static LABEL_GALLEYS: RefCell<lru::LruCache<LabelGalleyKey, Arc<egui::Galley>>> =
+        RefCell::new(lru::LruCache::new(LABEL_GALLEY_CACHE_SIZE));
+}
+
+/// Clave de galley: texto + fuente + color + escala cuantizada.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct LabelGalleyKey {
+    text: String,
+    font_bits: u32,
+    color: u32,
+    scale_q: i64,
+}
+
+fn projected_polyline_cache_get(
+    id: ObjectId,
+    nonce: u64,
+    version: u64,
+    quality: u8,
+    view: QuantizedView,
+) -> Option<Arc<Vec<Vec<Pos2>>>> {
+    PROJECTED_POLYLINE_CACHE.with(|c| {
+        c.borrow_mut()
+            .get(&(id, nonce, version, quality, view))
+            .cloned()
+    })
+}
+
+fn projected_polyline_cache_put(
+    id: ObjectId,
+    nonce: u64,
+    version: u64,
+    quality: u8,
+    view: QuantizedView,
+    runs: Vec<Vec<Pos2>>,
+) -> Arc<Vec<Vec<Pos2>>> {
+    let shared: Arc<Vec<Vec<Pos2>>> = Arc::new(runs);
+    PROJECTED_POLYLINE_CACHE.with(|c| {
+        c.borrow_mut()
+            .put((id, nonce, version, quality, view), shared.clone());
+    });
+    shared
+}
+
+/// Proyecta un punto mundo a coords view-screen (sin `canvas_rect.min`),
+/// con cull al rect visible expandido 1px. Pura y testeable.
+pub(crate) fn project_world_to_view_screen(
+    view: &ViewTransform,
+    world: Point2,
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Option<Pos2> {
+    if !world.x.is_finite() || !world.y.is_finite() {
+        return None;
+    }
+    if !canvas_w.is_finite() || !canvas_h.is_finite() || canvas_w <= 0.0 || canvas_h <= 0.0 {
+        return None;
+    }
+    let screen = view.world_to_screen(world);
+    if !screen.x.is_finite() || !screen.y.is_finite() {
+        return None;
+    }
+    let pos = Pos2::new(screen.x, screen.y);
+    if pos.x < -1.0 || pos.y < -1.0 || pos.x > canvas_w + 1.0 || pos.y > canvas_h + 1.0 {
+        return None;
+    }
+    Some(pos)
+}
+
+/// Proyecta muestras mundo a runs view-screen (split + cull), sin offset de
+/// canvas. Las entradas `None`/no-finitas cortan el run (misma regla que
+/// `split_continuous_screen_runs` salvo el umbral, que acá se deriva de
+/// `canvas_w/h` ya cuantizados).
+#[allow(dead_code)]
+pub(crate) fn project_samples_to_view_runs(
+    view: &ViewTransform,
+    samples: &[(f64, Option<f64>)],
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Vec<Vec<Pos2>> {
+    let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(canvas_w, canvas_h));
+    let mut projected: Vec<Option<Pos2>> = Vec::with_capacity(samples.len());
+    for (x, y) in samples {
+        let point = match y {
+            Some(y) => project_world_to_view_screen(view, Point2::new(*x, *y), canvas_w, canvas_h),
+            None => None,
+        };
+        projected.push(point);
+    }
+    split_continuous_screen_runs(&projected, canvas_rect)
+}
+
+/// Proyecta puntos mundo a runs view-screen (para paramétricas,
+/// polilíneas y lápiz).
+pub(crate) fn project_world_points_to_view_runs(
+    view: &ViewTransform,
+    points: &[Point2],
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Vec<Vec<Pos2>> {
+    let canvas_rect = Rect::from_min_size(Pos2::ZERO, Vec2::new(canvas_w, canvas_h));
+    let mut projected: Vec<Option<Pos2>> = Vec::with_capacity(points.len());
+    for point in points {
+        projected.push(project_world_to_view_screen(
+            view, *point, canvas_w, canvas_h,
+        ));
+    }
+    split_continuous_screen_runs(&projected, canvas_rect)
+}
+
+/// Diezmado por píxel de un run continuo: agrupa por bucket de píxel en X
+/// y conserva primero + min/max vertical + último por bucket (una pasada
+/// O(N), salida O(píxeles)). Sin `unwrap`: buckets no-finitos cortan.
+/// No-op visual bajo ~0.5px (el spread menor a 1px no emite extremos).
+pub(crate) fn decimate_run_to_pixels(run: &[Pos2]) -> Vec<Pos2> {
+    if run.len() <= 4 {
+        return run.to_vec();
+    }
+    #[derive(Debug, Clone, Copy)]
+    struct PixelBucket {
+        first: Pos2,
+        last: Pos2,
+        min_y: f32,
+        max_y: f32,
+        min_j: usize,
+        max_j: usize,
+        count: usize,
+    }
+    impl PixelBucket {
+        fn flush_into(self, out: &mut Vec<Pos2>) {
+            out.push(self.first);
+            if self.count > 1 && (self.max_y - self.min_y).abs() > 1.0 {
+                if self.min_j < self.max_j {
+                    out.push(Pos2::new(self.first.x, self.min_y));
+                    out.push(Pos2::new(self.first.x, self.max_y));
+                } else if self.min_j > self.max_j {
+                    out.push(Pos2::new(self.first.x, self.max_y));
+                    out.push(Pos2::new(self.first.x, self.min_y));
+                } else {
+                    out.push(Pos2::new(self.first.x, self.min_y));
+                }
+            }
+            if self.count > 1 && self.last != self.first {
+                out.push(self.last);
+            }
+        }
+    }
+    let mut out: Vec<Pos2> = Vec::with_capacity(run.len().min(512));
+    let mut bucket_x: Option<i32> = None;
+    let mut bucket: Option<PixelBucket> = None;
+    for point in run {
+        if !point.is_finite() {
+            if let Some(active) = bucket.take() {
+                active.flush_into(&mut out);
+            }
+            bucket_x = None;
+            continue;
+        }
+        let key = point.x.round() as i32;
+        match (bucket_x, bucket) {
+            (Some(current), Some(mut active)) if current == key => {
+                active.last = *point;
+                if point.y < active.min_y {
+                    active.min_y = point.y;
+                    active.min_j = active.count;
+                }
+                if point.y > active.max_y {
+                    active.max_y = point.y;
+                    active.max_j = active.count;
+                }
+                active.count += 1;
+                bucket = Some(active);
+            }
+            _ => {
+                if let Some(active) = bucket.take() {
+                    active.flush_into(&mut out);
+                }
+                bucket_x = Some(key);
+                bucket = Some(PixelBucket {
+                    first: *point,
+                    last: *point,
+                    min_y: point.y,
+                    max_y: point.y,
+                    min_j: 0,
+                    max_j: 0,
+                    count: 1,
+                });
+            }
+        }
+    }
+    if let Some(active) = bucket.take() {
+        active.flush_into(&mut out);
+    }
+    out
+}
+
+/// Diezma todos los runs de una polilínea (una pasada por run).
+pub(crate) fn decimate_runs_to_pixels(runs: &[Vec<Pos2>]) -> Vec<Vec<Pos2>> {
+    runs.iter().map(|run| decimate_run_to_pixels(run)).collect()
+}
+
+/// Construye los `Shape` de un batch de runs del mismo estilo, sin pintar.
+/// Sólido: un `Shape::line` por run; resto: un segmento por par. Pura y
+/// testeable (el pintado solo hace `painter.add` una vez).
+pub(crate) fn stroke_runs_batched_shapes(
+    runs: &[Vec<Pos2>],
+    stroke: Stroke,
+    style: LineStyle,
+) -> Vec<Shape> {
+    let mut shapes = Vec::new();
+    if matches!(style, LineStyle::Solid) {
+        for run in runs {
+            if run.len() >= 2 {
+                shapes.push(Shape::line(run.clone(), stroke));
+            }
+        }
+    } else if let Some((dash, gap)) = dash_pattern(style, stroke.width) {
+        for run in runs {
+            let mut i = 0;
+            while i + 1 < run.len() {
+                let a = run[i];
+                let b = run[i + 1];
+                let delta = b - a;
+                let len = delta.length();
+                if len.is_finite() && len > 0.0 {
+                    let dir = delta / len;
+                    let mut dist = 0.0;
+                    while dist < len {
+                        let start = a + dir * dist;
+                        let end = a + dir * (dist + dash).min(len);
+                        shapes.push(Shape::line_segment([start, end], stroke));
+                        dist += dash + gap;
+                    }
+                }
+                i += 1;
+            }
+        }
+    }
+    shapes
+}
+
+/// Batch de strokes: acumula runs del mismo estilo en un solo `add`
+/// (`Shape::Vec`). Visual idéntico a N `stroke_run` (mismas primitivas,
+/// un solo submit al painter). El caso de un solo run delega en
+/// `stroke_run` (camino histórico, ni un píxel distinto).
+fn stroke_runs_batched(
+    painter: &egui::Painter,
+    runs: Vec<Vec<Pos2>>,
+    stroke: Stroke,
+    style: LineStyle,
+) {
+    if runs.len() == 1 {
+        if let Some(single) = runs.into_iter().next() {
+            stroke_run(painter, single, stroke, style);
+        }
+        return;
+    }
+    let shapes = stroke_runs_batched_shapes(&runs, stroke, style);
+    if shapes.is_empty() {
+        return;
+    }
+    // Auditoría 1/60 (costo ~cero): detecta batches sin diezmar.
+    audit_shape_batch(&shapes);
+    if shapes.len() == 1 {
+        let mut shapes = shapes;
+        if let Some(shape) = shapes.pop() {
+            painter.add(shape);
+        }
+        return;
+    }
+    painter.add(Shape::Vec(shapes));
+}
+
+/// ¿La fuente en pantalla es legible? (cull por tamaño).
+pub(crate) fn label_font_visible(font_px: f32) -> bool {
+    font_px.is_finite() && font_px >= MIN_LABEL_FONT_PX
+}
+
+/// ¿El objeto es bastante grande en pantalla para merecer rótulo?
+pub(crate) fn label_extent_visible(extent_px: f32) -> bool {
+    extent_px.is_finite() && extent_px >= MIN_LABEL_EXTENT_PX
+}
+
+/// Reinicia el presupuesto de rótulos (una vez por frame, en `draw_objects`).
+pub(crate) fn label_budget_reset() {
+    LABEL_BUDGET_USED.with(|c| *c.borrow_mut() = 0);
+}
+
+/// Intenta consumir un slot de rótulo. `false` = tope alcanzado (cull).
+pub(crate) fn label_budget_try_acquire() -> bool {
+    LABEL_BUDGET_USED.with(|c| {
+        let mut used = c.borrow_mut();
+        if *used >= MAX_LABELS_PER_FRAME {
+            return false;
+        }
+        *used = used.saturating_add(1);
+        true
+    })
+}
+
+/// Decisión conjunta de budget: tamaño + extensión + tope de cantidad.
+/// Pura salvo el contador (testeable con `label_budget_reset`).
+pub(crate) fn label_budget_allowed(font_px: f32, extent_px: Option<f32>) -> bool {
+    if !label_font_visible(font_px) {
+        return false;
+    }
+    if let Some(extent) = extent_px {
+        if !label_extent_visible(extent) {
+            return false;
+        }
+    }
+    label_budget_try_acquire()
+}
+
+/// Galley compartido por `(texto, estilo, escala-cuantizada)`: en hit no se
+/// clona el `String` ni se re-resuelve el layout. El color va horneado pero
+/// forma parte de la clave (un cambio de color es miss, no aliasing).
+pub(crate) fn label_galley_shared(
+    painter: &egui::Painter,
+    text: &str,
+    font_size: f32,
+    color: Color32,
+    scale_q: i64,
+) -> Arc<egui::Galley> {
+    let font_size = if font_size.is_finite() {
+        font_size.clamp(1.0, 256.0)
+    } else {
+        MIN_LABEL_FONT_PX
+    };
+    let key = LabelGalleyKey {
+        text: text.to_owned(),
+        font_bits: font_size.to_bits(),
+        color: u32::from_be_bytes([color.r(), color.g(), color.b(), color.a()]),
+        scale_q,
+    };
+    if let Some(hit) = LABEL_GALLEYS.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return hit;
+    }
+    let galley = painter.layout_no_wrap(
+        text.to_owned(),
+        egui::FontId::proportional(font_size),
+        color,
+    );
+    LABEL_GALLEYS.with(|c| {
+        c.borrow_mut().put(key, galley.clone());
+    });
+    galley
+}
+
+/// Texto de ejes/overlays con Galley cacheado (mismo píxel que `painter.text`).
+///
+/// `painter.text` = `layout_no_wrap` + `anchor_size` + `galley`; acá el layout
+/// sale de `label_galley_shared` (clave por texto/estilo/escala) y el anclaje
+/// es idéntico, así que el rect devuelto coincide sin re-resolver por frame.
+/// Para ticks ("10⁻¹", "1.50") y rótulos repetidos ("cos", "sin", "0").
+pub(crate) fn cached_label_text(
+    painter: &egui::Painter,
+    pos: Pos2,
+    anchor: egui::Align2,
+    text: &str,
+    font_size: f32,
+    color: Color32,
+    scale_q: i64,
+) -> Rect {
+    let galley = label_galley_shared(painter, text, font_size, color, scale_q);
+    let rect = anchor.anchor_size(pos, galley.size());
+    painter.galley(rect.min, galley, color);
+    rect
+}
+
+// ── Auditoría PaintStats 1/60 ─────────────────────────────────────────────
+// `PaintStats::from_shapes(...).with_clipped_primitives(...)` una vez cada
+// 60 frames (costo ~cero, `log::debug` sin spam en release): si `shape_path`
+// o `shape_vec` dominan falta diezmado/batch; si `text_shape_*` dominan falta
+// caché Galley. El throttle vive en `draw_objects` (un incremento por frame)
+// y el log sale una sola vez por frame auditado (primer batch denso).
+/// Un audit cada N frames (sin spam, costo ~cero).
+pub(crate) const PAINT_STATS_AUDIT_EVERY: u64 = 60;
+
+thread_local! {
+    static PAINT_STATS_FRAME_NR: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static PAINT_STATS_LOGGED_FRAME: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(u64::MAX) };
+}
+
+/// ¿Toca auditar este frame? Pura y testeable.
+pub(crate) fn should_audit_paint_stats(frame_nr: u64) -> bool {
+    frame_nr.is_multiple_of(PAINT_STATS_AUDIT_EVERY)
+}
+
+/// Avanza el contador de frames de `draw_objects` (una vez por frame).
+pub(crate) fn paint_stats_tick_frame() -> u64 {
+    PAINT_STATS_FRAME_NR.with(|c| {
+        let next = c.get().wrapping_add(1);
+        c.set(next);
+        next
+    })
+}
+
+/// Frame actual sin avanzar (para los batches densos).
+fn paint_stats_frame_nr() -> u64 {
+    PAINT_STATS_FRAME_NR.with(|c| c.get())
+}
+
+/// Diagnóstico puro a partir de bytes: `shape_path` dominante ⇒ falta
+/// diezmado; `text_*` dominante ⇒ falta caché Galley; `shape_vec` con muchas
+/// allocs ⇒ falta batch. Nunca paniquea (solo `num_bytes`/`num_allocs`;
+/// `num_elements()` panicaría en `shape_path`/`shape_vec` heterogéneos).
+pub(crate) fn paint_stats_hint_for_bytes(
+    path_bytes: usize,
+    vec_allocs: usize,
+    text_bytes: usize,
+    total_bytes: usize,
+) -> &'static str {
+    if total_bytes == 0 {
+        return "idle";
+    }
+    if path_bytes.saturating_mul(2) >= total_bytes {
+        "posible falta de diezmado (shape_path dominante)"
+    } else if text_bytes.saturating_mul(2) >= total_bytes {
+        "posible falta de caché Galley (text_shape dominante)"
+    } else if vec_allocs > 512 {
+        "posible falta de batch (shape_vec dominante)"
+    } else {
+        "ok"
+    }
+}
+
+/// Audita un batch de `Shape`s con `PaintStats` (≤1 log cada 60 frames).
+/// Construye `ClippedShape`s con clip total (el clip no afecta el conteo) y
+/// completa con `with_clipped_primitives(&[])`; el log va a `debug` con el
+/// hint de `paint_stats_hint_for_bytes`. Sin `unwrap`, sin spam.
+pub(crate) fn audit_shape_batch(shapes: &[Shape]) {
+    if shapes.is_empty() {
+        return;
+    }
+    let frame = paint_stats_frame_nr();
+    if !should_audit_paint_stats(frame) {
+        return;
+    }
+    let already = PAINT_STATS_LOGGED_FRAME.with(|c| c.get());
+    if already == frame {
+        return;
+    }
+    PAINT_STATS_LOGGED_FRAME.with(|c| c.set(frame));
+    let clipped: Vec<egui::epaint::ClippedShape> = shapes
+        .iter()
+        .map(|shape| egui::epaint::ClippedShape {
+            clip_rect: Rect::EVERYTHING,
+            shape: shape.clone(),
+        })
+        .collect();
+    let stats = egui::epaint::PaintStats::from_shapes(&clipped).with_clipped_primitives(&[]);
+    let path_bytes = stats.shape_path.num_bytes();
+    let vec_allocs = stats.shape_vec.num_allocs();
+    let text_bytes = stats
+        .shape_text
+        .num_bytes()
+        .saturating_add(stats.text_shape_vertices.num_bytes())
+        .saturating_add(stats.text_shape_indices.num_bytes());
+    let total_bytes = stats
+        .shapes
+        .num_bytes()
+        .saturating_add(path_bytes)
+        .saturating_add(text_bytes)
+        .saturating_add(stats.shape_mesh.num_bytes())
+        .saturating_add(stats.shape_vec.num_bytes());
+    log::debug!(
+        "paint_stats frame={} shapes={} vec_allocs={} path_bytes={} text_bytes={} total_bytes={} hint={}",
+        frame,
+        stats.shapes.num_allocs(),
+        vec_allocs,
+        path_bytes,
+        text_bytes,
+        total_bytes,
+        paint_stats_hint_for_bytes(path_bytes, vec_allocs, text_bytes, total_bytes),
+    );
 }
 
 /// Segmentos de retrato de fase cacheados (Arc para cache hits baratos).
@@ -3601,7 +4184,10 @@ impl GrafitoApp {
 
         // Tick marks and labels — log-appropriate or linear
         let text_color = current_theme(painter.ctx()).axis_label;
-        let font = egui::FontId::proportional(grafito_ui::tokens::TYPE_SM);
+        // Galley cacheado (ejes = texto dinámico denso fuera de Text/Polyline):
+        // misma tipografía que `painter.text` histórico, layout compartido.
+        let axis_font_size = grafito_ui::tokens::TYPE_SM;
+        let axis_scale_q = quantize_scale_ln(view.scale);
         let minor_tick = Stroke::new(0.5, text_color);
 
         // X-axis ticks
@@ -3625,12 +4211,14 @@ impl GrafitoApp {
                 } else {
                     format!("10{}", superscript(pow))
                 };
-                painter.text(
+                let _ = cached_label_text(
+                    &painter,
                     pos + Vec2::new(0.0, 6.0),
                     egui::Align2::CENTER_TOP,
-                    label,
-                    font.clone(),
+                    &label,
+                    axis_font_size,
                     text_color,
+                    axis_scale_q,
                 );
                 // Minor ticks at 2..9 * 10^pow
                 if pow < max_pow {
@@ -3678,12 +4266,14 @@ impl GrafitoApp {
                 }
                 // Format nicely
                 let label = format_number_plane_label(x);
-                painter.text(
+                let _ = cached_label_text(
+                    &painter,
                     pos + Vec2::new(0.0, 6.0),
                     egui::Align2::CENTER_TOP,
-                    label,
-                    font.clone(),
+                    &label,
+                    axis_font_size,
                     text_color,
+                    axis_scale_q,
                 );
             }
         }
@@ -3709,12 +4299,14 @@ impl GrafitoApp {
                 } else {
                     format!("10{}", superscript(pow))
                 };
-                painter.text(
+                let _ = cached_label_text(
+                    &painter,
                     pos + Vec2::new(-6.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
-                    label,
-                    font.clone(),
+                    &label,
+                    axis_font_size,
                     text_color,
+                    axis_scale_q,
                 );
                 if pow < max_pow {
                     for k in 2..=9 {
@@ -3762,24 +4354,28 @@ impl GrafitoApp {
                     continue;
                 }
                 let label = format_number_plane_label(y);
-                painter.text(
+                let _ = cached_label_text(
+                    &painter,
                     pos + Vec2::new(-6.0, 0.0),
                     egui::Align2::RIGHT_CENTER,
-                    label,
-                    font.clone(),
+                    &label,
+                    axis_font_size,
                     text_color,
+                    axis_scale_q,
                 );
             }
         }
 
         let origin = view.world_to_screen(Point2::new(0.0, 0.0));
         let origin_pos = canvas_rect.min + Vec2::new(origin.x, origin.y);
-        painter.text(
+        let _ = cached_label_text(
+            &painter,
             origin_pos + Vec2::new(-6.0, 6.0),
             egui::Align2::RIGHT_TOP,
             "0",
-            font,
+            axis_font_size,
             text_color,
+            axis_scale_q,
         );
     }
 
@@ -3851,12 +4447,17 @@ impl GrafitoApp {
                 Stroke::new(0.4, Color32::from_rgba_unmultiplied(255, 84, 84, 90)),
             );
             painter.circle_filled(p, 4.0, marker);
-            painter.text(
+            // Overlay denso dinámico: Galley cacheado por (texto, estilo, escala).
+            let trig_scale_q = quantize_scale_ln(view.scale);
+            let trig_label = format!("{}({:.2})", spec.name, t);
+            let _ = cached_label_text(
+                &painter,
                 p + Vec2::new(6.0, -6.0),
                 egui::Align2::LEFT_BOTTOM,
-                format!("{}({:.2})", spec.name, t),
-                egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                &trig_label,
+                grafito_ui::tokens::TYPE_XS,
                 theme.text_primary,
+                trig_scale_q,
             );
         }
 
@@ -3889,19 +4490,24 @@ impl GrafitoApp {
                     painter.line_segment([point, foot_y], Stroke::new(1.0, projection_y));
                     painter.circle_filled(point, 4.5, marker);
 
-                    painter.text(
+                    let grid_scale_q = quantize_scale_ln(view.scale);
+                    let _ = cached_label_text(
+                        &painter,
                         unit_x + Vec2::new(8.0, 0.0),
                         egui::Align2::LEFT_CENTER,
                         "cos",
-                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                        grafito_ui::tokens::TYPE_XS,
                         theme.text_secondary,
+                        grid_scale_q,
                     );
-                    painter.text(
+                    let _ = cached_label_text(
+                        &painter,
                         to_pos(Point2::new(0.0, 1.0)) + Vec2::new(0.0, -8.0),
                         egui::Align2::CENTER_BOTTOM,
                         "sin",
-                        egui::FontId::proportional(grafito_ui::tokens::TYPE_XS),
+                        grafito_ui::tokens::TYPE_XS,
                         theme.text_secondary,
+                        grid_scale_q,
                     );
                 }
             }
@@ -4234,6 +4840,11 @@ impl GrafitoApp {
         TEX_LABEL_TEXTURES.with(|c| c.borrow_mut().tick());
         FRACTAL_TEXTURES.with(|c| c.borrow_mut().tick());
         COMPLEX_GRID_TEXTURES.with(|c| c.borrow_mut().tick());
+        // Budget de rótulos: tope por frame + cull por tamaño (ver
+        // `label_budget_allowed`); se reinicia una vez por frame dibujado.
+        label_budget_reset();
+        // Throttle de la auditoría PaintStats (1/60, costo ~cero).
+        let _ = paint_stats_tick_frame();
         // Gestos de slider huérfanos (widget desaparecido a mitad de
         // arrastre): commit a los 3 frames sin toque, sin fugas de `before`.
         crate::app::panel_gesture_sweep_at(
@@ -5302,53 +5913,125 @@ impl GrafitoApp {
                 }
             }
             GeoObject::Polyline(line) if line.points.len() >= 2 => {
-                // Cadena abierta: mismo estilo que Polygon pero sin cierre
-                // ni relleno; cada par consecutivo es un segmento.
+                // Cadena abierta: caché view-screen por vista cuantizada
+                // (pan/zoom dentro del quantum reutiliza sin re-proyectar),
+                // diezmado por píxel y batch en un solo `add`.
                 let width = get_width(line.width, style);
                 let color = to_color32(get_color(line.color, style));
                 let stroke = Stroke::new(width, color);
-                let mut screen: Vec<Pos2> = Vec::with_capacity(line.points.len());
-                for (i, w) in line.points.windows(2).enumerate() {
-                    let a = view.world_to_screen(w[0]);
-                    let b = view.world_to_screen(w[1]);
-                    let pa = canvas_rect.min + Vec2::new(a.x, a.y);
-                    let pb = canvas_rect.min + Vec2::new(b.x, b.y);
-                    screen.push(pa);
-                    if !overlay_only {
-                        stroke_segment(&painter, pa, pb, stroke, line.line_style);
+                let qview = quantize_view(view);
+                let quality = render_quality_tag(self.document.render_quality);
+                let cache_key = (line.id, self.document.cache_nonce, self.document.version);
+                let cached = projected_polyline_cache_get(
+                    cache_key.0,
+                    cache_key.1,
+                    cache_key.2,
+                    quality,
+                    qview,
+                );
+                let view_runs: Arc<Vec<Vec<Pos2>>> = match cached {
+                    Some(hit) => hit,
+                    None => {
+                        let raw = project_world_points_to_view_runs(
+                            view,
+                            &line.points,
+                            canvas_rect.width(),
+                            canvas_rect.height(),
+                        );
+                        let decimated = decimate_runs_to_pixels(&raw);
+                        projected_polyline_cache_put(
+                            cache_key.0,
+                            cache_key.1,
+                            cache_key.2,
+                            quality,
+                            qview,
+                            decimated,
+                        )
                     }
-                    if i + 2 == line.points.len() {
-                        screen.push(pb);
-                    }
+                };
+                let offset = canvas_rect.min.to_vec2();
+                if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
+                    let runs: Vec<Vec<Pos2>> = view_runs
+                        .iter()
+                        .map(|run| run.iter().map(|p| *p + offset).collect())
+                        .collect();
+                    stroke_runs_batched(&painter, runs, stroke, line.line_style);
                 }
                 let label = get_label(&line.label, style);
-                if !label.is_empty() && !screen.is_empty() {
-                    let cx: f32 = screen.iter().map(|p| p.x).sum::<f32>() / screen.len() as f32;
-                    let cy: f32 = screen.iter().map(|p| p.y).sum::<f32>() / screen.len() as f32;
-                    painter.text(
-                        Pos2::new(cx, cy),
-                        egui::Align2::CENTER_CENTER,
-                        label,
-                        egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
-                        label_color,
-                    );
+                if !label.is_empty() {
+                    let total: usize = view_runs.iter().map(|run| run.len()).sum();
+                    if total > 0 {
+                        let mut sx = 0.0f32;
+                        let mut sy = 0.0f32;
+                        let mut count = 0usize;
+                        for run in view_runs.iter() {
+                            for p in run {
+                                sx += p.x + offset.x;
+                                sy += p.y + offset.y;
+                                count += 1;
+                            }
+                        }
+                        if count > 0 {
+                            let centroid = Pos2::new(sx / count as f32, sy / count as f32);
+                            if label_budget_allowed(
+                                grafito_ui::tokens::TYPE_SM,
+                                Some(MIN_LABEL_EXTENT_PX),
+                            ) {
+                                painter.text(
+                                    centroid,
+                                    egui::Align2::CENTER_CENTER,
+                                    label,
+                                    egui::FontId::proportional(grafito_ui::tokens::TYPE_SM),
+                                    label_color,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             GeoObject::Pencil(pencil) if pencil.points.len() >= 2 || pencil.is_dynamic_locus() => {
-                // Polilínea: dibuja cada par consecutivo como segmento.
+                // Polilínea con caché view-screen + diezmado + batch (igual
+                // que Polyline). El marcador de locus y su rótulo van fuera
+                // del batch (una sola primitiva).
                 let width = get_width(pencil.width, style);
                 let color = to_color32(get_color(pencil.color, style));
                 let stroke = Stroke::new(width, color);
-                for w in pencil.points.windows(2) {
-                    let a = view.world_to_screen(w[0]);
-                    let b = view.world_to_screen(w[1]);
-                    stroke_segment(
-                        &painter,
-                        canvas_rect.min + Vec2::new(a.x, a.y),
-                        canvas_rect.min + Vec2::new(b.x, b.y),
-                        stroke,
-                        pencil.line_style,
+                if pencil.points.len() >= 2 {
+                    let qview = quantize_view(view);
+                    let quality = render_quality_tag(self.document.render_quality);
+                    let cached = projected_polyline_cache_get(
+                        pencil.id,
+                        self.document.cache_nonce,
+                        self.document.version,
+                        quality,
+                        qview,
                     );
+                    let view_runs: Arc<Vec<Vec<Pos2>>> = match cached {
+                        Some(hit) => hit,
+                        None => {
+                            let raw = project_world_points_to_view_runs(
+                                view,
+                                &pencil.points,
+                                canvas_rect.width(),
+                                canvas_rect.height(),
+                            );
+                            let decimated = decimate_runs_to_pixels(&raw);
+                            projected_polyline_cache_put(
+                                pencil.id,
+                                self.document.cache_nonce,
+                                self.document.version,
+                                quality,
+                                qview,
+                                decimated,
+                            )
+                        }
+                    };
+                    let offset = canvas_rect.min.to_vec2();
+                    let runs: Vec<Vec<Pos2>> = view_runs
+                        .iter()
+                        .map(|run| run.iter().map(|p| *p + offset).collect())
+                        .collect();
+                    stroke_runs_batched(&painter, runs, stroke, pencil.line_style);
                 }
                 if pencil.is_dynamic_locus() {
                     if let Some(last) = pencil.points.last().copied() {
@@ -5524,6 +6207,10 @@ impl GrafitoApp {
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     let stroke = Stroke::new(width, to_color32(color));
                     let line_style = fun.line_style;
+                    // Batch: se acumulan los runs diezmados del mismo estilo
+                    // y se emiten en un solo `add` (visual idéntico a N
+                    // `stroke_run`, una pasada O(N) ya existente).
+                    let mut batched_runs: Vec<Vec<Pos2>> = Vec::new();
                     let mut optimized_points = Vec::new();
                     let mut i = 0;
                     while i < projected.len() {
@@ -5573,19 +6260,15 @@ impl GrafitoApp {
                             i = j;
                         } else {
                             if !optimized_points.is_empty() {
-                                stroke_run(
-                                    &painter,
-                                    std::mem::take(&mut optimized_points),
-                                    stroke,
-                                    line_style,
-                                );
+                                batched_runs.push(std::mem::take(&mut optimized_points));
                             }
                             i += 1;
                         }
                     }
                     if !optimized_points.is_empty() {
-                        stroke_run(&painter, optimized_points, stroke, line_style);
+                        batched_runs.push(optimized_points);
                     }
+                    stroke_runs_batched(&painter, batched_runs, stroke, line_style);
                 }
 
                 if !label.is_empty() {
@@ -5777,18 +6460,19 @@ impl GrafitoApp {
             GeoObject::Text(txt) => {
                 let s = view.world_to_screen(txt.position);
                 let color = to_color32(txt.color);
-                // Galley cacheado por (objeto, versión, tamaño): el contenido
-                // y el color solo cambian con bump de versión. Antes se
-                // clonaba el `String` y se re-resolvía el layout por frame.
+                // Budget de labels: cull por tamaño + tope por frame. La
+                // fuente va en px de pantalla (no escala con el zoom), así
+                // que la extensión se estima por el largo del texto.
                 let font_size = txt.font_size.max(8.0);
-                let galley = text_galley_shared(
-                    &painter,
-                    txt.id,
-                    self.document.version,
-                    font_size,
-                    &txt.content,
-                    color,
-                );
+                let extent = font_size * txt.content.chars().count().max(1) as f32 * 0.6;
+                if txt.content.is_empty() || !label_budget_allowed(font_size, Some(extent)) {
+                    return;
+                }
+                // Galley por (texto, estilo, escala-cuantizada): textos
+                // repetidos comparten layout sin re-resolver. Se mantiene
+                // `text_galley_shared` como respaldo versionado para compat.
+                let scale_q = quantize_scale_ln(view.scale);
+                let galley = label_galley_shared(&painter, &txt.content, font_size, color, scale_q);
                 // Emula el anclaje LEFT_CENTER previo (TextShape pivota en la
                 // esquina superior izquierda): se sube media altura de galley.
                 let pos = canvas_rect.min + Vec2::new(s.x, s.y - galley.size().y / 2.0);
@@ -6143,93 +6827,126 @@ impl GrafitoApp {
                 // 4000 fijos: una circunferencia a 800px se sobremuestreaba
                 // ~10× y cada curva pesaba ~32k vértices teselados). El
                 // sampler cachea por steps, igual que el grid de funciones.
-                let steps = grafito_core::function_sampling::recommended_grid_size_for_quality(
-                    canvas_rect.width(),
-                    self.document.render_quality,
-                )
-                .min(4000);
-                let samples = parametric_sampling::samples_or_compute_curve_2d(
-                    pc,
-                    steps,
-                    &self.document.variables,
+                // Vista cuantizada: pan/zoom dentro del quantum reutiliza
+                // los runs view-screen sin re-muestrear ni re-proyectar.
+                let qview = quantize_view(view);
+                let quality_tag = render_quality_tag(self.document.render_quality);
+                let cached = projected_polyline_cache_get(
+                    pc.id,
+                    self.document.cache_nonce,
+                    self.document.version,
+                    quality_tag,
+                    qview,
                 );
-                // T1: proyectar a scratch y partir en runs (misma regla de
-                // conectividad que el loop anterior) para emitir un PathShape
-                // por run en sólido en vez de un shape por segmento.
-                let mut projected = take_scratch_pts_opt();
-                projected.extend(samples.iter().map(|&(x, y)| {
-                    (x.is_finite() && y.is_finite()).then(|| {
-                        let screen = view.world_to_screen(Point2::new(x, y));
-                        canvas_rect.min + Vec2::new(screen.x, screen.y)
-                    })
-                }));
-                let runs = split_continuous_screen_runs(&projected, canvas_rect);
-                return_scratch_pts_opt(projected);
+                let view_runs: Arc<Vec<Vec<Pos2>>> = match cached {
+                    Some(hit) => hit,
+                    None => {
+                        let steps =
+                            grafito_core::function_sampling::recommended_grid_size_for_quality(
+                                canvas_rect.width(),
+                                self.document.render_quality,
+                            )
+                            .min(4000);
+                        let samples = parametric_sampling::samples_or_compute_curve_2d(
+                            pc,
+                            steps,
+                            &self.document.variables,
+                        );
+                        let mut projected = take_scratch_pts_opt();
+                        projected.extend(samples.iter().map(|&(x, y)| {
+                            (x.is_finite() && y.is_finite()).then(|| {
+                                let screen = view.world_to_screen(Point2::new(x, y));
+                                Pos2::new(screen.x, screen.y)
+                            })
+                        }));
+                        let view_rect = Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(canvas_rect.width(), canvas_rect.height()),
+                        );
+                        let runs = split_continuous_screen_runs(&projected, view_rect);
+                        return_scratch_pts_opt(projected);
+                        let decimated = decimate_runs_to_pixels(&runs);
+                        projected_polyline_cache_put(
+                            pc.id,
+                            self.document.cache_nonce,
+                            self.document.version,
+                            quality_tag,
+                            qview,
+                            decimated,
+                        )
+                    }
+                };
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     let stroke = Stroke::new(pc.width, to_color32(pc.color));
-                    for run in &runs {
-                        if run.len() < 2 {
-                            continue;
-                        }
-                        if matches!(pc.line_style, LineStyle::Solid) {
-                            painter.add(Shape::line(run.clone(), stroke));
-                        } else {
-                            for points in run.windows(2) {
-                                stroke_segment(
-                                    &painter,
-                                    points[0],
-                                    points[1],
-                                    stroke,
-                                    pc.line_style,
-                                );
-                            }
-                        }
-                    }
+                    let offset = canvas_rect.min.to_vec2();
+                    let runs: Vec<Vec<Pos2>> = view_runs
+                        .iter()
+                        .map(|run| run.iter().map(|p| *p + offset).collect())
+                        .collect();
+                    stroke_runs_batched(&painter, runs, stroke, pc.line_style);
                 }
             }
             GeoObject::PolarCurve(pol) => {
-                // T1: idem paramétricas (4000 fijos → adaptativo).
-                let steps = grafito_core::function_sampling::recommended_grid_size_for_quality(
-                    canvas_rect.width(),
-                    self.document.render_quality,
-                )
-                .min(4000);
-                let samples = parametric_sampling::samples_or_compute_polar(
-                    pol,
-                    steps,
-                    &self.document.variables,
+                // T1: idem paramétricas (4000 fijos → adaptativo) + caché por
+                // vista cuantizada + diezmado + batch en un solo `add`.
+                let qview = quantize_view(view);
+                let quality_tag = render_quality_tag(self.document.render_quality);
+                let cached = projected_polyline_cache_get(
+                    pol.id,
+                    self.document.cache_nonce,
+                    self.document.version,
+                    quality_tag,
+                    qview,
                 );
-                let mut projected = take_scratch_pts_opt();
-                projected.extend(samples.iter().map(|&(x, y)| {
-                    (x.is_finite() && y.is_finite()).then(|| {
-                        let screen = view.world_to_screen(Point2::new(x, y));
-                        canvas_rect.min + Vec2::new(screen.x, screen.y)
-                    })
-                }));
-                let runs = split_continuous_screen_runs(&projected, canvas_rect);
-                return_scratch_pts_opt(projected);
+                let view_runs: Arc<Vec<Vec<Pos2>>> = match cached {
+                    Some(hit) => hit,
+                    None => {
+                        let steps =
+                            grafito_core::function_sampling::recommended_grid_size_for_quality(
+                                canvas_rect.width(),
+                                self.document.render_quality,
+                            )
+                            .min(4000);
+                        let samples = parametric_sampling::samples_or_compute_polar(
+                            pol,
+                            steps,
+                            &self.document.variables,
+                        );
+                        let mut projected = take_scratch_pts_opt();
+                        projected.extend(samples.iter().map(|&(x, y)| {
+                            (x.is_finite() && y.is_finite()).then(|| {
+                                let screen = view.world_to_screen(Point2::new(x, y));
+                                Pos2::new(screen.x, screen.y)
+                            })
+                        }));
+                        let view_rect = Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(canvas_rect.width(), canvas_rect.height()),
+                        );
+                        let runs = split_continuous_screen_runs(&projected, view_rect);
+                        return_scratch_pts_opt(projected);
+                        let decimated = decimate_runs_to_pixels(&runs);
+                        projected_polyline_cache_put(
+                            pol.id,
+                            self.document.cache_nonce,
+                            self.document.version,
+                            quality_tag,
+                            qview,
+                            decimated,
+                        )
+                    }
+                };
+                let offset = canvas_rect.min.to_vec2();
+                let runs: Vec<Vec<Pos2>> = view_runs
+                    .iter()
+                    .map(|run| run.iter().map(|p| *p + offset).collect())
+                    .collect();
                 if !overlay_only && !style.is_some_and(|style| style.skip_stroke) {
                     // T1: un PathShape por run en estilo sólido (antes un
-                    // shape por segmento: ~1600 shapes por curva).
+                    // shape por segmento: ~1600 shapes por curva); ahora un
+                    // solo `add` con `Shape::Vec` (mismas primitivas).
                     let stroke = Stroke::new(pol.width, to_color32(pol.color));
-                    for run in &runs {
-                        if run.len() < 2 {
-                            continue;
-                        }
-                        if matches!(pol.line_style, LineStyle::Solid) {
-                            painter.add(Shape::line(run.clone(), stroke));
-                        } else {
-                            for points in run.windows(2) {
-                                stroke_segment(
-                                    &painter,
-                                    points[0],
-                                    points[1],
-                                    stroke,
-                                    pol.line_style,
-                                );
-                            }
-                        }
-                    }
+                    stroke_runs_batched(&painter, runs.clone(), stroke, pol.line_style);
                 }
                 // Fill from origin
                 if !overlay_only {
@@ -9274,5 +9991,262 @@ mod t7_t1_mediciones {
         println!("auto_labels: {n_mesh} blits bitmap, {n_text} textos");
         assert!(n_mesh >= 100, "los auto-labels deben blitear bitmaps");
         assert_eq!(n_text, 0, "ningún auto-label por camino ASCII");
+    }
+}
+
+#[cfg(test)]
+mod perf_polyline_batch_budget_tests {
+    use super::*;
+    use grafito_core::{ObjectId, PolylineObj};
+
+    fn test_view_with_offset(ox: f64, oy: f64, scale: f64) -> ViewTransform {
+        let mut view = ViewTransform::new(800.0, 600.0);
+        view.offset.x = ox;
+        view.offset.y = oy;
+        view.scale = scale;
+        view
+    }
+
+    #[test]
+    fn quantized_view_reuses_within_half_px() {
+        let base = test_view_with_offset(0.0, 0.0, 50.0);
+        let near = test_view_with_offset(0.2, -0.1, 50.0);
+        let far = test_view_with_offset(1.0, 0.0, 50.0);
+        assert_eq!(
+            quantize_view(&base),
+            quantize_view(&near),
+            "pan dentro del quantum reutiliza"
+        );
+        assert_ne!(
+            quantize_view(&base),
+            quantize_view(&far),
+            "pan de 1px invalida"
+        );
+        let zoom_near = test_view_with_offset(0.0, 0.0, 50.0 * (1.0 + 0.0002));
+        let zoom_far = test_view_with_offset(0.0, 0.0, 50.0 * 1.05);
+        assert_eq!(
+            quantize_view(&base),
+            quantize_view(&zoom_near),
+            "zoom mínimo reutiliza"
+        );
+        assert_ne!(
+            quantize_view(&base),
+            quantize_view(&zoom_far),
+            "zoom 5% invalida"
+        );
+    }
+
+    #[test]
+    fn projected_cache_hit_returns_same_arc_and_invalidates() {
+        let id = ObjectId::new();
+        let view = quantize_view(&test_view_with_offset(0.0, 0.0, 50.0));
+        let runs = vec![vec![Pos2::new(1.0, 2.0), Pos2::new(3.0, 4.0)]];
+        let stored = projected_polyline_cache_put(id, 7, 9, 1, view, runs);
+        let hit = projected_polyline_cache_get(id, 7, 9, 1, view).expect("hit");
+        assert!(Arc::ptr_eq(&stored, &hit));
+        assert!(projected_polyline_cache_get(id, 7, 10, 1, view).is_none());
+        assert!(projected_polyline_cache_get(id, 8, 9, 1, view).is_none());
+        let other_view = quantize_view(&test_view_with_offset(10.0, 0.0, 50.0));
+        assert!(projected_polyline_cache_get(id, 7, 9, 1, other_view).is_none());
+    }
+
+    #[test]
+    fn decimate_collapses_dense_oversampling_to_pixels() {
+        let mut run = Vec::new();
+        for i in 0..10_000 {
+            let x = i as f32 * 0.05;
+            let y = (i as f32 * 0.11).sin() * 200.0;
+            run.push(Pos2::new(x, y));
+        }
+        let decimated = decimate_run_to_pixels(&run);
+        assert!(
+            decimated.len() < run.len() / 2,
+            "N >> píxeles debe colapsar: {} vs {}",
+            decimated.len(),
+            run.len()
+        );
+        assert_eq!(decimated.first(), run.first());
+        assert_eq!(decimated.last(), run.last());
+        let min_in: f32 = run.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_in: f32 = run.iter().map(|p| p.y).fold(f32::NEG_INFINITY, f32::max);
+        let min_out: f32 = decimated.iter().map(|p| p.y).fold(f32::INFINITY, f32::min);
+        let max_out: f32 = decimated
+            .iter()
+            .map(|p| p.y)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (min_out - min_in).abs() <= 1.0 && (max_out - max_in).abs() <= 1.0,
+            "min/max por bucket preserva envolvente"
+        );
+        let tiny = vec![Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)];
+        assert_eq!(decimate_run_to_pixels(&tiny), tiny);
+    }
+
+    #[test]
+    fn batch_shapes_match_unbatched_coverage() {
+        let stroke = Stroke::new(2.0, Color32::WHITE);
+        let runs = vec![
+            (0..50)
+                .map(|i| Pos2::new(i as f32 * 8.0, (i as f32 * 0.2).sin() * 40.0))
+                .collect::<Vec<_>>(),
+            (0..60)
+                .map(|i| {
+                    Pos2::new(
+                        400.0 + i as f32 * 6.0,
+                        100.0 + (i as f32 * 0.15).cos() * 30.0,
+                    )
+                })
+                .collect::<Vec<_>>(),
+        ];
+        let batched = stroke_runs_batched_shapes(&runs, stroke, LineStyle::Solid);
+        assert_eq!(batched.len(), 2, "un Shape por run, un solo add");
+        let flat_batched: Vec<Pos2> = batched
+            .iter()
+            .flat_map(|shape| match shape {
+                Shape::Path(path) => path.points.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        let flat_runs: Vec<Pos2> = runs.iter().flatten().copied().collect();
+        assert_eq!(
+            flat_batched, flat_runs,
+            "vértices idénticos al camino por run"
+        );
+        let ctx = egui::Context::default();
+        let to_clipped = |shapes: &[Shape]| {
+            shapes
+                .iter()
+                .cloned()
+                .map(|shape| egui::epaint::ClippedShape {
+                    clip_rect: Rect::EVERYTHING,
+                    shape,
+                })
+                .collect::<Vec<_>>()
+        };
+        let unbatched: Vec<Shape> = runs
+            .iter()
+            .map(|run| Shape::line(run.clone(), stroke))
+            .collect();
+        // Warmup de fuentes/atlas (tessellate lo exige aunque el path no
+        // use texto, igual que `t1g_overhead_por_shape_vs_batcheado`).
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            ctx.layer_painter(egui::LayerId::background()).text(
+                Pos2::ZERO,
+                egui::Align2::LEFT_TOP,
+                "w",
+                egui::FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+        });
+        let tess_batched = ctx.tessellate(to_clipped(&batched), 1.0);
+        let tess_single = ctx.tessellate(to_clipped(&unbatched), 1.0);
+        let verts_batched: usize = tess_batched
+            .iter()
+            .map(|prim| match &prim.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                egui::epaint::Primitive::Callback(_) => 0,
+            })
+            .sum();
+        let verts_single: usize = tess_single
+            .iter()
+            .map(|prim| match &prim.primitive {
+                egui::epaint::Primitive::Mesh(mesh) => mesh.vertices.len(),
+                egui::epaint::Primitive::Callback(_) => 0,
+            })
+            .sum();
+        assert_eq!(
+            verts_batched, verts_single,
+            "teselado idéntico: batch en un add, mismos vértices"
+        );
+        let _ = PolylineObj::new(vec![Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)]);
+    }
+
+    #[test]
+    fn label_budget_caps_and_culls_by_size() {
+        label_budget_reset();
+        assert!(!label_font_visible(5.0));
+        assert!(label_font_visible(12.0));
+        assert!(!label_extent_visible(4.0));
+        assert!(label_extent_visible(16.0));
+        label_budget_reset();
+        assert!(!label_budget_allowed(5.0, None), "fuente chica se culla");
+        label_budget_reset();
+        assert!(
+            !label_budget_allowed(12.0, Some(2.0)),
+            "extensión chica se culla"
+        );
+        label_budget_reset();
+        for _ in 0..MAX_LABELS_PER_FRAME {
+            assert!(label_budget_try_acquire());
+        }
+        assert!(
+            !label_budget_try_acquire(),
+            "tope de cantidad culla el resto"
+        );
+        label_budget_reset();
+        assert!(label_budget_allowed(12.0, Some(32.0)));
+    }
+
+    #[test]
+    fn label_galley_reuses_by_text_style_scale() {
+        let ctx = egui::Context::default();
+        let color = Color32::WHITE;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let first = label_galley_shared(&painter, "f = x^2", 12.0, color, 42);
+            let second = label_galley_shared(&painter, "f = x^2", 12.0, color, 42);
+            assert!(Arc::ptr_eq(&first, &second), "hit comparte el Arc");
+            // Misma fuente a distinta escala cuantizada compone igual
+            // (la clave evita aliasar tamaños distintos, no duplica
+            // píxeles idénticos que egui ya interna).
+            let other_scale = label_galley_shared(&painter, "f = x^2", 12.0, color, 43);
+            assert_eq!(other_scale.size(), first.size());
+            let other_text = label_galley_shared(&painter, "g = x^3", 12.0, color, 42);
+            assert!(!Arc::ptr_eq(&first, &other_text));
+        });
+    }
+
+    #[test]
+    fn paint_stats_audit_throttles_and_hints() {
+        assert!(should_audit_paint_stats(0));
+        assert!(should_audit_paint_stats(PAINT_STATS_AUDIT_EVERY));
+        assert!(!should_audit_paint_stats(1));
+        assert_eq!(paint_stats_hint_for_bytes(0, 0, 0, 0), "idle");
+        assert!(
+            paint_stats_hint_for_bytes(800, 10, 100, 1000).contains("diezmado"),
+            "shape_path dominante ⇒ diezmado"
+        );
+        assert!(
+            paint_stats_hint_for_bytes(100, 10, 800, 1000).contains("Galley"),
+            "texto dominante ⇒ caché Galley"
+        );
+        assert!(
+            paint_stats_hint_for_bytes(100, 600, 50, 1000).contains("batch"),
+            "shape_vec dominante ⇒ batch"
+        );
+        assert_eq!(paint_stats_hint_for_bytes(100, 10, 50, 1000), "ok");
+    }
+
+    #[test]
+    fn cached_label_text_matches_painter_text_rect() {
+        let ctx = egui::Context::default();
+        let color = Color32::WHITE;
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            let painter = ctx.layer_painter(egui::LayerId::background());
+            let pos = Pos2::new(10.0, 20.0);
+            let rect_cached = cached_label_text(
+                &painter,
+                pos,
+                egui::Align2::CENTER_TOP,
+                "10⁻¹",
+                grafito_ui::tokens::TYPE_SM,
+                color,
+                42,
+            );
+            let galley =
+                label_galley_shared(&painter, "10⁻¹", grafito_ui::tokens::TYPE_SM, color, 42);
+            let rect_direct = egui::Align2::CENTER_TOP.anchor_size(pos, galley.size());
+            assert_eq!(rect_cached, rect_direct, "mismo anclaje que painter.text");
+        });
     }
 }

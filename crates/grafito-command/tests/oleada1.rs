@@ -157,7 +157,9 @@ fn oleada1_todos_visibles_en_paleta() {
     // Frente fantasma-2 (71 con handler en commands.rs sin spec; Image queda
     // fuera por ser stub honesto): 625 → 696 (delta por categoría en
     // registry_counts_match_documented_architecture).
-    assert_eq!(command_registry::palette_commands().count(), 696);
+    // Frente G1 (contrato grafito-geometry: +14 visibles S — CAS +9, AM2 +3,
+    // Texto +2): 696 → 710, totales 733 → 747.
+    assert_eq!(command_registry::palette_commands().count(), 710);
 }
 
 #[test]

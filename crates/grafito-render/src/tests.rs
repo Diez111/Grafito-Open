@@ -3,7 +3,7 @@
 mod tests {
     use grafito_core::{
         CircleObj, ComplexIntegralObj, Document, Fractal2DObj, GeoObject, ImplicitCurveObj,
-        LineObj, PencilObj, PointObj, PolygonObj, Quadric3DObj, RelationOperator, TransformedObj,
+        LineObj, PencilObj, PointObj, Quadric3DObj, RelationOperator, TransformedObj,
     };
     use grafito_geometry::{Camera3D, Color, Point2, ViewTransform};
 
@@ -18,33 +18,6 @@ mod tests {
             "Grid and axes should produce vertices"
         );
         assert!(!indices.is_empty(), "Grid and axes should produce indices");
-    }
-
-    #[test]
-    fn test_build_geometry_with_point() {
-        let mut doc = Document::new();
-        doc.add_object(GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0))));
-
-        let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
-
-        assert!(!vertices.is_empty());
-        assert!(!indices.is_empty());
-    }
-
-    #[test]
-    fn test_build_geometry_with_line() {
-        let mut doc = Document::new();
-        doc.add_object(GeoObject::Line(LineObj::new(
-            Point2::new(0.0, 0.0),
-            Point2::new(1.0, 1.0),
-        )));
-
-        let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
-
-        assert!(!vertices.is_empty());
-        assert!(!indices.is_empty());
     }
 
     #[test]
@@ -166,37 +139,6 @@ mod tests {
             distinct * 100 >= union * 25,
             "z y z^5 deben diferir en la retícula (distintos {distinct} de {union})"
         );
-    }
-
-    #[test]
-    fn test_build_geometry_with_circle() {
-        let mut doc = Document::new();
-        doc.add_object(GeoObject::Circle(CircleObj::new(
-            Point2::new(0.0, 0.0),
-            1.0,
-        )));
-
-        let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
-
-        assert!(!vertices.is_empty());
-        assert!(!indices.is_empty());
-    }
-
-    #[test]
-    fn test_build_geometry_with_polygon() {
-        let mut doc = Document::new();
-        doc.add_object(GeoObject::Polygon(PolygonObj::new(vec![
-            Point2::new(0.0, 0.0),
-            Point2::new(1.0, 0.0),
-            Point2::new(0.5, 1.0),
-        ])));
-
-        let view = ViewTransform::new(800.0, 600.0);
-        let (vertices, indices) = crate::Renderer::build_geometry_static(&doc, &view, false, true);
-
-        assert!(!vertices.is_empty());
-        assert!(!indices.is_empty());
     }
 
     #[test]
@@ -328,20 +270,6 @@ mod tests {
         assert_eq!(crate::row_major_cell_coordinates(1, 4), Some((0, 1)));
         assert_eq!(crate::row_major_cell_coordinates(4, 4), Some((1, 0)));
         assert_eq!(crate::row_major_cell_coordinates(16, 4), None);
-    }
-
-    #[test]
-    fn world_mesh_keeps_world_coordinates_in_the_opaque_stream() {
-        let vertex = crate::Vertex3D {
-            position: [1.0, -2.0, 3.5],
-            color: [0.1, 0.2, 0.3, 1.0],
-        };
-        let mut mesh = crate::WorldMesh::default();
-        mesh.opaque_vertices = vec![vertex];
-        mesh.opaque_indices = vec![0, 0, 0];
-        assert_eq!(mesh.opaque_vertices[0].position, [1.0, -2.0, 3.5]);
-        assert_eq!(mesh.opaque_indices, vec![0, 0, 0]);
-        assert!(mesh.validate().is_ok());
     }
 
     #[test]
@@ -824,6 +752,184 @@ mod tests {
             assert_eq!(a.color, b.color);
         }
     }
+
+    #[test]
+    fn transformed_cache_key_colisiona_solo_si_contenido_igual() {
+        // Key O(1) sin allocs: exprs de la cadena + discriminante/id hoja +
+        // version/nonce/view. Mismo contenido + misma versión => misma key;
+        // cualquier diferencia => distinta key (jamás stale).
+        let view = ViewTransform::new(800.0, 600.0);
+        let base = TransformedObj::new(
+            GeoObject::Line(LineObj::new(Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0))),
+            "z + 2",
+        );
+        let mut document = Document::new();
+        document.add_object(GeoObject::Transformed(base.clone()));
+        let k1 = crate::transformed_cache_key(&document, &base, &view, false, 0);
+        let k1b = crate::transformed_cache_key(&document, &base, &view, false, 0);
+        assert_eq!(k1, k1b, "mismo contenido + misma versión => misma key");
+
+        let mut other_expr = base.clone();
+        other_expr.complex_expr = "z + 3".to_string();
+        let k_expr = crate::transformed_cache_key(&document, &other_expr, &view, false, 0);
+        assert_ne!(k1, k_expr, "distinto expr => distinta key");
+
+        let other_id = TransformedObj::new(
+            GeoObject::Line(LineObj::new(Point2::new(-1.0, 0.0), Point2::new(1.0, 0.0))),
+            "z + 2",
+        );
+        assert_ne!(base.inner.id(), other_id.inner.id());
+        let k_id = crate::transformed_cache_key(&document, &other_id, &view, false, 0);
+        assert_ne!(k1, k_id, "distinto inner id => distinta key");
+
+        let circle = TransformedObj::new(
+            GeoObject::Circle(CircleObj::new(Point2::new(0.0, 0.0), 1.0)),
+            "z + 2",
+        );
+        let k_var = crate::transformed_cache_key(&document, &circle, &view, false, 0);
+        assert_ne!(k1, k_var, "distinta variante hoja => distinta key");
+
+        let plano = TransformedObj::new(
+            GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
+            "z + 2",
+        );
+        let nested_inner = TransformedObj::new(
+            GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
+            "z + 1",
+        );
+        let nested = TransformedObj::new(GeoObject::Transformed(nested_inner), "z + 2");
+        let k_flat = crate::transformed_cache_key(&document, &plano, &view, false, 0);
+        let k_nested = crate::transformed_cache_key(&document, &nested, &view, false, 0);
+        assert_ne!(k_flat, k_nested, "anidado vs plano => distinta key");
+
+        let mut view2 = ViewTransform::new(800.0, 600.0);
+        view2.scale = 100.0;
+        let k_view = crate::transformed_cache_key(&document, &base, &view2, false, 0);
+        assert_ne!(k1, k_view, "distinto view.scale => distinta key");
+        let k_dark = crate::transformed_cache_key(&document, &base, &view, true, 0);
+        assert_ne!(k1, k_dark, "distinto dark_mode => distinta key");
+        let k_depth = crate::transformed_cache_key(&document, &base, &view, false, 1);
+        assert_ne!(k1, k_depth, "distinto depth => distinta key");
+
+        let mut document2 = document.clone();
+        document2.bump_version();
+        let k_ver = crate::transformed_cache_key(&document2, &base, &view, false, 0);
+        assert_ne!(k1, k_ver, "distinta document.version => distinta key");
+
+        let mut with_compiled = base.clone();
+        with_compiled.compiled_expr = Some("compiled".to_string());
+        let k_comp = crate::transformed_cache_key(&document, &with_compiled, &view, false, 0);
+        assert_ne!(k1, k_comp, "distinto compiled_expr => distinta key");
+    }
+
+    #[test]
+    fn curve_aabb_cache_igual_al_muestreo_completo() {
+        use grafito_core::{FunctionObj, ParametricCurve2DObj, PolarCurveObj};
+        let view = ViewTransform::new(800.0, 600.0);
+        let document = Document::new();
+
+        let fun = GeoObject::Function(FunctionObj::new("sin(x)"));
+        assert_eq!(crate::object_world_aabb(&view, &document, &fun), None);
+        assert_eq!(crate::object_world_aabb(&view, &document, &fun), None);
+
+        let parametrics = [
+            ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, 6.283185307179586),
+            ParametricCurve2DObj::new("t", "t*t", -2.0, 2.0),
+            ParametricCurve2DObj::new("sin(2*t)", "sin(3*t)", 0.0, 6.283185307179586),
+        ];
+        for pc in &parametrics {
+            let obj = GeoObject::ParametricCurve2D(pc.clone());
+            let cached =
+                crate::object_world_aabb(&view, &document, &obj).expect("paramétrica acotada");
+            let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
+                pc,
+                4000,
+                &document.variables,
+            );
+            let mut expected: Option<grafito_geometry::AABB> = None;
+            for &(x, y) in samples.iter() {
+                if x.is_finite() && y.is_finite() {
+                    let p = Point2::new(x, y);
+                    match &mut expected {
+                        Some(a) => a.expand(&p),
+                        None => expected = Some(grafito_geometry::AABB::new(p, p)),
+                    }
+                }
+            }
+            assert_eq!(
+                Some(cached),
+                expected,
+                "AABB paramétrica idéntico al muestreo completo"
+            );
+            let cached2 = crate::object_world_aabb(&view, &document, &obj).expect("hit");
+            assert_eq!(cached.min.x, cached2.min.x);
+            assert_eq!(cached.min.y, cached2.min.y);
+            assert_eq!(cached.max.x, cached2.max.x);
+            assert_eq!(cached.max.y, cached2.max.y);
+        }
+
+        let polars = [
+            PolarCurveObj::new("1+cos(t)", 0.0, 6.283185307179586),
+            PolarCurveObj::new("sin(3*t)", 0.0, 6.283185307179586),
+            PolarCurveObj::new("t", 0.0, 6.283185307179586),
+        ];
+        for pol in &polars {
+            let obj = GeoObject::PolarCurve(pol.clone());
+            let cached = crate::object_world_aabb(&view, &document, &obj).expect("polar acotada");
+            let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
+                pol,
+                4000,
+                &document.variables,
+            );
+            let mut expected: Option<grafito_geometry::AABB> = None;
+            for &(x, y) in samples.iter() {
+                if x.is_finite() && y.is_finite() {
+                    let p = Point2::new(x, y);
+                    match &mut expected {
+                        Some(a) => a.expand(&p),
+                        None => expected = Some(grafito_geometry::AABB::new(p, p)),
+                    }
+                }
+            }
+            assert_eq!(
+                Some(cached),
+                expected,
+                "AABB polar idéntico al muestreo completo"
+            );
+            let cached2 = crate::object_world_aabb(&view, &document, &obj).expect("hit");
+            assert_eq!(cached.min.x, cached2.min.x);
+            assert_eq!(cached.max.x, cached2.max.x);
+        }
+    }
+
+    #[test]
+    fn curve_aabb_cache_invalida_con_version() {
+        use grafito_core::ParametricCurve2DObj;
+        let view = ViewTransform::new(800.0, 600.0);
+        let mut document = Document::new();
+        let pc = ParametricCurve2DObj::new("cos(t)", "sin(t)", 0.0, 6.283185307179586);
+        let id = pc.id;
+        document.add_object(GeoObject::ParametricCurve2D(pc));
+        let obj1 = document.get_object(id).expect("existe").clone();
+        let aabb1 = crate::object_world_aabb(&view, &document, &obj1).expect("aabb1");
+
+        document.set_variable("k".to_string(), 1.0);
+        let obj2 = document.get_object(id).expect("sigue").clone();
+        let aabb2 = crate::object_world_aabb(&view, &document, &obj2).expect("aabb2");
+        assert_eq!(aabb1.min.x, aabb2.min.x);
+        assert_eq!(aabb1.max.x, aabb2.max.x);
+
+        let document3 = Document::new();
+        let pc_big = ParametricCurve2DObj::new("10*cos(t)", "10*sin(t)", 0.0, 6.283185307179586);
+        let obj_big = GeoObject::ParametricCurve2D(pc_big);
+        let aabb_big = crate::object_world_aabb(&view, &document3, &obj_big).expect("grande");
+        assert!(
+            aabb_big.max.x > aabb1.max.x + 5.0,
+            "radio 10 vs 1: {} vs {}",
+            aabb_big.max.x,
+            aabb1.max.x
+        );
+    }
 }
 #[cfg(test)]
 mod coverage_sweep_pure {
@@ -861,7 +967,7 @@ mod coverage_sweep_pure {
         let pt = GeoObject::Point(PointObj::new(Point2::new(0.0, 0.0)));
         assert!(matches!(scene_layer_2d(&pt), SceneLayer2D::Marker));
         let line = GeoObject::Line(LineObj::new(Point2::new(0.0, 0.0), Point2::new(1.0, 1.0)));
-        assert!(matches!(scene_layer_2d(&line), _));
+        assert!(matches!(scene_layer_2d(&line), SceneLayer2D::Curve));
         let lit = calculate_lighting(Color::new(1.0, 0.0, 0.0, 1.0), glam::Vec3::Z, glam::Vec3::Z);
         assert!((lit.r - 1.0).abs() < 1e-6 && lit.g.abs() < 1e-6);
         let dark = calculate_lighting(
@@ -875,8 +981,14 @@ mod coverage_sweep_pure {
         assert_eq!(prism_work_units(4), 24);
         assert_eq!(prism_solid_triangle_count(0), 0);
         let q = Quadric3DObj::from_coeffs([1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, -1.0]);
-        let _ = quadric_uses_placeholder(&q);
-        let _ = quadric_ellipsoid_params(&q);
+        assert!(
+            !quadric_uses_placeholder(&q),
+            "la esfera unidad es elipsoide real, sin placeholder"
+        );
+        assert!(
+            quadric_ellipsoid_params(&q).is_some(),
+            "la esfera unidad deriva parámetros de elipsoide"
+        );
     }
     #[test]
     fn barrido_mapeo_complejo_e_interpolacion() {

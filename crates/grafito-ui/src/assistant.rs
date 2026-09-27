@@ -12038,6 +12038,59 @@ impl MathLayout {
     }
 }
 
+// ── Caché de galleys de texto matemático (patrón `label_galley_shared`) ────
+// Sin `lru` en `grafito-ui`: `HashMap` acotada por contexto con desalojo
+// total al llenar. Clave (texto, tamaño, color); visual idéntico al camino
+// directo (misma `FontId::proportional` y color).
+/// Tope de galleys de texto matemático por contexto.
+const MATH_TEXT_GALLEY_CACHE_MAX: usize = 128;
+
+#[derive(Clone, Default)]
+struct MathTextGalleyCache {
+    entradas: std::collections::HashMap<(String, u32, u32), std::sync::Arc<egui::Galley>>,
+}
+
+fn math_text_galley_cache_id() -> egui::Id {
+    egui::Id::new("grafito_math_text_galleys")
+}
+
+fn math_text_galley_shared(
+    painter: &egui::Painter,
+    text: &str,
+    font_size: f32,
+    color: egui::Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let size = if font_size.is_finite() {
+        font_size.clamp(1.0, 256.0)
+    } else {
+        TYPE_XS
+    };
+    let key = (
+        text.to_owned(),
+        size.to_bits(),
+        u32::from_be_bytes([color.r(), color.g(), color.b(), color.a()]),
+    );
+    let ctx = painter.ctx().clone();
+    if let Some(hit) = ctx.data_mut(|mapa| {
+        mapa.get_persisted::<MathTextGalleyCache>(math_text_galley_cache_id())
+            .and_then(|caché| caché.entradas.get(&key).cloned())
+    }) {
+        return hit;
+    }
+    let galley = painter.layout_no_wrap(text.to_owned(), egui::FontId::proportional(size), color);
+    ctx.data_mut(|mapa| {
+        let mut caché = mapa
+            .get_persisted::<MathTextGalleyCache>(math_text_galley_cache_id())
+            .unwrap_or_default();
+        if caché.entradas.len() >= MATH_TEXT_GALLEY_CACHE_MAX {
+            caché.entradas.clear();
+        }
+        caché.entradas.insert(key, galley.clone());
+        mapa.insert_persisted(math_text_galley_cache_id(), caché);
+    });
+    galley
+}
+
 // ── R3: LaTeX real offline vía `grafito-tex` ─────────────────────────────────
 // `draw_math` rasteriza con tex (STIX embebida, presupuestos 8KiB/1MiP/256
 // nodos) y cachea la textura por fórmula en el `ctx` (tope 32 con desalojo
@@ -12067,21 +12120,37 @@ enum TexFormulaEntrada {
 /// Caché viva en el `ctx` (`get_persisted`, una por contexto).
 #[derive(Clone, Default)]
 struct TexFormulaCache {
-    /// Clave (fuente, tinta): el mismo LaTeX rasteriza distinto por modo
+    /// Clave (fuente, tinta, dpr): el mismo LaTeX rasteriza distinto por modo
     /// (tinta clara en oscuro, oscura en claro); sin la tinta en la clave,
-    /// cambiar de modo reutilizaría glifos invisibles.
-    entradas: std::collections::HashMap<(String, [u8; 4]), TexFormulaEntrada>,
+    /// cambiar de modo reutilizaría glifos invisibles. El dpr cuantizado va
+    /// en la clave porque el bitmap hornea el tamaño físico.
+    entradas: std::collections::HashMap<(String, [u8; 4], u32), TexFormulaEntrada>,
 }
 
 impl TexFormulaCache {
     /// Guarda con desalojo total al llegar al tope (política simple y
     /// acotada: nunca más de `TEX_FORMULA_CACHE_MAX` texturas vivas).
-    fn insertar(&mut self, fuente: String, tinta: [u8; 4], entrada: TexFormulaEntrada) {
+    fn insertar(&mut self, fuente: String, tinta: [u8; 4], dpr_q: u32, entrada: TexFormulaEntrada) {
         if self.entradas.len() >= TEX_FORMULA_CACHE_MAX {
             self.entradas.clear();
         }
-        self.entradas.insert((fuente, tinta), entrada);
+        self.entradas.insert((fuente, tinta, dpr_q), entrada);
     }
+}
+
+/// DPR cuantizado a cuartos (1.0–4.0): acota las variantes de textura por
+/// fórmula y estabiliza la clave de caché ante ppp fraccionarios.
+fn dpr_cuantizado(ctx: &egui::Context) -> (f32, u32) {
+    let ppp = ctx.pixels_per_point();
+    let ppp = if ppp.is_finite() && ppp > 0.0 {
+        ppp
+    } else {
+        1.0
+    };
+    let q = (ppp * 4.0).round().clamp(4.0, 16.0) as u32;
+    #[allow(clippy::cast_precision_loss)]
+    let ppp_q = (q as f32) / 4.0;
+    (ppp_q, q)
 }
 
 /// Cola en chars sin partir UTF-8 (espejo del `tail_chars` de `grafito-tex`).
@@ -12097,10 +12166,14 @@ fn acortar_aviso(mensaje: &str) -> String {
 }
 
 /// Huella del `source` para nombrar la textura (FNV-1a 64, pura).
-/// FNV-1a sobre fuente + tinta (la textura depende de ambas).
-fn huella_formula_tinta(source: &str, tinta: [u8; 4]) -> u64 {
+/// FNV-1a sobre fuente + tinta + dpr (la textura depende de los tres).
+fn huella_formula_tinta(source: &str, tinta: [u8; 4], dpr_q: u32) -> u64 {
     let mut huella: u64 = 0xcbf29ce484222325;
-    for byte in source.bytes().chain(tinta.iter().copied()) {
+    for byte in source
+        .bytes()
+        .chain(tinta.iter().copied())
+        .chain(dpr_q.to_le_bytes())
+    {
         huella ^= u64::from(byte);
         huella = huella.wrapping_mul(0x1000_0000_01b3);
     }
@@ -12151,9 +12224,15 @@ fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
     }
     let ctx = ui.ctx().clone();
     let tinta = tinta_formula_para_tema(ui);
+    let (_, dpr_q) = dpr_cuantizado(&ctx);
     if let Some(entrada) = ctx.data_mut(|mapa| {
         mapa.get_persisted::<TexFormulaCache>(tex_cache_id())
-            .and_then(|caché| caché.entradas.get(&(source.to_owned(), tinta)).cloned())
+            .and_then(|caché| {
+                caché
+                    .entradas
+                    .get(&(source.to_owned(), tinta, dpr_q))
+                    .cloned()
+            })
     }) {
         return match entrada {
             TexFormulaEntrada::Tex { textura, px } => TexFormulaResultado::Tex { textura, px },
@@ -12176,30 +12255,34 @@ fn formula_tex(ui: &mut egui::Ui, source: &str) -> TexFormulaResultado {
         let mut caché = mapa
             .get_persisted::<TexFormulaCache>(tex_cache_id())
             .unwrap_or_default();
-        caché.insertar(source.to_string(), tinta, entrada);
+        caché.insertar(source.to_string(), tinta, dpr_q, entrada);
         mapa.insert_persisted(tex_cache_id(), caché);
     });
     resultado
 }
 
-/// Rasteriza una fórmula con `grafito-tex` (una vez por (`source`, tinta)
-/// distintos). Todo `Err` → `Subset` con motivo (jamás tofu ni panic).
+/// Rasteriza una fórmula con `grafito-tex` (una vez por (`source`, tinta,
+/// dpr) distintos). Todo `Err` → `Subset` con motivo (jamás tofu ni panic).
 fn rasterizar_formula_tex(ctx: &egui::Context, source: &str, tinta: [u8; 4]) -> TexFormulaEntrada {
     if !grafito_tex::math_font_available() {
         return TexFormulaEntrada::Subset {
             motivo: "sin fuente matemática (tabla MATH)".to_string(),
         };
     }
-    let mapa =
-        match grafito_tex::latex_to_rgba_con_tinta(source, grafito_tex::TEX_DEFAULT_FONT_PX, tinta)
-        {
-            Ok(mapa) => mapa,
-            Err(error) => {
-                return TexFormulaEntrada::Subset {
-                    motivo: acortar_aviso(&error.to_string()),
-                };
-            }
-        };
+    let (ppp, dpr_q) = dpr_cuantizado(ctx);
+    let mapa = match grafito_tex::latex_to_rgba_con_dpr(
+        source,
+        grafito_tex::TEX_DEFAULT_FONT_PX,
+        ppp,
+        tinta,
+    ) {
+        Ok(mapa) => mapa,
+        Err(error) => {
+            return TexFormulaEntrada::Subset {
+                motivo: acortar_aviso(&error.to_string()),
+            };
+        }
+    };
     let (ancho, alto) = (mapa.width, mapa.height);
     let esperado = ancho
         .checked_mul(alto)
@@ -12211,7 +12294,10 @@ fn rasterizar_formula_tex(ctx: &egui::Context, source: &str, tinta: [u8; 4]) -> 
     }
     let imagen = egui::ColorImage::from_rgba_unmultiplied([ancho, alto], &mapa.rgba);
     let textura = ctx.load_texture(
-        format!("grafito_tex_{:016x}", huella_formula_tinta(source, tinta)),
+        format!(
+            "grafito_tex_{:016x}",
+            huella_formula_tinta(source, tinta, dpr_q)
+        ),
         imagen,
         egui::TextureOptions::LINEAR,
     );
@@ -12295,8 +12381,10 @@ fn layout_math(
 ) -> MathLayout {
     match expression {
         MathExpr::Text(text) => {
-            let galley =
-                painter.layout_no_wrap(text.clone(), egui::FontId::proportional(font_size), color);
+            // Texto matemático denso (paneles/overlays): Galley cacheado por
+            // (texto, tamaño, color), patrón `label_galley_shared` sin `lru`
+            // (HashMap acotada por contexto, desalojo total al llenar).
+            let galley = math_text_galley_shared(painter, text, font_size, color);
             MathLayout {
                 size: galley.size(),
                 baseline: galley.size().y * 0.76,
@@ -14314,6 +14402,7 @@ mod tests {
         caché.insertar(
             "x".to_string(),
             [0, 0, 0, 255],
+            4,
             TexFormulaEntrada::Subset {
                 motivo: "x".to_string(),
             },
@@ -14321,11 +14410,31 @@ mod tests {
         caché.insertar(
             "x".to_string(),
             [0xFA, 0xFA, 0xF9, 255],
+            4,
             TexFormulaEntrada::Subset {
                 motivo: "x".to_string(),
             },
         );
         assert_eq!(caché.entradas.len(), 2, "misma fuente, distinta tinta");
+    }
+
+    #[test]
+    fn tex_cache_distinque_dpr() {
+        // Mismo LaTeX y tinta a distinto DPR son texturas distintas (el
+        // bitmap hornea el tamaño físico); si colisionaran, HiDPI mostraría
+        // el raster de ppp=1 (chico) o viceversa.
+        let mut caché = TexFormulaCache::default();
+        for dpr_q in [4, 8] {
+            caché.insertar(
+                "x".to_string(),
+                [0, 0, 0, 255],
+                dpr_q,
+                TexFormulaEntrada::Subset {
+                    motivo: "x".to_string(),
+                },
+            );
+        }
+        assert_eq!(caché.entradas.len(), 2, "mismo source, distinto dpr");
     }
 
     #[test]
@@ -14355,6 +14464,7 @@ mod tests {
             caché.insertar(
                 format!("f{i}"),
                 [10, 20, 30, 255],
+                4,
                 TexFormulaEntrada::Subset {
                     motivo: "x".to_string(),
                 },
@@ -14364,6 +14474,7 @@ mod tests {
         caché.insertar(
             "una_mas".to_string(),
             [10, 20, 30, 255],
+            4,
             TexFormulaEntrada::Subset {
                 motivo: "x".to_string(),
             },

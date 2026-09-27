@@ -134,14 +134,18 @@ pub fn load_math_font() -> Result<formulary::MathFont<'static>, TexError> {
     formulary::MathFont::new(bytes, 0).map_err(|e| TexError::NoMathFont(tail_chars(&e.to_string())))
 }
 
-/// Valida el presupuesto de entrada (vacío / 8 KiB / NUL). Puro.
+/// Valida el presupuesto de entrada (8 KiB / vacío / NUL). Puro.
+///
+/// El orden importa: primero `TooLong` (bytes) y después `Empty`, para que
+/// un relleno gigante de espacios no se disfrace de "vacío" sin aviso (el
+/// llamador cachea `Empty` sin motivo y `TooLong` con motivo visible).
 fn check_tex_input(source: &str) -> Result<(), TexError> {
-    if source.trim().is_empty() {
-        return Err(TexError::Empty);
-    }
     let len = source.len();
     if len > TEX_INPUT_MAX_BYTES {
         return Err(TexError::TooLong { got: len });
+    }
+    if source.trim().is_empty() {
+        return Err(TexError::Empty);
     }
     if source.contains('\0') {
         return Err(TexError::Parse("la fórmula contiene NUL".to_string()));
@@ -219,6 +223,16 @@ fn mathml_to_layout_con_gpos(
         font,
         &formulary::LayoutOptions { font_size: font_px },
     );
+    // Anti-DoS en profundidad: con 256 nodos los ítems son decenas; más de
+    // 4096 ítems (tope GPOS) es amplificación inesperada y el raster/SVG
+    // iterarían toda la cinta. Error honesto antes de pintar.
+    if laid.items.len() > gpos::GPOS_MAX_ITEMS {
+        return Err(TexError::Layout(format!(
+            "demasiados ítems {}, máximo {}",
+            laid.items.len(),
+            gpos::GPOS_MAX_ITEMS
+        )));
+    }
     if !laid.width.is_finite() || !laid.ascent.is_finite() || !laid.descent.is_finite() {
         return Err(TexError::Layout("métricas no finitas".to_string()));
     }
@@ -347,10 +361,40 @@ fn enderezar_alfa(rgba: &mut [u8]) {
     }
 }
 
+/// `font_px` lógico → físico según DPR, acotado a `MIN..=MAX` y siempre
+/// finito. El raster de este crate es agnóstico al DPR: el llamador (ver
+/// `draw_math` en `grafito-ui`) debe rasterizar con
+/// `font_px_para_dpr(TEX_DEFAULT_FONT_PX, ppp)` y mostrar a `px / ppp`
+/// puntos lógicos. Sin este escalado el HiDPI se ve más chico (misma cinta
+/// física en más puntos por pulgada). Puro.
+pub fn font_px_para_dpr(base_px: f32, dpr: f32) -> f32 {
+    let base = if base_px.is_finite() {
+        base_px
+    } else {
+        TEX_DEFAULT_FONT_PX
+    };
+    if !dpr.is_finite() || dpr <= 0.0 {
+        return base.clamp(TEX_MIN_FONT_PX, TEX_MAX_FONT_PX);
+    }
+    (base * dpr).clamp(TEX_MIN_FONT_PX, TEX_MAX_FONT_PX)
+}
+
 /// LaTeX → bitmap RGBA recto a `font_px` (8..=96). Requiere la fuente MATH;
 /// sin ella → `NoMathFont`. Cota 1 MiP. Puro (el llamador lo corre en hilo).
 pub fn latex_to_rgba(source: &str, font_px: f32) -> Result<TexBitmap, TexError> {
     latex_to_rgba_con_tinta(source, font_px, [0, 0, 0, 255])
+}
+
+/// LaTeX → bitmap RGBA con DPR explícito: `base_px * dpr` acotado a
+/// `MIN..=MAX` vía [`font_px_para_dpr`]. El llamador muestra a `px / dpr`
+/// puntos lógicos. Puro.
+pub fn latex_to_rgba_con_dpr(
+    source: &str,
+    base_px: f32,
+    dpr: f32,
+    tinta: [u8; 4],
+) -> Result<TexBitmap, TexError> {
+    latex_to_rgba_con_tinta(source, font_px_para_dpr(base_px, dpr), tinta)
 }
 
 /// Idem con tinta por defecto `[r,g,b,a]` para ítems sin color propio.
@@ -362,9 +406,11 @@ pub fn latex_to_rgba_con_tinta(
     let mathml = latex_to_mathml(source)?;
     let font = load_math_font()?;
     let laid = mathml_to_layout(&mathml, &font, font_px)?;
-    // Margen de 4 px (anti-recorte de itálicas/acentos, espejo del MARGIN=2u
-    // del SVG a 24 px por defecto).
-    let pad: f32 = 4.0;
+    // Margen anti-recorte de itálicas/acentos, proporcional al tamaño (4 px
+    // a 24 px por defecto, espejo del MARGIN=2u del SVG): fijo en 4 px se
+    // quedaba corto a 96 px (recorte) y sobraba a 8 px. A 24 px da 4.0
+    // exactos (dorado `AV` → 40 px intacto).
+    let pad: f32 = 4.0 * (font_px / TEX_DEFAULT_FONT_PX);
     let wf = laid.width + 2.0 * pad;
     let hf = laid.ascent + laid.descent + 2.0 * pad;
     if !wf.is_finite() || !hf.is_finite() {
@@ -717,5 +763,85 @@ mod tex_tests {
         assert!(!rep.completo);
         assert_eq!(rep.pares_kern, 0);
         assert_eq!(grande.width, 10.0);
+    }
+
+    #[test]
+    fn entrada_gigante_de_espacios_es_toolong() {
+        let relleno = " ".repeat(TEX_INPUT_MAX_BYTES + 1);
+        assert!(matches!(
+            latex_to_mathml(&relleno),
+            Err(TexError::TooLong { .. })
+        ));
+    }
+
+    #[test]
+    fn inputs_raros_no_paniquean() {
+        let raros = [
+            "\u{202E}\u{200F}x",
+            "😀^2",
+            "\u{1}x\u{2}\u{7f}",
+            "\\frac{1}{",
+            "$x^2$",
+            "\\",
+            "x\u{301}\u{302}",
+            "\\sqrt{",
+            "{}{}{{{{",
+            "}}}}}",
+            "\\mathrm{",
+            "\t\r\n ",
+            "x^",
+            "\\frac{}{}",
+        ];
+        for raro in raros {
+            let _ = latex_to_mathml(raro);
+            let _ = latex_to_svg(raro);
+            let _ = latex_to_rgba(raro, TEX_DEFAULT_FONT_PX);
+        }
+        // Bordes de font_px: jamás panic, siempre Err honesto fuera de rango.
+        for px in [
+            f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            7.99,
+            96.01,
+            500.0,
+        ] {
+            assert!(
+                matches!(latex_to_rgba("x", px), Err(TexError::Layout(_))),
+                "px={px}"
+            );
+        }
+        // Extremos válidos sí rasterizan.
+        assert!(latex_to_rgba("x", TEX_MIN_FONT_PX).is_ok());
+        assert!(latex_to_rgba("x", TEX_MAX_FONT_PX).is_ok());
+    }
+
+    #[test]
+    fn dpr_escala_y_acota() {
+        use super::{font_px_para_dpr, latex_to_rgba_con_dpr};
+        assert_eq!(font_px_para_dpr(24.0, 1.0), 24.0);
+        assert_eq!(font_px_para_dpr(24.0, 2.0), 48.0);
+        assert_eq!(font_px_para_dpr(24.0, 0.0), 24.0);
+        assert_eq!(font_px_para_dpr(24.0, f32::NAN), 24.0);
+        assert_eq!(font_px_para_dpr(24.0, 10.0), TEX_MAX_FONT_PX);
+        assert_eq!(font_px_para_dpr(8.0, 0.1), TEX_MIN_FONT_PX);
+        assert_eq!(font_px_para_dpr(f32::NAN, 2.0), 48.0);
+        // El wrapper con DPR no paniquea y respeta la tinta.
+        let bmp = latex_to_rgba_con_dpr("x^2", 24.0, 2.0, [0, 0, 0, 255]);
+        assert!(bmp.is_ok());
+    }
+
+    #[test]
+    fn pad_escala_con_font_px() {
+        // A 24 px el dorado se mantiene (40 px de ancho para AV).
+        let base = latex_to_rgba(r"\mathrm{AV}", 24.0).unwrap();
+        assert_eq!(base.width, 40);
+        // A 96 px el bitmap es mayor (pad proporcional, sin recorte).
+        let grande = latex_to_rgba(r"\mathrm{AV}", 96.0).unwrap();
+        assert!(grande.width > base.width);
+        assert!(grande.height > base.height);
+        assert!(grande.width * grande.height <= TEX_BITMAP_MAX_PIXELS);
     }
 }

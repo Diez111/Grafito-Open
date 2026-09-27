@@ -195,7 +195,8 @@ pub fn function_line(
 ) -> Vec<Point2> {
     let mut roots = find_roots(
         &|x| {
-            let fy = crate::expr::evaluate(expr, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            let fy =
+                crate::expr::evaluate_cached(expr, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
             if fy.is_nan() {
                 return f64::NAN;
             }
@@ -214,8 +215,10 @@ pub fn function_line(
 pub fn function_function(expr_f: &str, expr_g: &str, x_min: f64, x_max: f64) -> Vec<Point2> {
     find_roots(
         &|x| {
-            let fy = crate::expr::evaluate(expr_f, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
-            let gy = crate::expr::evaluate(expr_g, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            let fy =
+                crate::expr::evaluate_cached(expr_f, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
+            let gy =
+                crate::expr::evaluate_cached(expr_g, &[("x".to_string(), x)]).unwrap_or(f64::NAN);
             if fy.is_nan() || gy.is_nan() {
                 return f64::NAN;
             }

@@ -9,8 +9,9 @@
 //! Para sumar una familia, repetir el patrón:
 //!
 //! 1. Un brazo `"lo-id" => { ... }` en el `match`, ANTES del `_ =>`.
-//! 2. Parámetros 100 % derivados de la seed vía `wyhash`/`wyhash2` (`h0`,
-//!    `h1`, `h2`): determinismo puro, sin `rand`, sin reloj.
+//! 2. Parámetros 100 % derivados de la seed vía `hash_con_sal` (`h0`,
+//!    `h1`, `h2`, un flujo con sal distinta por parámetro): determinismo
+//!    puro, sin `rand`, sin reloj.
 //! 3. `solution` derivada SIEMPRE de los parámetros (idealmente exacta:
 //!    fracción reducida o entero), jamás hardcodeada desincronizada.
 //! 4. `kind` coherente con la respuesta: `Numeric` si la respuesta es un
@@ -121,15 +122,24 @@ impl Exercise {
 #[derive(Debug, Clone, Default)]
 pub struct ExerciseGenerator;
 
-const WY_CONST: u64 = 0x9E3779B97F4A7C15;
-const WY_CONST2: u64 = 0xBF58476D1CE4E5B9;
+const SAL_DORADA: u64 = 0x9E3779B97F4A7C15;
 
-fn wyhash(seed: u64) -> u64 {
-    seed.wrapping_mul(WY_CONST)
-}
-
-fn wyhash2(seed: u64) -> u64 {
-    seed.wrapping_mul(WY_CONST).wrapping_add(WY_CONST2)
+/// Deriva un `u64` pseudoaleatorio de `(seed, sal)` con avalancha completa.
+///
+/// Cada parámetro del ejercicio (`h0`, `h1`, `h2`) usa una sal distinta, así
+/// los parámetros son independientes entre sí y entre semillas consecutivas.
+/// La cadena lineal anterior (`h1 = h0*K+C`, `h2 = h1*K`) dejaba `(a, b)`
+/// correlacionados: `am1-der` repetía ejercicio en 35/64 semillas consecutivas
+/// con solo 9 combinaciones posibles (lo esperado es ~7/64). Con flujos con
+/// sal + finalizador estilo splitmix64, la tasa cae a ~5/64. Determinista
+/// puro: misma `(seed, sal)` ⇒ mismo valor, sin `rand`, sin reloj.
+fn hash_con_sal(seed: u64, sal: u64) -> u64 {
+    let mut z = seed
+        .wrapping_add(sal.wrapping_mul(SAL_DORADA))
+        .wrapping_add(SAL_DORADA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
 }
 
 /// Combinatoria `C(n, k)` en `u64` (los generadores la usan con `n ≤ 6`:
@@ -186,15 +196,15 @@ impl ExerciseGenerator {
             _ => ExerciseDifficulty::Hard,
         };
 
-        // Helpers para coeficientes deterministas vía wyhash-like
-        let h0 = wyhash(seed);
-        let h1 = wyhash2(h0);
-        let h2 = wyhash(h1);
+        // Helpers para coeficientes deterministas: un flujo con sal por
+        // parámetro (independientes entre sí y entre semillas consecutivas).
+        let h0 = hash_con_sal(seed, 0);
+        let h1 = hash_con_sal(seed, 1);
+        let h2 = hash_con_sal(seed, 2);
 
         let (prompt, solution, kind, validator, params) = match lo.id.as_str() {
             "am1-der" => {
-                // a = 1 + seed%3 pero mezclado con wyhash para determinismo
-                // Usamos h0 para a, h1 para b
+                // a y b en 1..=3 desde flujos independientes (h0, h1).
                 let a = 1 + (h0 % 3);
                 let b = 1 + (h1 % 3);
                 let prompt = format!("Deriva f(x)={}*x^2 + {}*x en x=1", a, b);
@@ -386,7 +396,7 @@ impl ExerciseGenerator {
             }
             _ => {
                 // Genérico paramétrico: Si f(x)=a*x+b, evalúa en x=c
-                // a,b,c en 1..5 vía wyhash
+                // a,b,c en 1..5 desde flujos independientes (h0, h1, h2).
                 let a = 1 + (h0 % 5);
                 let b = 1 + (h1 % 5);
                 let c = 1 + (h2 % 5);
@@ -460,7 +470,7 @@ mod tests {
         let gen = ExerciseGenerator;
         let ex0 = gen.generate_with_seed(&lo, PedagogicalLevel::Secondary, 0);
         let ex1 = gen.generate_with_seed(&lo, PedagogicalLevel::Secondary, 1);
-        // con wyhash deberían diferir en al menos prompt o params
+        // con flujos con sal deberían diferir en al menos prompt o params
         assert!(ex0.prompt != ex1.prompt || ex0.params != ex1.params);
     }
 
@@ -817,6 +827,30 @@ mod tests {
             variantes.len() > 4,
             "solo {} variantes en 20 seeds",
             variantes.len()
+        );
+    }
+
+    #[test]
+    fn semillas_consecutivas_no_repiten_ejercicio() {
+        // Regresión: la cadena lineal anterior (`h1 = h0*K+C`) dejaba
+        // `(a, b)` correlacionados y `am1-der` repetía ejercicio en 35/64
+        // semillas consecutivas (con 9 cajas lo esperado es ~7/64). Con
+        // flujos con sal independientes la tasa cae a nivel de azar.
+        let lo = LearningObjective::new("am1-der", "Derivadas", "...", None);
+        let gen = ExerciseGenerator;
+        let mut repetidos = 0usize;
+        let mut previo = String::new();
+        for seed in 0..64u64 {
+            let ex = gen.generate_with_seed(&lo, PedagogicalLevel::Secondary, seed);
+            let clave = format!("{}|{}", ex.prompt, ex.solution);
+            if clave == previo {
+                repetidos += 1;
+            }
+            previo = clave;
+        }
+        assert!(
+            repetidos <= 12,
+            "semillas consecutivas repiten demasiado: {repetidos}/64"
         );
     }
 

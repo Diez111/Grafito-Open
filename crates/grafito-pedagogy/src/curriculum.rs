@@ -805,17 +805,26 @@ impl Curriculum {
     /// aleatorio del proceso (los niveles cero ya se ordenaban; ahora también
     /// las adyacencias e índices).
     pub fn topological_order() -> Result<Vec<LearningObjective>, String> {
-        let all = Self::all();
+        Self::orden_topologico_de(&Self::all())
+    }
+
+    /// Kahn sobre un slice arbitrario (el corazón testeable de
+    /// [`Self::topological_order`]): ciclos y self-loops dan `Err`, los
+    /// prerequisitos ausentes del slice se ignoran (arista solo si ambos
+    /// extremos existen, igual que en el currículum real).
+    pub fn orden_topologico_de(
+        los: &[LearningObjective],
+    ) -> Result<Vec<LearningObjective>, String> {
         let mut id_to_lo: BTreeMap<String, LearningObjective> = BTreeMap::new();
-        for lo in &all {
+        for lo in los {
             id_to_lo.insert(lo.id.clone(), lo.clone());
         }
         let mut indegree: BTreeMap<String, usize> = BTreeMap::new();
         let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for lo in &all {
+        for lo in los {
             indegree.entry(lo.id.clone()).or_insert(0);
         }
-        for lo in &all {
+        for lo in los {
             for req in &lo.requires {
                 if id_to_lo.contains_key(req) {
                     // arista req -> lo.id
@@ -860,7 +869,7 @@ impl Curriculum {
                 }
             }
         }
-        if visited != all.len() {
+        if visited != los.len() {
             return Err("ciclo detectado en prerequisitos del currículum".into());
         }
         Ok(result)
@@ -976,6 +985,44 @@ mod tests {
         let ids_a: Vec<&str> = a.iter().map(|lo| lo.id.as_str()).collect();
         let ids_b: Vec<&str> = b.iter().map(|lo| lo.id.as_str()).collect();
         assert_eq!(ids_a, ids_b, "el orden topológico debe ser estable");
+    }
+    #[test]
+    fn kahn_detecta_ciclo_self_loop_y_ordena_diamante() {
+        // Ciclo de 2: debe dar Err, no colgar ni devolver orden parcial.
+        let a =
+            LearningObjective::new("t-a", "A", "D", None).with_requires(vec!["t-b".to_string()]);
+        let b =
+            LearningObjective::new("t-b", "B", "D", None).with_requires(vec!["t-a".to_string()]);
+        let err = Curriculum::orden_topologico_de(&[a, b]).expect_err("ciclo de 2");
+        assert!(err.contains("ciclo"), "{err}");
+        // Self-loop: también es ciclo.
+        let s =
+            LearningObjective::new("t-s", "S", "D", None).with_requires(vec!["t-s".to_string()]);
+        let err_s =
+            Curriculum::orden_topologico_de(std::slice::from_ref(&s)).expect_err("self-loop");
+        assert!(err_s.contains("ciclo"), "{err_s}");
+        // Diamante válido: respeta aristas y es determinista.
+        let base = LearningObjective::new("t-base", "Base", "D", None);
+        let izq = LearningObjective::new("t-izq", "Izq", "D", None)
+            .with_requires(vec!["t-base".to_string()]);
+        let der = LearningObjective::new("t-der", "Der", "D", None)
+            .with_requires(vec!["t-base".to_string()]);
+        let cima = LearningObjective::new("t-cima", "Cima", "D", None)
+            .with_requires(vec!["t-izq".to_string(), "t-der".to_string()]);
+        let orden = Curriculum::orden_topologico_de(&[cima.clone(), der.clone(), izq, base])
+            .expect("diamante sin ciclo");
+        assert_eq!(orden.len(), 4);
+        let pos: BTreeMap<&str, usize> = orden
+            .iter()
+            .enumerate()
+            .map(|(i, lo)| (lo.id.as_str(), i))
+            .collect();
+        assert!(pos["t-base"] < pos["t-izq"]);
+        assert!(pos["t-base"] < pos["t-der"]);
+        assert!(pos["t-izq"] < pos["t-cima"]);
+        assert!(pos["t-der"] < pos["t-cima"]);
+        let orden2 = Curriculum::orden_topologico_de(&[cima, der]).expect("subgrafo");
+        assert_eq!(orden2.len(), 2);
     }
     #[test]
     fn unlocked_for_level() {

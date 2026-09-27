@@ -15,7 +15,7 @@ use grafito_geometry::{
     Point3D, ViewTransform,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 /// Recorrido de un parámetro animado dentro de su intervalo permitido.
@@ -311,6 +311,7 @@ impl ChangeSet {
         // Memos frescos: el snapshot comparte el `Arc` con su linaje y el
         // documento restaurado es una versión nueva (no debe leer partes del
         // clon de origen ni contaminarlo con su contenido).
+        restored.cached_vars_list = Default::default();
         restored.estimated_bytes_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         restored.context_parts_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         *document = restored;
@@ -880,6 +881,8 @@ pub struct Document {
     // ordenadas). Determinismo reforzado vía `semantic_document_baseline`
     // (BTreeMap sort en `to_value`) y `ValidatedDocument`.
     // `sorted_variables()` queda como vista clonada (compatibilidad).
+    // `spreadsheet_variables` es `BTreeSet` (no `HashSet`): se serializa
+    // como arreglo ordenado (determinismo byte-igual en saves).
     objects: BTreeMap<ObjectId, GeoObject>,
     view: ViewTransform,
     #[serde(skip)]
@@ -912,7 +915,7 @@ pub struct Document {
     #[serde(default)]
     cas_worksheet: Vec<CasWorksheetEntry>,
     #[serde(default)]
-    spreadsheet_variables: HashSet<String>,
+    spreadsheet_variables: BTreeSet<String>,
     #[serde(default)]
     spreadsheet_coordinate_points: BTreeMap<String, ObjectId>,
     #[serde(skip)]
@@ -1087,7 +1090,7 @@ impl Default for Document {
             variable_meta: BTreeMap::new(),
             spreadsheet: Vec::new(),
             cas_worksheet: Vec::new(),
-            spreadsheet_variables: HashSet::new(),
+            spreadsheet_variables: BTreeSet::new(),
             spreadsheet_coordinate_points: BTreeMap::new(),
             spatial: crate::spatial::SpatialIndex::new(),
             spatial_dirty: true,
@@ -6693,7 +6696,7 @@ impl Document {
                     continue;
                 }
                 if cells.len() == Self::MAX_SPREADSHEET_RECOMPUTE_CELLS {
-                    for name in self.spreadsheet_variables.drain() {
+                    for name in std::mem::take(&mut self.spreadsheet_variables) {
                         self.variables.remove(&name);
                     }
                     self.variable_meta
@@ -6714,7 +6717,7 @@ impl Document {
             .enumerate()
             .map(|(index, (label, _))| (label.clone(), index))
             .collect();
-        for name in self.spreadsheet_variables.drain() {
+        for name in std::mem::take(&mut self.spreadsheet_variables) {
             self.variables.remove(&name);
         }
         for (label, _) in &cells {
@@ -6768,7 +6771,7 @@ impl Document {
             .enumerate()
             .filter_map(|(index, count)| (*count == 0).then_some(index))
             .collect();
-        let mut resolved = HashSet::new();
+        let mut resolved = BTreeSet::new();
         // F3b: foto de puntos para `x(A)`/`y(A)` (entradas, no salidas).
         let scalars = self.spreadsheet_point_scalars();
         while let Some(index) = ready.pop_front() {

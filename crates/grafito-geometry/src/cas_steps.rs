@@ -1298,7 +1298,17 @@ fn try_generic_parts_with_steps(
     steps: &mut Vec<CasStep>,
     depth: u32,
 ) -> Option<Expr> {
-    const MAX_PARTS_DEPTH: u32 = 256;
+    // Cota anti-DoS idéntica a `symbolic::try_generic_parts` (cuelgue
+    // FourierSeries[x^2,x,1,2] 2026-09-26): partes por partes puede ciclar
+    // (∫x²·cos reproduce x²·cos dos niveles después con otras constantes) y
+    // el árbol crece exponencial por nivel — 18 GB antes de tocar el tope de
+    // profundidad. Se aborta con integrando grande: la ruta numérica
+    // (Gauss–Legendre) lo resuelve igual y es el fallback declarado de
+    // `expansion_coefficients`. MAX_PARTS_DEPTH 24 (no 256) + tope 4096.
+    if format!("{expr:?}").len() > 4096 {
+        return None;
+    }
+    const MAX_PARTS_DEPTH: u32 = 24;
     if depth > MAX_PARTS_DEPTH {
         return None;
     }

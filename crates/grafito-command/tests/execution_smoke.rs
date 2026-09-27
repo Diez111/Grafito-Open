@@ -229,7 +229,7 @@ fn execution_smoke() {
         "humo: se ejecutaron {ejecutados} de {total}, falta cobertura del registro"
     );
     assert!(
-        total >= 733,
-        "humo: el registro trae {total}, se esperaban al menos 733 (¿se borraron comandos?)"
+        total >= 747,
+        "humo: el registro trae {total}, se esperaban al menos 747 (¿se borraron comandos?)"
     );
 }

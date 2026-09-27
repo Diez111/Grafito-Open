@@ -34,17 +34,12 @@ use grafito_command::commands::{register_gpu_function_evaluator, GpuFunctionEval
 #[path = "shortcuts.rs"]
 mod shortcuts;
 
-/// Máximo de entradas de undo. Usa `VecDeque<Document>` con `pop_front` O(1)
-/// (antes `Vec` con `remove(0)` O(n) shift). Ver `push_history_snapshot` y
-/// `crate::controllers::DocumentController` para la evolución con contador.
-pub(crate) const MAX_UNDO: usize = 50;
-/// Presupuesto global de memoria para undo: 50 MB. Aunque `MAX_UNDO=50` ya es
-/// `VecDeque` O(1) `pop_front`, cada `Document` clonado puede pesar hasta
-/// ~10 MB (5000 objetos × 200 KB ⇒ `Document::estimated_bytes()`), por lo que
-/// 50 entradas sin cota = 500 MB. Este presupuesto corta la cola cuando el
-/// total estimado supera 50 MB. Ver `Document::estimated_bytes()` para la
-/// estimación `max(object_count*200KiB, json_len, 8KiB)`.
-pub(crate) const MAX_UNDO_BYTES: usize = 50 * 1024 * 1024;
+/// Máximo de entradas de undo y presupuesto global de memoria (50 / 50 MiB).
+/// Fuente única: `crate::controllers::{MAX_UNDO, MAX_UNDO_BYTES}` (ver
+/// `Document::estimated_bytes()` para la estimación
+/// `max(object_count*200KiB, json_len, 8KiB)`). Este re-export evita deriva
+/// entre el shim `push_history_snapshot` (GrafitoApp) y `DocumentController`.
+pub(crate) use crate::controllers::{MAX_UNDO, MAX_UNDO_BYTES};
 
 /// Cota del protocolo de construcción: 500 entradas cronológicas máximo.
 /// Tras cada `push` se trunca manteniendo las más recientes (`drain 0..excess`)
@@ -521,12 +516,39 @@ pub(crate) fn spawn_text_write(
 const TRIG_GRAPH_LABEL: &str = "TrigGraph";
 const TRIG_VALUE_LABEL: &str = "TrigValue";
 const VIEW_SETTLE_DURATION: Duration = Duration::from_millis(150);
-/// Presupuesto del splash (AS3 cold-start): overlay total 1500 ms con
-/// fade-out desde los 1000 ms. Solo cosmético: los gates reales de arranque
-/// viven en `startup_splash_phase` (GPU → escena → plugins) y el documento
-/// CLI llega por `maybe_start_startup_open` en background.
-const SPLASH_TOTAL_MS: u128 = 1500;
-const SPLASH_FADE_START_MS: u128 = 1000;
+/// Arranque sin overlay (estilo VSCode/Zed): primera frame instantánea, los
+/// gates calientan en background sin bloquear (`new` spawnea el `Renderer`
+/// wgpu; `update` abre el doc CLI y carga plugins en workers).
+///
+/// Costos medidos en este box 2026-09-26 (release tests, `cargo test -p
+/// grafito-app --test __gate_measure_tmp`, tmpfs; ver detalle abajo):
+/// - `Document::new` + view 1280×720: ~21 µs (despreciable).
+/// - Doc CLI (`write_document_atomic` + `read_document_file`, JSON):
+///   vacío (1 KiB) ~164 µs write / ~125 µs read; 100 objs (61 KiB) ~1 ms;
+///   1000 objs (606 KiB) ~15 ms write / ~11 ms read. Cota `MAX_OBJECT_COUNT`
+///   5000 vía Python: ~5 ms write / ~6 ms read (298 KiB). Siempre en worker
+///   (`spawn_document_open` + `poll_background_jobs`), jamás bloquea el paint.
+/// - Plugins (`PluginRegistry::load_many`, 1 dir vacío, 0 plugins): ~23 µs;
+///   `scandir` de los 3 dirs reales vacíos ~0.02 ms c/u. Con manifiestos suma
+///   ~0.1-0.5 ms por manifiesto (lectura acotada + parse); sigue en worker
+///   (`spawn_plugin_load`, `assistant.rs`).
+/// - Escena 2D: fallback CPU inmediato (`draw_grid`/`draw_axes`); el prepare
+///   GPU llega un frame después del renderer. Tessellation egui 1-2 ms/frame
+///   con 10K vértices (presupuesto en el header de este archivo).
+/// - GPU init (`Renderer::new`, compilación de shaders wgpu): único gate
+///   potencialmente lento (~50-300 ms típico en desktop); corre en background
+///   thread (`new`, `weak_renderer` + `request_repaint`) y su fin se loguea
+///   como "Background shader compilation finished". Nunca bloquea el primer
+///   frame.
+/// - Branding: el logo 256×256 (18 KiB, read ~0.05 ms, decode `image` ~2-5 ms)
+///   y la fuente Inter (880 KiB, read ~0.5 ms) NO bloquean: el logo vive solo
+///   en About/Onboarding bajo demanda, la fuente se instala una vez en `new`.
+///
+/// Política: si algún gate sigue pendiente pasados `STARTUP_SLOW_HINT_MS`, se
+/// muestra una pill sutil no bloqueante (spinner + fase, esquina inferior
+/// derecha, `interactable(false)`); sin conteos, sin % falso, sin "Listo".
+/// Cuando todo resuelve, la pill desaparece sola (se deja de dibujar).
+const STARTUP_SLOW_HINT_MS: u64 = 300;
 const MULTIDIMENSIONAL_MOTION_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 pub(crate) const DEFAULT_3D_ORBIT_RADIANS_PER_SECOND: f32 = 0.3;
 pub(crate) const DEFAULT_4D_ROTATION_RADIANS_PER_SECOND: f64 = 0.55;
@@ -617,6 +639,52 @@ impl RepaintBudget {
                 ctx.request_repaint_after(delay);
             }
         }
+    }
+}
+
+// ── Tessellation egui (rayon) ─────────────────────────────────────────────
+// `egui` trae feature `rayon` en el workspace (`Cargo.toml` raíz): epaint
+// paraleliza el teselado cuando `parallel_tessellation` es `true` (default
+// `true` en 0.29, se fija explícito para pinnear el presupuesto 1-2 ms/frame
+// con 10K vértices). `coarse_tessellation_culling` queda en default (`true`)
+// y `round_text_to_pixels` en `true` (texto nítido, sin cambio visual).
+// `feathering` se mantiene `true` global: desactivarlo cambia el AA de todos
+// los strokes (cambio visual); las series densas ya van diezmadas a ~1px
+// (`decimate_run_to_pixels` en `render_2d.rs`) y en batch (`Shape::Vec`), así
+// que el costo del feathering ahí es menor que el riesgo visual de apagarlo.
+
+/// Fija las opciones de teselado del contexto egui (llamar una vez en `new`).
+pub(crate) fn configure_egui_tessellation(ctx: &egui::Context) {
+    ctx.tessellation_options_mut(|opts| {
+        opts.parallel_tessellation = true;
+        opts.coarse_tessellation_culling = true;
+        opts.round_text_to_pixels = true;
+    });
+}
+
+#[cfg(test)]
+mod tessellation_config_tests {
+    use super::configure_egui_tessellation;
+
+    #[test]
+    fn fija_paralelo_cull_y_texto_nitido_sin_tocar_feathering() {
+        let ctx = egui::Context::default();
+        configure_egui_tessellation(&ctx);
+        let (parallel, coarse, round_text, feathering) = ctx.tessellation_options(|opts| {
+            (
+                opts.parallel_tessellation,
+                opts.coarse_tessellation_culling,
+                opts.round_text_to_pixels,
+                opts.feathering,
+            )
+        });
+        assert!(parallel, "rayon paraleliza el teselado");
+        assert!(coarse, "cull grueso en default");
+        assert!(round_text, "texto alineado a píxel");
+        assert!(
+            feathering,
+            "feathering global intacto (sin cambio visual; densas ya diezmadas)"
+        );
     }
 }
 
@@ -1757,13 +1825,12 @@ pub struct GrafitoApp {
     pub recent_files: VecDeque<String>,
     document_lifecycle: DocumentLifecycle,
     deferred_file_actions: DeferredFileActions,
-    /// Timestamp de inicio de la app (splash screen). None = ya pasó.
-    pub splash_start: Option<Instant>,
+    /// Instante de construcción: origen para el hint sutil de arranque.
+    /// La primera frame es instantánea (sin overlay); los gates calientan en
+    /// background. Solo se usa para `elapsed()` + el log one-shot.
+    pub startup_instant: Instant,
     /// One-shot F10-D (cold start instrumentado): log de first_frame una vez.
     startup_first_frame_logged: bool,
-    /// Textura retenida mientras el splash la referencia en sus primitivas egui.
-    /// LRU: tamaño 1, se libera con `ctx.forget_image("splash_logo")` al cerrar splash para no retener GPU.
-    splash_logo: Option<egui::TextureHandle>,
     /// Avatar local de Mora, cargado una vez cuando el asistente se vuelve visible.
     /// LRU: tamaño 1, se libera con `ctx.forget_image("mora_avatar")` en `on_close`/`Drop` para evitar fuga GPU.
     pub(crate) mora_texture: Option<egui::TextureHandle>,
@@ -2223,49 +2290,46 @@ impl GrafitoApp {
         renderer_is_ready(self.gpu_renderer.as_ref())
     }
 
-    /// Fase honesta del splash (G-E perf, S): 3 gates reales, sin % falso de
-    /// tiempo. El progreso es `done/3`: GPU lista, escena 2D resuelta
-    /// (`Pending` = pendiente; `GpuReady`/`CpuOnly` = resuelta), plugins
-    /// cargados (`plugins_loaded` se setea en el primer poll del update, dentro
-    /// de la ventana del splash). Un documento vacío es válido y no bloquea
-    /// ningún gate; el conteo de objetos solo se muestra, no es gate.
-    fn startup_splash_phase(&self) -> (u32, &'static str) {
-        const TOTAL: u32 = 3;
-        if !self.gpu_renderer_ready() {
-            return (0, "Iniciando GPU…");
-        }
-        if self.gpu_scene_2d_readiness() == crate::canvas::Scene2DReadiness::Pending {
-            return (1, "Preparando escena…");
-        }
-        if !self.plugins_loaded {
-            return (2, "Cargando extensiones…");
-        }
-        (TOTAL, "Listo")
-    }
-
-    /// Fase visible del splash con el pendiente de arranque (AS3).
+    /// Gate pendiente del arranque, si hay alguno (estilo VSCode/Zed).
     ///
-    /// Pura y testeable: si hay un documento CLI abriéndose en background
-    /// (`startup_pending_doc` o `pending_open_job` sin `current_path` aún),
-    /// el stage es honesto ("Abriendo documento…") con el `done` real de los
-    /// gates; si no, delega en `startup_splash_phase` sin cambios.
-    fn splash_stage(&self) -> (u32, &'static str) {
-        let (done, stage) = self.startup_splash_phase();
+    /// Pura y testeable. Orden: el doc CLI manda (es lo más relevante para el
+    /// usuario), luego GPU → escena 2D → plugins. `None` = todo listo: el
+    /// llamador deja de dibujar la pill, sin "Listo" ni 100 %. Jamás conteos
+    /// ni % falso: solo el nombre honesto de la fase pendiente.
+    ///
+    /// Sin GPU (`gpu_renderer`/`gpu_scene_readiness` en `None`, fallback CPU)
+    /// esos gates se dan por resueltos: en CPU no hay nada que calentar y la
+    /// pill jamás queda colgada en "Iniciando GPU…".
+    fn startup_pending_stage(&self) -> Option<&'static str> {
         let opening_startup_doc = self.startup_pending_doc.is_some()
             || (self.pending_open_job.is_some()
                 && self.document_lifecycle.current_path().is_none());
         if opening_startup_doc {
-            return (done, "Abriendo documento…");
+            return Some("Abriendo documento…");
         }
-        (done, stage)
+        if self.gpu_renderer.is_some() && !self.gpu_renderer_ready() {
+            return Some("Iniciando GPU…");
+        }
+        let scene_pending = self.gpu_scene_readiness.is_some()
+            && self.gpu_scene_2d_readiness() == crate::canvas::Scene2DReadiness::Pending;
+        if scene_pending {
+            return Some("Preparando escena…");
+        }
+        if !self.plugins_loaded {
+            return Some("Cargando extensiones…");
+        }
+        None
     }
 
-    /// Onda 1: el splash nunca es mudo. Pura y testeable: hay progreso
-    /// visible (spinner + barra) mientras `done < 3`, incluso en
-    /// "Cargando extensiones…" (done=2). La etiqueta de fase es la
-    /// live-region (siempre renderizada, el lector anuncia cada cambio).
-    fn carga_muestra_progreso(done: u32) -> bool {
-        done < 3
+    /// ¿Se muestra el hint sutil? Solo si hay gate pendiente Y pasó el umbral.
+    ///
+    /// Pura y testeable: evita el flash de spinner en arranques rápidos
+    /// (todos los gates suelen resolver en <300 ms; ver costos en
+    /// `STARTUP_SLOW_HINT_MS`). La etiqueta de fase es la live-region: se
+    /// renderiza siempre que la pill es visible y el lector anuncia cada
+    /// cambio de fase.
+    fn startup_slow_hint_visible(elapsed: Duration, pending: Option<&str>) -> bool {
+        pending.is_some_and(|_| elapsed >= Duration::from_millis(STARTUP_SLOW_HINT_MS))
     }
 
     /// Mantiene la proyección ligada al rectángulo real del canvas sin
@@ -2426,6 +2490,7 @@ impl GrafitoApp {
                 .insert(0, "Inter".to_owned());
             cc.egui_ctx.set_fonts(fonts);
         }
+        configure_egui_tessellation(&cc.egui_ctx);
         let (gpu_renderer, gpu_scene_readiness) = if let Some(render_state) = &cc.wgpu_render_state
         {
             let renderer: Arc<RwLock<Option<grafito_render::Renderer>>> =
@@ -2487,7 +2552,7 @@ impl GrafitoApp {
         // ── A8 arranque: si se pasó un archivo por CLI (`grafito doc.json`),
         // se abre en background en el primer `update` (`maybe_start_startup_open`)
         // para no bloquear el primer paint (AS3 cold-start: antes era I/O
-        // sincrónica de hasta 10 MB aquí, en el hilo UI, antes del splash).
+        // sincrónica de hasta 10 MB aquí, en el hilo UI, antes de la primera frame).
         // I/O en constructor (no en `Ui::`); el sidecar se chequea en background.
         let document = initial_document();
         let document_lifecycle = DocumentLifecycle::new(&document);
@@ -2578,9 +2643,8 @@ impl GrafitoApp {
             table_step: "1.0".to_string(),
             cas_history: VecDeque::new(),
             sidebar_tab: 0,
-            splash_start: Some(Instant::now()),
+            startup_instant: Instant::now(),
             startup_first_frame_logged: false,
-            splash_logo: None,
             mora_texture: None,
             mora_texture_load_attempted: false,
             plugin_registry: None,
@@ -2706,7 +2770,7 @@ impl GrafitoApp {
             classroom,
         };
         // F10-D cold start instrumentado (S): duración real del constructor.
-        // El first_frame se loguea en el primer `update` (bloque splash).
+        // El first_frame se loguea en el primer `update` (hint sutil de arranque).
         log::info!(
             "startup: new() listo en {}ms ({} objetos, gpu={})",
             startup_t0.elapsed().as_millis(),
@@ -3799,10 +3863,8 @@ impl GrafitoApp {
             return;
         }
         // LRU cleanup: liberar texturas retenidas antes de cerrar ventana para no fugar GPU.
-        if self.splash_logo.is_some() {
-            ctx.forget_image("splash_logo");
-            self.splash_logo = None;
-        }
+        // (El branding de arranque vive en About/Onboarding bajo demanda; acá
+        // solo queda el avatar de Mora.)
         if self.mora_texture.is_some() {
             ctx.forget_image("mora_avatar");
             self.mora_texture = None;
@@ -6981,7 +7043,9 @@ impl GrafitoApp {
                 } else {
                     needs_repaint_delay
                 };
-                ctx.request_repaint_after(delay);
+                // F17: por el presupuesto coalescido (se aplica una vez al
+                // final de `update` en `apply_repaint_budget`), no directo.
+                self.repaint_budget.request(delay);
             }
         }
         (dt, mapping_animating)
@@ -7010,7 +7074,7 @@ impl eframe::App for GrafitoApp {
 
         self.handle_native_close_request(ctx);
         // AS3 cold-start: el archivo CLI se abre en background en el primer
-        // frame (nunca I/O de documentos en `new()`), con splash honesto.
+        // frame (nunca I/O de documentos en `new()`), con hint sutil si tarda.
         self.maybe_start_startup_open(ctx);
         self.poll_background_jobs(ctx);
         // Aula: sincronizar opt-in (Piel pura, sin I/O) — campo classroom
@@ -7264,7 +7328,8 @@ impl eframe::App for GrafitoApp {
                         let canvas_size = canvas_rect.size();
                         self.canvas_origin = Some(canvas_rect.min);
                         if self.sync_canvas_screen_size(canvas_size) {
-                            ctx.request_repaint();
+                            // F17: one-shot coalescido (mismo inmediato visible).
+                            self.request_repaint_budget(Duration::ZERO);
                         }
                         let canvas_resize_preview = canvas_resize_preview_active(
                             self.last_canvas_resize_at,
@@ -7307,7 +7372,8 @@ impl eframe::App for GrafitoApp {
                         });
                         if zf_resp.clicked() {
                             self.zoom_to_fit();
-                            ui.ctx().request_repaint();
+                            // F17: one-shot coalescido (mismo inmediato visible).
+                            self.request_repaint_budget(Duration::ZERO);
                         }
                         // Ola 0.6: zoom por pasos +/− (mismo gesto que la rueda,
                         // anclado al centro del canvas). Debajo del [].
@@ -7340,7 +7406,8 @@ impl eframe::App for GrafitoApp {
                             });
                             if resp.clicked() {
                                 self.zoom_stepped_view(factor, canvas_center);
-                                ui.ctx().request_repaint();
+                                // F17: one-shot coalescido (mismo inmediato visible).
+                                self.request_repaint_budget(Duration::ZERO);
                             }
                         }
 
@@ -7424,7 +7491,8 @@ impl eframe::App for GrafitoApp {
                             );
                         }
                         if scene_plan.schedule_gpu_prepare && !gpu_base {
-                            ctx.request_repaint();
+                            // F17: prepare pendiente pide otro frame; coalescido.
+                            self.request_repaint_budget(Duration::ZERO);
                         }
 
                         // Tool ghost and preview are transient overlays, render with CPU on top.
@@ -7473,7 +7541,8 @@ impl eframe::App for GrafitoApp {
                     self.canvas_origin = Some(canvas_rect.min);
                     let canvas_size = canvas_rect.size();
                     if self.sync_canvas_screen_size(canvas_size) {
-                        ctx.request_repaint();
+                        // F17: one-shot coalescido (mismo inmediato visible).
+                        self.request_repaint_budget(Duration::ZERO);
                     }
                     let w = canvas_size.x;
                     let h = canvas_size.y;
@@ -7575,7 +7644,8 @@ impl eframe::App for GrafitoApp {
                             );
                         }
                         if should_repaint_3d_warmup(scene_readiness) {
-                            ctx.request_repaint();
+                            // F17: warmup pendiente pide otro frame; coalescido.
+                            self.request_repaint_budget(Duration::ZERO);
                         }
                     } else {
                         {
@@ -7662,149 +7732,58 @@ impl eframe::App for GrafitoApp {
 
         crate::ui::draw_color_picker(self, ctx);
 
-        // Splash screen overlay (PR 6 polish): aparece por 1.5s al inicio
-        // con el logo, nombre y versión. Se desvanece con un fade-out.
-        if let Some(start) = self.splash_start {
-            let elapsed = start.elapsed();
-            let elapsed_ms = elapsed.as_millis();
-            // F10-D cold start instrumentado: first_frame real una sola vez.
-            if !self.startup_first_frame_logged {
-                self.startup_first_frame_logged = true;
-                log::info!(
-                    "startup: first_frame en {}ms ({} objetos)",
-                    elapsed_ms,
-                    self.document.object_count(),
-                );
-            }
-            if elapsed_ms < SPLASH_TOTAL_MS {
-                let _theme = grafito_ui::theme::current_theme(ctx);
-                let alpha = if elapsed_ms < SPLASH_FADE_START_MS {
-                    1.0
-                } else {
-                    let t = (elapsed_ms - SPLASH_FADE_START_MS) as f32
-                        / (SPLASH_TOTAL_MS - SPLASH_FADE_START_MS) as f32;
-                    1.0 - t
-                };
-                egui::Area::new(egui::Id::new("splash_overlay"))
-                    .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        // Arranque sin overlay (VSCode/Zed): primera frame instantánea, los
+        // gates calientan en background. Solo un hint sutil si algo tarda.
+        // F10-D cold start instrumentado: first_frame real una sola vez.
+        if !self.startup_first_frame_logged {
+            self.startup_first_frame_logged = true;
+            log::info!(
+                "startup: first_frame en {}ms ({} objetos)",
+                self.startup_instant.elapsed().as_millis(),
+                self.document.object_count(),
+            );
+        }
+        // Pill no bloqueante en la esquina inferior derecha: spinner + fase,
+        // sin conteos ni % falso; desaparece sola cuando no hay pendiente.
+        // `interactable(false)` para jamás robar input del canvas; la fase es
+        // la live-region (el lector anuncia cada cambio mientras es visible).
+        let startup_elapsed = self.startup_instant.elapsed();
+        let startup_pending = self.startup_pending_stage();
+        if Self::startup_slow_hint_visible(startup_elapsed, startup_pending) {
+            if let Some(stage) = startup_pending {
+                let theme = grafito_ui::theme::current_theme(ctx);
+                egui::Area::new(egui::Id::new("startup_warmup_pill"))
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-12.0, -48.0))
+                    .movable(false)
+                    .interactable(false)
                     .show(ctx, |ui| {
-                        let screen = ui.ctx().screen_rect();
-                        ui.painter().rect_filled(
-                            screen,
-                            0.0,
-                            egui::Color32::from_black_alpha((220.0 * alpha) as u8),
-                        );
-                        // Logo + nombre centrados
-                        ui.vertical_centered(|ui| {
-                            let (logo_rect, _) = ui.allocate_exact_size(
-                                egui::vec2(128.0, 128.0),
-                                egui::Sense::hover(),
-                            );
-                            if ui.is_rect_visible(logo_rect) {
-                                if self.splash_logo.is_none() {
-                                    if let Ok(img) = image::load_from_memory(include_bytes!(
-                                        "../../../assets/grafito-icon-256x256.png"
-                                    )) {
-                                        let rgba = img.to_rgba8();
-                                        let (w, h) = (rgba.width() as f32, rgba.height() as f32);
-                                        splash_logo_texture(
-                                            ctx,
-                                            &mut self.splash_logo,
-                                            egui::ColorImage::from_rgba_unmultiplied(
-                                                [w as usize, h as usize],
-                                                rgba.as_raw(),
-                                            ),
-                                        );
-                                    }
-                                }
-                                if let Some(tex) = &self.splash_logo {
-                                    let size = logo_rect.width().min(logo_rect.height());
-                                    let rect = egui::Rect::from_center_size(
-                                        logo_rect.center(),
-                                        egui::vec2(size, size),
-                                    );
-                                    ui.painter().image(
-                                        tex.id(),
-                                        rect,
-                                        egui::Rect::from_min_max(
-                                            egui::pos2(0.0, 0.0),
-                                            egui::pos2(1.0, 1.0),
-                                        ),
-                                        egui::Color32::from_white_alpha((255.0 * alpha) as u8),
-                                    );
-                                }
-                            }
-                            ui.add_space(grafito_ui::tokens::SPACE_LG);
-                            ui.label(
-                                egui::RichText::new("Grafito")
-                                    .size(36.0)
-                                    .strong()
-                                    .color(egui::Color32::from_white_alpha((255.0 * alpha) as u8)),
-                            );
-                            ui.add_space(grafito_ui::tokens::SPACE_XS);
-                            ui.label(
-                                egui::RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                                    .size(14.0)
-                                    .color(egui::Color32::from_white_alpha((180.0 * alpha) as u8)),
-                            );
-                            ui.add_space(grafito_ui::tokens::SPACE_SM);
-                            ui.label(
-                                egui::RichText::new("Geometría interactiva - Algebra - Calculo")
-                                    .size(13.0)
-                                    .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
-                            );
-                            // G-E splash progreso real por fases (S): gates reales
-                            // vía `splash_stage` (GPU → escena → plugins, más
-                            // "Abriendo documento…" si el CLI sigue en background),
-                            // barra done/3 honesta, sin % falso de tiempo.
-                            let (done, stage) = self.splash_stage();
-                            let phase = if self.document.object_count() > 0 {
-                                format!(
-                                    "{stage} · {} de 3 · Documento · {} objetos · {}ms",
-                                    done,
-                                    self.document.object_count(),
-                                    elapsed_ms
-                                )
-                            } else {
-                                format!("{stage} · {done} de 3 · {elapsed_ms}ms")
-                            };
-                            // Onda 1 live-region: la fase siempre se renderiza
-                            // (el lector anuncia cada cambio); con progreso
-                            // pendiente hay spinner + barra, nunca texto mudo.
-                            ui.label(
-                                egui::RichText::new(phase)
-                                    .size(13.0)
-                                    .color(egui::Color32::from_white_alpha((150.0 * alpha) as u8)),
-                            );
-                            ui.add_space(grafito_ui::tokens::SPACE_XS);
-                            if Self::carga_muestra_progreso(done) {
+                        egui::Frame::none()
+                            .fill(theme.panel_bg)
+                            .stroke(theme.hairline_stroke())
+                            .rounding(egui::Rounding::same(grafito_ui::tokens::RADIUS_MD))
+                            .inner_margin(egui::Margin::symmetric(
+                                grafito_ui::tokens::SPACE_SM,
+                                grafito_ui::tokens::SPACE_XS,
+                            ))
+                            .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    ui.add(egui::Spinner::new());
-                                    ui.add(
-                                        egui::ProgressBar::new(done as f32 / 3.0)
-                                            .desired_width(220.0)
-                                            .show_percentage(),
+                                    ui.add(egui::Spinner::new().size(12.0));
+                                    ui.label(
+                                        egui::RichText::new(stage)
+                                            .size(grafito_ui::tokens::TYPE_XS)
+                                            .color(theme.text_secondary),
                                     );
                                 });
-                            } else {
-                                ui.add(
-                                    egui::ProgressBar::new(done as f32 / 3.0)
-                                        .desired_width(220.0)
-                                        .show_percentage(),
-                                );
-                            }
-                        });
+                            });
                     });
-                // Fix busy-loop: antes `request_repaint()` sin delay saturaba CPU/GPU a 100%
-                // Ahora 16ms ≈ 60fps (vs 0ms busy-loop) — ver app.rs:4421
-                ctx.request_repaint_after(Duration::from_millis(16));
-            } else {
-                self.splash_start = None;
-                if self.splash_logo.is_some() {
-                    ctx.forget_image("splash_logo");
-                    self.splash_logo = None;
-                }
             }
+            // Spinner animado + desaparición pronta: 50 ms coalescido (misma
+            // demora que el poll de plugins en `assistant.rs`).
+            self.request_repaint_budget(Duration::from_millis(50));
+        } else if startup_pending.is_some() {
+            // Pendiente pero aún bajo el umbral: un repaint para aparecer a
+            // tiempo sin busy-loop (el presupuesto coalesce al mínimo).
+            self.request_repaint_budget(Duration::from_millis(50));
         }
 
         // Paleta de comandos (Ctrl+K): ventana flotante de búsqueda rápida.
@@ -9108,21 +9087,13 @@ fn build_about_changelog() -> &'static [&'static str] {
     ]
 }
 
-/// P1b: singletons estáticos — retención vía `Option<TextureHandle>`
-/// (`get_or_insert_with`, jamás se reemplazan ni se dropean en caliente),
-/// por eso NO usan la cola de gracia ni hash en el nombre como los fills
-/// animados (`render_2d`) o `teaching_anim_*_{hash}`. Imagen fija de arranque
-/// / avatar: sin versionado, sin leak, sin submit en vuelo que las referencie
-/// tras un reemplazo (no hay reemplazo).
-fn splash_logo_texture<'a>(
-    ctx: &egui::Context,
-    splash_logo: &'a mut Option<egui::TextureHandle>,
-    image: egui::ColorImage,
-) -> &'a egui::TextureHandle {
-    splash_logo
-        .get_or_insert_with(|| ctx.load_texture("splash_logo", image, egui::TextureOptions::LINEAR))
-}
-
+/// P1b: singleton estático — retención vía `Option<TextureHandle>`
+/// (`get_or_insert_with`, jamás se reemplaza ni se dropea en caliente),
+/// por eso NO usa la cola de gracia ni hash en el nombre como los fills
+/// animados (`render_2d`) o `teaching_anim_*_{hash}`. Avatar fijo: sin
+/// versionado, sin leak, sin submit en vuelo que lo referencie tras un
+/// reemplazo (no hay reemplazo). El logo de arranque ya no se retiene acá:
+/// el branding vive en About/Onboarding bajo demanda, no en el arranque.
 pub(crate) fn mora_avatar_texture<'a>(
     ctx: &egui::Context,
     mora_texture: &'a mut Option<egui::TextureHandle>,
@@ -9360,56 +9331,93 @@ mod version_visible_tests {
 }
 
 #[cfg(test)]
-mod splash_tests {
+mod startup_hint_tests {
     use super::*;
 
-    // ── AS3 cold-start: splash honesto + arranque sin I/O en `new()` ──
+    // ── Arranque sin overlay: primera frame instantánea + pill sutil ──
     #[test]
-    fn splash_budget_pins_overlay_timing() {
-        // Overlay 1500 ms con fade desde 1000 ms (orden pinneado por los
-        // valores: 1000 < 1500; sin assert relacional: clippy lo ve const).
-        assert_eq!(SPLASH_TOTAL_MS, 1500);
-        assert_eq!(SPLASH_FADE_START_MS, 1000);
+    fn slow_hint_threshold_is_300ms() {
+        // Umbral pinneado: los gates típicos resuelven antes (doc ≤15 ms,
+        // plugins ~µs, escena ~1-2 ms; ver `STARTUP_SLOW_HINT_MS`).
+        assert_eq!(STARTUP_SLOW_HINT_MS, 300);
     }
 
     #[test]
-    fn splash_stage_reports_startup_doc_honestly() {
+    fn pending_stage_prioritizes_startup_doc() {
         let mut app = dummy_grafito_app();
-        // Sin GPU (dummy) y sin pendiente: gate 0 honesto, sin override.
-        let (done, stage) = app.splash_stage();
-        assert_eq!((done, stage), app.startup_splash_phase());
-        // Con documento CLI pendiente: mismo `done`, stage honesto.
+        // Dummy sin GPU = fallback CPU (gates GPU/escena resueltos): solo
+        // falta plugins.
+        assert_eq!(app.startup_pending_stage(), Some("Cargando extensiones…"));
+        // Con documento CLI pendiente: manda el doc, sin conteos ni %.
         app.startup_pending_doc = Some(PathBuf::from("/tmp/inicio.json"));
-        let (done_pending, stage_pending) = app.splash_stage();
-        assert_eq!(done_pending, done);
-        assert_eq!(stage_pending, "Abriendo documento…");
+        assert_eq!(app.startup_pending_stage(), Some("Abriendo documento…"));
     }
 
     #[test]
-    fn carga_muestra_progreso() {
-        // Onda 1: el splash nunca es mudo — hay spinner + barra + live-region
-        // mientras done < 3, incluso en "Cargando extensiones…" (done=2).
-        assert!(GrafitoApp::carga_muestra_progreso(0));
-        assert!(GrafitoApp::carga_muestra_progreso(1));
-        assert!(GrafitoApp::carga_muestra_progreso(2));
-        assert!(!GrafitoApp::carga_muestra_progreso(3));
-        // La fase 2 es exactamente el texto que era mudo.
-        let app = dummy_grafito_app();
-        let (_, stage_gate0) = app.startup_splash_phase();
-        assert!(!stage_gate0.is_empty());
+    fn pending_stage_is_none_when_all_ready() {
+        let mut app = dummy_grafito_app();
+        // Todo listo (CPU + plugins): sin pill, sin "Listo", sin 100 %.
+        // La pill desaparece sola al dejar de dibujarse.
+        app.plugins_loaded = true;
+        assert_eq!(app.startup_pending_stage(), None);
     }
 
     #[test]
-    fn splash_texture_handle_is_retained_and_reused() {
-        let ctx = egui::Context::default();
-        let image = egui::ColorImage::new([1, 1], egui::Color32::WHITE);
-        let mut splash_logo = None;
+    fn slow_hint_only_after_threshold_and_while_pending() {
+        // Sin pendiente: jamás visible, ni en t=0 ni tras el umbral.
+        assert!(!GrafitoApp::startup_slow_hint_visible(
+            Duration::from_millis(0),
+            None
+        ));
+        assert!(!GrafitoApp::startup_slow_hint_visible(
+            Duration::from_millis(10_000),
+            None
+        ));
+        // Con pendiente pero rápido: sin flash de spinner.
+        assert!(!GrafitoApp::startup_slow_hint_visible(
+            Duration::from_millis(299),
+            Some("Iniciando GPU…")
+        ));
+        // Con pendiente y lento: pill sutil (spinner + fase, live-region).
+        assert!(GrafitoApp::startup_slow_hint_visible(
+            Duration::from_millis(300),
+            Some("Iniciando GPU…")
+        ));
+        assert!(GrafitoApp::startup_slow_hint_visible(
+            Duration::from_millis(5_000),
+            Some("Cargando extensiones…")
+        ));
+    }
 
-        let first = splash_logo_texture(&ctx, &mut splash_logo, image.clone()).id();
-        let second = splash_logo_texture(&ctx, &mut splash_logo, image).id();
+    #[test]
+    fn pending_stage_never_reports_done_or_percentage() {
+        // Contrato anti "% falso": las fases no contienen conteos, % ni "Listo".
+        let mut app = dummy_grafito_app();
+        for pending in [app.startup_pending_stage(), {
+            app.startup_pending_doc = Some(PathBuf::from("/tmp/a.json"));
+            app.startup_pending_stage()
+        }] {
+            let stage = pending.expect("dummy sin plugins siempre pendiente");
+            assert!(!stage.contains('%'), "sin % falso: {stage}");
+            assert!(!stage.contains("de 3"), "sin conteos: {stage}");
+            assert!(!stage.contains("100"), "sin 100%: {stage}");
+            assert_ne!(stage, "Listo", "sin 'Listo': la pill desaparece sola");
+        }
+    }
 
-        assert_eq!(first, second);
-        assert!(splash_logo.is_some());
+    #[test]
+    fn pending_stage_reports_gpu_and_scene_gates() {
+        // Con GPU presente pero sin compilar: gate GPU honesto.
+        let mut app = dummy_grafito_app();
+        app.plugins_loaded = true;
+        app.gpu_renderer = Some(Arc::new(RwLock::new(None)));
+        assert_eq!(app.startup_pending_stage(), Some("Iniciando GPU…"));
+        // GPU lista pero escena pendiente: gate escena honesto.
+        // (Escena pendiente = `gpu_scene_readiness` presente y sin marca;
+        // `default()` arranca en `Pending`.)
+        app.gpu_renderer = None;
+        app.gpu_scene_readiness = Some(crate::canvas::GpuSceneReadiness::default());
+        assert_eq!(app.startup_pending_stage(), Some("Preparando escena…"));
     }
 
     #[test]
@@ -9606,9 +9614,8 @@ pub(crate) fn dummy_grafito_app_with_perspective(perspective: Perspective) -> Gr
         recent_files: VecDeque::new(),
         document_lifecycle: DocumentLifecycle::new(&document_snapshot),
         deferred_file_actions: DeferredFileActions::default(),
-        splash_start: None,
+        startup_instant: Instant::now(),
         startup_first_frame_logged: false,
-        splash_logo: None,
         mora_texture: None,
         mora_texture_load_attempted: false,
         plugin_registry: None,

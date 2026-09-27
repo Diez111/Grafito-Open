@@ -75,14 +75,7 @@ mod thin_tests {
         assert!(count > 0, "franja debe detectarse");
     }
 
-    #[test]
-    fn test_thin_strip_001_units() {
-        // Franja muy delgada: 0.01 unidades. ~1 pixel.
-        let lhs = prepare_function_ast("y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
-        let rhs = prepare_function_ast("0.000025", &BTreeMap::new(), &["x", "y"]).unwrap();
-        let count = scanline_thin(&lhs, &rhs, false, -5.0, 5.0, -5.0, 5.0, 800, 600, 8);
-        println!("franja 0.01 units, stride=8: count={}", count);
-        // Esta franja es de 1 pixel de ancho. Con stride=8, no se detecta
-        // (samples consecutivos saltan la franja). Eso es esperado.
-    }
+    // NOTE: no hay test para franja de 0.01 units: con stride=8 los
+    // samples saltan la franja y el conteo es 0 por diseño (limitación
+    // conocida, no regresión; un test sin assert siempre pasaba).
 }

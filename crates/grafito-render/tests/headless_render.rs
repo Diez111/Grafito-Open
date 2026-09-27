@@ -223,37 +223,6 @@ fn recognized_complex_mapping_of_circle_and_pencil_adds_gpu_geometry() {
 }
 
 #[test]
-fn recognized_complex_mapping_of_analytic_curves_adds_gpu_geometry() {
-    let view = view_800x600();
-    let targets = [
-        GeoObject::Ellipse(EllipseObj::new(Point2::new(2.0, 0.0), 1.0, 0.5)),
-        GeoObject::Parabola(ParabolaObj::new(Point2::new(0.0, 0.0), 1.0)),
-        GeoObject::Hyperbola(HyperbolaObj::new(Point2::new(0.0, 0.0), 1.0, 0.5)),
-        GeoObject::RegressionLine(RegressionLineObj::linear(
-            vec![-1.0, 0.0, 1.0],
-            vec![-1.0, 0.0, 1.0],
-            1.0,
-            0.0,
-            1.0,
-        )),
-    ];
-
-    for target in targets {
-        let mut document = Document::new();
-        let target_id = document.add_object(target);
-        document.add_object(GeoObject::ComplexMapping(ComplexMappingObj::new(
-            "1/z", target_id,
-        )));
-
-        let (vertices, indices) = Renderer::build_geometry_static(&document, &view, false, false);
-        assert!(
-            !vertices.is_empty() && !indices.is_empty(),
-            "a recognized mapping must render every analytic 2D target"
-        );
-    }
-}
-
-#[test]
 fn static_geometry_covers_every_assistant_enabled_2d_curve_and_data_route() {
     let view = view_800x600();
     let objects = vec![

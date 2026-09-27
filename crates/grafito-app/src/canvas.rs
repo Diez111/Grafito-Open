@@ -196,12 +196,19 @@ pub(crate) enum ParametricJobKind {
     Polar,
 }
 
-/// Slot cap-1 para jobs GPU en vuelo con descarte del viejo por generación.
-/// Genérico sobre el job para testear la máquina sin GPU (`J = mock` en
-/// tests); en producción `J = PendingGpuComputeJob`.
+/// Cola multi-slot para jobs GPU en vuelo con descarte del más viejo por
+/// generación cuando llena. Genérico sobre el job para testear la máquina
+/// sin GPU (`J = mock` en tests); en producción `J = PendingGpuComputeJob`.
+///
+/// Cap 4 (== [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]): el caso común de 2-4
+/// objetos GPU convive sin abortarse entre sí; solo al exceder la cap se
+/// desaloja el más viejo (FIFO) y el llamante lo aborta (`unmap`
+/// idempotente). El orden de dispatch ya prioriza visibles
+/// (`gpu_2d_pre_dispatch_plan` sobre `ordered_visible_2d_objects` + cuota
+/// `gpu_budget_allows`), así que la cola hereda esa prioridad.
 #[derive(Debug)]
 pub struct GpuComputeSlot<J = PendingGpuComputeJob> {
-    pending: Option<(u64, J)>,
+    queue: std::collections::VecDeque<(u64, J)>,
     next_generation: u64,
 }
 
@@ -210,44 +217,63 @@ pub struct GpuComputeSlot<J = PendingGpuComputeJob> {
 impl<J> Default for GpuComputeSlot<J> {
     fn default() -> Self {
         Self {
-            pending: None,
+            queue: std::collections::VecDeque::new(),
             next_generation: 0,
         }
     }
 }
 
 impl<J> GpuComputeSlot<J> {
-    /// Ocupa el slot. Si había otro job en vuelo, lo retorna para que el
-    /// llamante lo aborte (nunca se encola: cap 1 por presupuesto).
+    /// Capacidad de la cola (origen único: presupuesto readback).
+    pub(crate) fn capacity(&self) -> usize {
+        MAX_GPU_READBACK_JOBS_IN_FLIGHT
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    pub(crate) fn has_capacity(&self) -> bool {
+        self.queue.len() < self.capacity()
+    }
+
+    /// Encola un job. Si la cola está llena, desaloja el más viejo (FIFO) y
+    /// lo retorna para que el llamante lo aborte; en el caso común (2-4
+    /// objetos) no hay desalojo.
     pub(crate) fn submit(&mut self, job: J) -> Option<J> {
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1);
-        self.pending
-            .replace((generation, job))
-            .map(|(_, evicted)| evicted)
-    }
-
-    /// Extrae el job en vuelo (el avance lo consume y devuelve `NotReady` o
-    /// `Done`; en el primer caso se re-encola con [`Self::requeue`]).
-    pub(crate) fn take(&mut self) -> Option<(u64, J)> {
-        self.pending.take()
-    }
-
-    /// Re-encola un job aún en vuelo. El slot debe estar libre (el take y el
-    /// avance son secuenciales en el mismo prepare, sin reentrancia); si se
-    /// ocupó entretanto se reporta y el llamante debe abortar el job.
-    pub(crate) fn requeue(&mut self, generation: u64, job: J) -> Option<J> {
-        if self.pending.is_none() {
-            self.pending = Some((generation, job));
+        if self.queue.len() < self.capacity() {
+            self.queue.push_back((generation, job));
             None
         } else {
-            log::error!("GpuComputeSlot ocupado en requeue; se descarta el job re-encolado");
+            let evicted = self.queue.pop_front().map(|(_, job)| job);
+            self.queue.push_back((generation, job));
+            evicted
+        }
+    }
+
+    /// Extrae el job más viejo (el avance lo consume y devuelve `NotReady` o
+    /// `Done`; en el primer caso se re-encola con [`Self::requeue`]).
+    pub(crate) fn take(&mut self) -> Option<(u64, J)> {
+        self.queue.pop_front()
+    }
+
+    /// Re-encola un job aún en vuelo al final (el take y el avance son
+    /// secuenciales en el mismo prepare, sin reentrancia). Si la cola se
+    /// llenó entretanto se reporta y el llamante debe abortar el job.
+    pub(crate) fn requeue(&mut self, generation: u64, job: J) -> Option<J> {
+        if self.queue.len() < self.capacity() {
+            self.queue.push_back((generation, job));
+            None
+        } else {
+            log::error!("GpuComputeSlot lleno en requeue; se descarta el job re-encolado");
             Some(job)
         }
     }
 
     pub(crate) fn is_pending(&self) -> bool {
-        self.pending.is_some()
+        !self.queue.is_empty()
     }
 
     /// Estado "calculando…" para futuro wiring UI (panels fuera de este
@@ -260,9 +286,9 @@ impl<J> GpuComputeSlot<J> {
     }
 }
 
-/// El slot es cap-1 por presupuesto; si el presupuesto cambia, este frente
+/// La cola es cap-N por presupuesto; si el presupuesto cambia, este frente
 /// (take/requeue/drain) debe revisarse. Fijado en compilación.
-const _: () = assert!(MAX_GPU_READBACK_JOBS_IN_FLIGHT == 1);
+const _: () = assert!(MAX_GPU_READBACK_JOBS_IN_FLIGHT == 4);
 
 /// Aborta un job desalojado u obsoleto: `unmap` idempotente del buffer
 /// implicado para no dejar el pipeline inutilizado. Requiere el compute del
@@ -315,22 +341,25 @@ fn abort_pending_job(renderer: &Renderer, evicted: PendingGpuComputeJob) {
     }
 }
 
-/// Drena el slot background al inicio del prepare (frente B6, non-blocking).
+/// Drena la cola background al inicio del prepare (frente B6, non-blocking).
 ///
 /// - Sin job en vuelo: no hace nada.
 /// - Job vigente y listo: popula el cache del objeto (el build posterior hará
-///   hit) y libera el slot.
-/// - Job vigente y aún en vuelo: lo re-encola; el llamante debe saltar el
-///   dispatch nuevo y pintar el último-frame-válido (fallback CPU).
+///   hit) y libera su slot de la cola.
+/// - Job vigente y aún en vuelo (implícita en dos fases): lo re-encola al
+///   final; el frame pinta el último-frame-válido (fallback CPU).
 /// - Job obsoleto (objeto borrado, tipo cambiado o key distinta): `unmap` +
-///   descarte honesto sin escribir.
+///   descarte honesto sin escribir, y sigue con el siguiente.
 ///
-/// Nunca espera a la GPU: el llamante debe haber hecho el
-/// `device.poll(Maintain::Poll)` no-bloqueante del frame antes de llamar.
+/// Drena hasta N jobs (snapshot de la cola al entrar) una vez por frame:
+/// 2-4 objetos GPU avanzan en paralelo sin abortarse. Nunca espera a la
+/// GPU: el llamante debe haber hecho el `device.poll(Maintain::Poll)`
+/// no-bloqueante del frame antes de llamar.
 fn drain_gpu_compute_slot(resources: &mut GpuCanvasResources, document: &Document) {
-    let Some((generation, pending)) = resources.gpu_compute_slot.take() else {
+    let pending_count = resources.gpu_compute_slot.len();
+    if pending_count == 0 {
         return;
-    };
+    }
     let Ok(renderer_lock) = resources.renderer.read() else {
         log::warn!("Renderer lock poisoned drenando GpuComputeSlot; se descarta el job");
         return;
@@ -338,179 +367,188 @@ fn drain_gpu_compute_slot(resources: &mut GpuCanvasResources, document: &Documen
     let Some(renderer) = renderer_lock.as_ref() else {
         return;
     };
-    match pending {
-        PendingGpuComputeJob::Function { object_id, job } => {
-            let (Some(compute), Some(obj)) = (
-                renderer.function_compute.as_ref(),
-                document.get_object(object_id),
-            ) else {
-                if let Some(compute) = renderer.function_compute.as_ref() {
+    for _ in 0..pending_count {
+        let Some((generation, pending)) = resources.gpu_compute_slot.take() else {
+            break;
+        };
+        match pending {
+            PendingGpuComputeJob::Function { object_id, job } => {
+                let (Some(compute), Some(obj)) = (
+                    renderer.function_compute.as_ref(),
+                    document.get_object(object_id),
+                ) else {
+                    if let Some(compute) = renderer.function_compute.as_ref() {
+                        compute.abort_eval();
+                    }
+                    continue;
+                };
+                let GeoObject::Function(fun) = obj else {
                     compute.abort_eval();
-                }
-                return;
-            };
-            let GeoObject::Function(fun) = obj else {
-                compute.abort_eval();
-                return;
-            };
-            // `resolve_function_job` re-chequea la key: si el objeto cambió,
-            // no escribe y retorna false (descarte honesto). Terminal: no se
-            // re-encola (el resolve de función es de una sola fase).
-            let _ = resolve_function_job(compute, fun, &document.variables, job);
-        }
-        PendingGpuComputeJob::Implicit { object_id, job } => {
-            let (Some(compute), Some(obj)) = (
-                renderer.implicit_compute.as_ref(),
-                document.get_object(object_id),
-            ) else {
-                if let Some(compute) = renderer.implicit_compute.as_ref() {
+                    continue;
+                };
+                // `resolve_function_job` re-chequea la key: si el objeto cambió,
+                // no escribe y retorna false (descarte honesto). Terminal: no se
+                // re-encola (el resolve de función es de una sola fase).
+                let _ = resolve_function_job(compute, fun, &document.variables, job);
+            }
+            PendingGpuComputeJob::Implicit { object_id, job } => {
+                let (Some(compute), Some(obj)) = (
+                    renderer.implicit_compute.as_ref(),
+                    document.get_object(object_id),
+                ) else {
+                    if let Some(compute) = renderer.implicit_compute.as_ref() {
+                        compute.abort_eval();
+                    }
+                    continue;
+                };
+                let GeoObject::ImplicitCurve(ic) = obj else {
                     compute.abort_eval();
-                }
-                return;
-            };
-            let GeoObject::ImplicitCurve(ic) = obj else {
-                compute.abort_eval();
-                return;
-            };
-            match advance_implicit_job(compute, ic, &document.variables, job) {
-                ImplicitResolveStep::Done(_) => {}
-                ImplicitResolveStep::NotReady(boxed) => {
-                    let requeue = PendingGpuComputeJob::Implicit {
-                        object_id,
-                        job: *boxed,
-                    };
-                    if let Some(orphan) = resources.gpu_compute_slot.requeue(generation, requeue) {
-                        abort_pending_job(renderer, orphan);
+                    continue;
+                };
+                match advance_implicit_job(compute, ic, &document.variables, job) {
+                    ImplicitResolveStep::Done(_) => {}
+                    ImplicitResolveStep::NotReady(boxed) => {
+                        let requeue = PendingGpuComputeJob::Implicit {
+                            object_id,
+                            job: *boxed,
+                        };
+                        if let Some(orphan) =
+                            resources.gpu_compute_slot.requeue(generation, requeue)
+                        {
+                            abort_pending_job(renderer, orphan);
+                        }
                     }
                 }
             }
-        }
-        PendingGpuComputeJob::DomainColoring {
-            object_id,
-            job,
-            key,
-        } => {
-            // Objeto borrado o cambiado de tipo entretanto: descartar sin
-            // escribir (la key versionada ya no matchearía en el draw, pero
-            // así ni siquiera ocupa el mapa).
-            let current = document.get_object(object_id);
-            if !matches!(current, Some(grafito_core::GeoObject::ComplexGrid(_))) {
-                crate::render_2d::domain_grid_drop(key);
-                return;
-            }
-            let Some(compute) = renderer.domain_coloring_compute.as_ref() else {
-                crate::render_2d::domain_grid_mark_consumed(key);
-                return;
-            };
-            // Resolve non-blocking: colores listos → puente a textura.
-            // `None` (aún en vuelo, timeout, objeto cambiado) → el walk CPU
-            // toma el control sin reintentos en esta versión (sin spin).
-            match compute.resolve_eval(job) {
-                Some(colors) => crate::render_2d::domain_grid_ready(key, colors),
-                None => crate::render_2d::domain_grid_mark_consumed(key),
-            }
-        }
-        PendingGpuComputeJob::Parametric {
-            object_id,
-            kind,
-            steps,
-            key,
-            job,
-        } => {
-            let Some(compute) = renderer.parametric_compute.as_ref() else {
-                return;
-            };
-            let Some(obj) = document.get_object(object_id) else {
-                compute.abort_raw();
-                return;
-            };
-            let ok = match (kind, obj) {
-                (ParametricJobKind::Curve2D, grafito_core::GeoObject::ParametricCurve2D(pc)) => {
-                    grafito_render::parametric_compute::resolve_curve_2d_job(
-                        compute,
-                        pc,
-                        &document.variables,
-                        steps,
-                        job,
-                        &key,
-                    )
-                }
-                (ParametricJobKind::Curve3D, grafito_core::GeoObject::ParametricCurve3D(pc)) => {
-                    grafito_render::parametric_compute::resolve_curve_3d_job(
-                        compute,
-                        pc,
-                        &document.variables,
-                        steps,
-                        job,
-                        &key,
-                    )
-                }
-                (ParametricJobKind::Polar, grafito_core::GeoObject::PolarCurve(pol)) => {
-                    grafito_render::parametric_compute::resolve_polar_job(
-                        compute,
-                        pol,
-                        &document.variables,
-                        steps,
-                        job,
-                        &key,
-                    )
-                }
-                // Objeto borrado o cambiado de tipo: abortar sin escribir.
-                _ => {
-                    compute.abort_raw();
-                    false
-                }
-            };
-            let _ = ok;
-        }
-        PendingGpuComputeJob::ParametricSurface {
-            object_id,
-            key,
-            job,
-        } => {
-            let Some(compute) = renderer.parametric_compute.as_ref() else {
-                return;
-            };
-            let Some(grafito_core::GeoObject::Surface3D(surf)) = document.get_object(object_id)
-            else {
-                compute.abort_raw();
-                return;
-            };
-            let res = surf.mesh_res.clamp(2, 128);
-            let _ = grafito_render::parametric_compute::resolve_surface_job(
-                compute,
-                surf,
-                &document.variables,
-                res,
+            PendingGpuComputeJob::DomainColoring {
+                object_id,
                 job,
-                &key,
-            );
-        }
-        PendingGpuComputeJob::Vector {
-            object_id,
-            bounds,
-            grid_size,
-            key,
-            job,
-        } => {
-            let (Some(compute), Some(grafito_core::GeoObject::VectorField2D(vf))) = (
-                renderer.vector_compute.as_ref(),
-                document.get_object(object_id),
-            ) else {
-                if let Some(compute) = renderer.vector_compute.as_ref() {
-                    compute.abort_eval();
+                key,
+            } => {
+                // Objeto borrado o cambiado de tipo entretanto: descartar sin
+                // escribir (la key versionada ya no matchearía en el draw, pero
+                // así ni siquiera ocupa el mapa).
+                let current = document.get_object(object_id);
+                if !matches!(current, Some(grafito_core::GeoObject::ComplexGrid(_))) {
+                    crate::render_2d::domain_grid_drop(key);
+                    continue;
                 }
-                return;
-            };
-            let _ = grafito_render::vector_compute::resolve_vector_job(
-                compute,
-                vf,
+                let Some(compute) = renderer.domain_coloring_compute.as_ref() else {
+                    crate::render_2d::domain_grid_mark_consumed(key);
+                    continue;
+                };
+                // Resolve non-blocking: colores listos → puente a textura.
+                // `None` (aún en vuelo, timeout, objeto cambiado) → el walk CPU
+                // toma el control sin reintentos en esta versión (sin spin).
+                match compute.resolve_eval(job) {
+                    Some(colors) => crate::render_2d::domain_grid_ready(key, colors),
+                    None => crate::render_2d::domain_grid_mark_consumed(key),
+                }
+            }
+            PendingGpuComputeJob::Parametric {
+                object_id,
+                kind,
+                steps,
+                key,
+                job,
+            } => {
+                let Some(compute) = renderer.parametric_compute.as_ref() else {
+                    continue;
+                };
+                let Some(obj) = document.get_object(object_id) else {
+                    compute.abort_raw();
+                    continue;
+                };
+                let ok = match (kind, obj) {
+                    (
+                        ParametricJobKind::Curve2D,
+                        grafito_core::GeoObject::ParametricCurve2D(pc),
+                    ) => grafito_render::parametric_compute::resolve_curve_2d_job(
+                        compute,
+                        pc,
+                        &document.variables,
+                        steps,
+                        job,
+                        &key,
+                    ),
+                    (
+                        ParametricJobKind::Curve3D,
+                        grafito_core::GeoObject::ParametricCurve3D(pc),
+                    ) => grafito_render::parametric_compute::resolve_curve_3d_job(
+                        compute,
+                        pc,
+                        &document.variables,
+                        steps,
+                        job,
+                        &key,
+                    ),
+                    (ParametricJobKind::Polar, grafito_core::GeoObject::PolarCurve(pol)) => {
+                        grafito_render::parametric_compute::resolve_polar_job(
+                            compute,
+                            pol,
+                            &document.variables,
+                            steps,
+                            job,
+                            &key,
+                        )
+                    }
+                    // Objeto borrado o cambiado de tipo: abortar sin escribir.
+                    _ => {
+                        compute.abort_raw();
+                        false
+                    }
+                };
+                let _ = ok;
+            }
+            PendingGpuComputeJob::ParametricSurface {
+                object_id,
+                key,
+                job,
+            } => {
+                let Some(compute) = renderer.parametric_compute.as_ref() else {
+                    continue;
+                };
+                let Some(grafito_core::GeoObject::Surface3D(surf)) = document.get_object(object_id)
+                else {
+                    compute.abort_raw();
+                    continue;
+                };
+                let res = surf.mesh_res.clamp(2, 128);
+                let _ = grafito_render::parametric_compute::resolve_surface_job(
+                    compute,
+                    surf,
+                    &document.variables,
+                    res,
+                    job,
+                    &key,
+                );
+            }
+            PendingGpuComputeJob::Vector {
+                object_id,
                 bounds,
                 grid_size,
-                &document.variables,
+                key,
                 job,
-                &key,
-            );
+            } => {
+                let (Some(compute), Some(grafito_core::GeoObject::VectorField2D(vf))) = (
+                    renderer.vector_compute.as_ref(),
+                    document.get_object(object_id),
+                ) else {
+                    if let Some(compute) = renderer.vector_compute.as_ref() {
+                        compute.abort_eval();
+                    }
+                    continue;
+                };
+                let _ = grafito_render::vector_compute::resolve_vector_job(
+                    compute,
+                    vf,
+                    bounds,
+                    grid_size,
+                    &document.variables,
+                    job,
+                    &key,
+                );
+            }
         }
     }
 }
@@ -531,6 +569,23 @@ fn completed_2d_buffer_matches_scene(
     current_key: &Cache2DKey,
 ) -> bool {
     completed_key == Some(current_key)
+}
+
+/// ¿Dos claves 2D comparten el mismo quantum de vista (~0.5px)?
+///
+/// Comparación tolerante para el caché de polilíneas CPU
+/// (`render_2d::quantize_view`): mismo documento (nonce+versión), calidad,
+/// tema y transitorio, con origen/escala por buckets. El buffer GPU sigue
+/// exigiendo igualdad exacta (`completed_2d_buffer_matches_scene`); este
+/// helper solo decide reutilización CPU sin re-muestrear ni re-proyectar.
+#[allow(dead_code)]
+pub(crate) fn quantized_2d_keys_share_view(a: &Cache2DKey, b: &Cache2DKey) -> bool {
+    a.version == b.version
+        && a.nonce == b.nonce
+        && a.render_quality == b.render_quality
+        && a.dark_mode == b.dark_mode
+        && a.transient_revision == b.transient_revision
+        && crate::render_2d::quantize_view(&a.view) == crate::render_2d::quantize_view(&b.view)
 }
 
 fn callback_can_paint_2d(
@@ -805,8 +860,8 @@ const GPU_3D_MAX_ATTRACTORS: usize = 8;
 const GPU_3D_MAX_ATTRACTOR_STEPS: usize = 16_000;
 const GPU_2D_CURVE_STEPS: usize = 4_000;
 // Frente B6: `implicit_compute` y `function_compute` ya NO bloquean el hilo
-// de prepare: usan dispatch sin espera + slot background (`GpuComputeSlot`,
-// cap 1) con resolve en frames posteriores (ver `gpu_readback.rs`). El resto
+// de prepare: usan dispatch sin espera + cola background (`GpuComputeSlot`,
+// cap 4) con resolve en frames posteriores (ver `gpu_readback.rs`). El resto
 // (`parametric_compute`, `vector_compute`, ...) mantiene el readback síncrono
 // acotado vía `sync_readback_with_timeout` en `grafito-render/src/lib.rs`.
 //
@@ -828,6 +883,7 @@ const GPU_2D_CURVE_STEPS: usize = 4_000;
 // consumidor). Sin waiter thread a propósito: en wgpu 22 `Device` no es
 // `Clone`, así que la espera se distribuye en frames (poll no-bloqueante
 // por frame).
+#[allow(dead_code)]
 const MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE: usize = 1;
 
 /// Helper de readback asíncrono sin `device.poll(Wait)` bloqueante.
@@ -858,19 +914,19 @@ fn gpu_budget_allows(remaining: usize, required: usize) -> bool {
     remaining.checked_sub(required).is_some()
 }
 
-/// Itera a lo sumo `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` jobs por frame
-/// para garantizar un único readback síncrono como máximo. El readback usa
-/// `Maintain::Poll` (no bloqueante) con timeout (mitigación Wait→Poll en
-/// `grafito-render::sync_readback_with_timeout`); este `take(1)` acota el
-/// bloqueo del hilo de prepare a un intento por frame.
-/// TODO P1 async batch: cuando el batch asíncrono esté listo, este helper
-/// dejará de hacer `take(1)` y pasará a encolar todos los jobs en el batch.
+/// Itera a lo sumo `MAX_GPU_READBACK_JOBS_IN_FLIGHT` dispatches async por
+/// frame (cola multi-slot, cap 4): el caso común de 2-4 objetos GPU avanza
+/// sin abortarse. Los dispatches son `submit` + `map_async` non-blocking
+/// (µs, sin `Wait`); el `take(1)` síncrono legacy sigue acotado por
+/// `MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE` en los paths que aún
+/// bloquean. El plan previo (`gpu_2d_pre_dispatch_plan`) ya prioriza
+/// visibles y acota por `gpu_budget_allows`.
 fn limited_gpu_jobs<I>(iter: I) -> impl Iterator<Item = ObjectId>
 where
     I: IntoIterator<Item = ObjectId>,
 {
     iter.into_iter()
-        .take(MAX_SYNC_GPU_COMPUTE_ATTEMPTS_PER_PREPARE)
+        .take(MAX_GPU_READBACK_JOBS_IN_FLIGHT.max(1))
 }
 
 /// Selects only visible 2D GPU cache evaluations that fit the same per-frame
@@ -1124,11 +1180,11 @@ impl CallbackTrait for CanvasCallback {
         }
         resources.scene_readiness.clear_2d();
 
-        // Frente B6: con un job background en vuelo no se encola más trabajo
-        // GPU (cap 1): este frame construye el fallback CPU
+        // Cola multi-slot (cap 4): se encola mientras haya capacidad; solo
+        // con la cola llena este frame construye el fallback CPU
         // (último-frame-válido, sin flicker negro) y el readiness queda
         // Pending ("calculando…" observable vía `is_computing`).
-        let gpu_busy = resources.gpu_compute_slot.is_pending();
+        let gpu_has_capacity = resources.gpu_compute_slot.has_capacity();
 
         let (vertices, indices, object_ranges) = {
             let Ok(renderer_lock) = resources.renderer.write() else {
@@ -1150,10 +1206,11 @@ impl CallbackTrait for CanvasCallback {
             );
 
             // GPU computing for objects using a single-pass objects_iter.
-            // Con job en vuelo se salta el dispatch (cap 1); Implicit/Function
-            // usan dispatch sin espera (slot background) y el resto mantiene
-            // el path síncrono acotado a 1 intento por frame.
-            if !gpu_busy {
+            // Con capacidad se encolan hasta cap dispatches async (2-4
+            // objetos conviven); Implicit/Function usan dispatch sin espera
+            // (cola background) y el resto mantiene el path síncrono acotado
+            // a 1 intento por frame.
+            if gpu_has_capacity {
                 #[cfg(feature = "profile")]
                 puffin::profile_scope!("gpu_compute_single_pass");
                 let implicit_comp = renderer.implicit_compute.as_ref();
@@ -1375,11 +1432,11 @@ impl CallbackTrait for CanvasCallback {
                 }
 
                 // Frente Ola 3: domain coloring asíncrono (un dispatch por
-                // frame, solo con slot libre). Los colores resuelven al
-                // puente GPU→textura (`domain_grid_ready`); el draw los
+                // frame, solo con capacidad en la cola). Los colores resuelven
+                // al puente GPU→textura (`domain_grid_ready`); el draw los
                 // consume sin walk CPU. Si no compila o excede, se suelta
                 // la key y el draw cae al CPU honesto.
-                if !resources.gpu_compute_slot.is_pending() {
+                if resources.gpu_compute_slot.has_capacity() {
                     for (_, obj) in self.document.objects_iter() {
                         let grafito_core::GeoObject::ComplexGrid(cg) = obj else {
                             continue;
@@ -2833,7 +2890,8 @@ mod tests {
         assert!(!slot.is_computing());
     }
 
-    /// Cap 1: el segundo submit desaloja al viejo (nunca cola infinita) y el
+    /// Cap 4: 2-4 submits conviven sin desalojo (el 2do ya no aborta al 1ro);
+    /// solo al exceder la cap se desaloja el más viejo (FIFO) y el
     /// desalojado se retorna para abortar (`unmap` idempotente).
     #[test]
     fn gpu_compute_slot_caps_one_job_and_evicts_oldest() {
@@ -2841,10 +2899,17 @@ mod tests {
         assert!(slot.submit(10_u32).is_none());
         assert!(slot.is_pending());
         assert!(slot.is_computing());
-        assert_eq!(slot.submit(20_u32), Some(10_u32));
+        // Caso común 2-4: sin desalojo.
+        assert!(slot.submit(20_u32).is_none());
+        assert!(slot.submit(30_u32).is_none());
+        assert!(slot.submit(40_u32).is_none());
+        assert_eq!(slot.len(), 4);
+        assert!(!slot.has_capacity());
+        // Al exceder: desaloja el más viejo (10).
+        assert_eq!(slot.submit(50_u32), Some(10_u32));
         assert_eq!(slot.take(), Some((1, 20_u32)));
-        assert!(!slot.is_pending());
-        assert!(!slot.is_computing());
+        assert!(slot.is_pending());
+        assert!(slot.is_computing());
     }
 
     /// Ciclo take → avance → requeue conserva la generación; el take libera
@@ -2863,13 +2928,21 @@ mod tests {
         assert_eq!(slot.take(), Some((0, 7_u32)));
     }
 
-    /// Re-encolar con el slot ocupado devuelve el job (no se pierde en
-    /// silencio): el llamante debe abortarlo.
+    /// Re-encolar con la cola llena devuelve el job (no se pierde en
+    /// silencio): el llamante debe abortarlo. Con capacidad, re-encola.
     #[test]
     fn gpu_compute_slot_requeue_into_occupied_slot_returns_job() {
         let mut slot = GpuComputeSlot::default();
         slot.submit(1_u32);
-        assert_eq!(slot.requeue(99, 2_u32), Some(2_u32));
+        // Con capacidad: el requeue tiene lugar (cola multi-slot).
+        assert_eq!(slot.requeue(99, 2_u32), None);
         assert_eq!(slot.take(), Some((0, 1_u32)));
+        assert_eq!(slot.take(), Some((99, 2_u32)));
+        // Llena hasta la cap y el requeue extra se devuelve.
+        slot.submit(10_u32);
+        slot.submit(11_u32);
+        slot.submit(12_u32);
+        slot.submit(13_u32);
+        assert_eq!(slot.requeue(99, 99_u32), Some(99_u32));
     }
 }

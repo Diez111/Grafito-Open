@@ -6182,7 +6182,16 @@ fn try_atan_form(expr: &Expr, var: &str) -> Option<Expr> {
 /// Intento genérico por partes `∫u·dv = u·v − ∫v·du`.
 fn try_generic_parts(expr: &Expr, var: &str, depth: u32) -> Option<Expr> {
     use Expr::*;
-    const MAX_PARTS_DEPTH: u32 = 256;
+    // Cota anti-DoS (cuelgue FourierSeries[x^2,x,1,2] 2026-09-26): partes por
+    // partes puede ciclar (∫x²·cos reproduce x²·cos dos niveles después con
+    // otras constantes) y el árbol crece exponencial por nivel — 18 GB antes
+    // de tocar el tope de profundidad. Se aborta con integrando grande: la
+    // ruta numérica (Gauss–Legendre) lo resuelve igual y es el fallback
+    // declarado de `expansion_coefficients`.
+    if format!("{expr:?}").len() > 4096 {
+        return None;
+    }
+    const MAX_PARTS_DEPTH: u32 = 24;
     if depth > MAX_PARTS_DEPTH {
         return None;
     }

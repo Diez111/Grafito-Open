@@ -274,12 +274,24 @@ pub fn fit_params_em(histories: &[Vec<bool>], initial: &BktParams, max_iter: usi
     if capped.is_empty() {
         return initial.clone();
     }
-    let mut params = initial.clone();
-    // Clamp inicial para evitar degenerados
-    params.p_init = params.p_init.clamp(0.05, 0.95);
-    params.p_learn = params.p_learn.clamp(0.05, 0.95);
-    params.p_guess = params.p_guess.clamp(0.05, 0.95);
-    params.p_slip = params.p_slip.clamp(0.05, 0.95);
+    // Sanea el prior: `BktParams` tiene campos `pub` y un struct literal /
+    // `Deserialize` puede traer `NaN`/`inf` sin pasar por `validate()`.
+    // `f64::clamp` NO filtra `NaN` (devuelve `NaN`), así que un `p_init = NaN`
+    // envenenaría todo el forward-backward y el retorno. Mismo contrato que
+    // [`bkt_update`]: no finitos caen a defaults, salida siempre finita.
+    let sanear = |v: f64, defecto: f64| {
+        if v.is_finite() {
+            v.clamp(0.05, 0.95)
+        } else {
+            defecto
+        }
+    };
+    let mut params = BktParams {
+        p_init: sanear(initial.p_init, 0.3),
+        p_learn: sanear(initial.p_learn, 0.3),
+        p_guess: sanear(initial.p_guess, 0.2),
+        p_slip: sanear(initial.p_slip, 0.1),
+    };
 
     let max_iter = max_iter.clamp(1, MAX_EM_ITER);
 
@@ -883,6 +895,42 @@ mod tests {
             auc >= auc_init - 0.02,
             "EM no debe degradar ranking: init={auc_init} fitted={auc}"
         );
+    }
+
+    #[test]
+    fn fit_params_em_prior_nan_no_envenena() {
+        // `BktParams` tiene campos `pub`: un struct literal puede traer
+        // `NaN` sin pasar por `validate()`, y `f64::clamp` NO filtra `NaN`.
+        // El EM saneaba con `clamp` directo y devolvía `NaN` en los 4
+        // parámetros. Ahora rige el contrato gemelo a `bkt_update`.
+        let nan = f64::NAN;
+        let sucio = BktParams {
+            p_init: nan,
+            p_learn: nan,
+            p_guess: nan,
+            p_slip: nan,
+        };
+        let histories = vec![vec![true, false, true], vec![false, false, true]];
+        let fitted = fit_params_em(&histories, &sucio, 10);
+        for (nombre, v) in [
+            ("p_init", fitted.p_init),
+            ("p_learn", fitted.p_learn),
+            ("p_guess", fitted.p_guess),
+            ("p_slip", fitted.p_slip),
+        ] {
+            assert!(v.is_finite(), "{nombre} no finito: {v}");
+            assert!((0.05..=0.95).contains(&v), "{nombre} fuera de rango: {v}");
+        }
+        assert!(fitted.validate().is_ok());
+        // Infinito también cae a defaults finitos.
+        let inf = BktParams {
+            p_init: f64::INFINITY,
+            p_learn: f64::NEG_INFINITY,
+            p_guess: f64::INFINITY,
+            p_slip: f64::NEG_INFINITY,
+        };
+        let fitted_inf = fit_params_em(&histories, &inf, 10);
+        assert!(fitted_inf.validate().is_ok());
     }
 
     #[test]

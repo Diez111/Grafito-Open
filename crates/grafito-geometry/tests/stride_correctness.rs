@@ -125,17 +125,6 @@ fn test_disk_visible_zoom_out_with_stride2() {
     );
 }
 
-#[test]
-fn test_disk_visible_extreme_zoom_out_with_stride2() {
-    // View [-150, 150] x [-100, 100]. El disco es 1/300 del view.
-    let lhs = prepare_function_ast("x^2 + y^2", &BTreeMap::new(), &["x", "y"]).unwrap();
-    let rhs = prepare_function_ast("1", &BTreeMap::new(), &["x", "y"]).unwrap();
-    let segs = scanline_full_count(
-        &lhs, &rhs, false, -150.0, 150.0, -100.0, 100.0, 1000, 600, 2,
-    );
-    let total_segs: usize = segs.iter().map(|s| s.len()).sum();
-    println!("stride=2, zoom out 100x: total segments = {}", total_segs);
-    // dx = 300/1000 = 0.3. Stride en world = 0.6. Disco es 1 = 1.7 strides.
-    // Con solo 1.7 strides, podemos perder el disco (1-2 samples).
-    // El disco puede no detectarse en este caso.
-}
+// NOTE: sin test de zoom-out 100x ([-150,150]): con 1.7 strides de ancho
+// el disco puede no detectarse por diseño y el test anterior no tenía
+// asserts (siempre pasaba).

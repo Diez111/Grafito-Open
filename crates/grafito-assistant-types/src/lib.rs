@@ -35,6 +35,12 @@ pub const REMOTE_FOCUS_PROMPT_PREFIX: &str =
     "\n\nFocused object (use this unless the user asks otherwise):\n";
 /// Bytes reservados para el encabezado remoto de un objeto enfocado.
 pub const REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES: usize = REMOTE_FOCUS_PROMPT_PREFIX.len();
+/// Bytes de los delimitadores `<datos_no_confiables>` que envuelven el resumen
+/// del foco en el prompt remoto (el foco deriva del documento visible y viaja
+/// como DATO, igual que el contexto y la web). Paridad con
+/// `UNTRUSTED_DATA_OPEN`/`UNTRUSTED_DATA_CLOSE` en `grafito-assistant`:
+/// `"<datos_no_confiables>\n".len() + "</datos_no_confiables>\n".len() = 45`.
+pub const REMOTE_FOCUS_UNTRUSTED_OVERHEAD_BYTES: usize = 45;
 /// Tope del texto de instrucciones de plugins inyectado al system prompt.
 pub const MAX_SYSTEM_INSTRUCTIONS_BYTES: usize = 4 * 1024;
 /// Tope del contexto de búsqueda web inyectado al prompt remoto.
@@ -1632,7 +1638,10 @@ impl AssistantRequest {
             .saturating_add(
                 self.focus
                     .as_ref()
-                    .map(|_| REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES)
+                    .map(|_| {
+                        REMOTE_FOCUS_PROMPT_OVERHEAD_BYTES
+                            .saturating_add(REMOTE_FOCUS_UNTRUSTED_OVERHEAD_BYTES)
+                    })
                     .unwrap_or_default(),
             )
             .saturating_add(

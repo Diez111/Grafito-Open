@@ -1,7 +1,7 @@
 //! Contrato MCP punta a punta a nivel `dispatch` (sin spawnear proceso).
 //!
 //! Usa un ledger temporal (`GRAFITO_LAB_LEDGER`) para no ensuciar el real:
-//! initialize → tools/list (6) → search_topp39 → verify → export →
+//! initialize → tools/list (== all_tool_defs) → search_topp39 → verify → export →
 //! resources/read(ledger/run/bounds) → method desconocido (-32601).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -58,8 +58,16 @@ fn contrato_completo_con_ledger_temporal() {
         &limits,
     )
     .unwrap();
-    // 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
-    assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 53);
+    // Total dinámico (sin pineo frágil): tools/list debe coincidir con
+    // all_tool_defs(). Hoy 53 = 9 lab + 37 proxedas + 2 Lean + 2 policy
+    // + 1 GPU + 2 Colab; si el asistente suma una tool, ambos lados crecen.
+    let expected = protocol::all_tool_defs().len();
+    assert!(expected >= 53, "all_tool_defs cayó bajo 53: {expected}");
+    assert_eq!(
+        tools["result"]["tools"].as_array().unwrap().len(),
+        expected,
+        "tools/list drift vs all_tool_defs"
+    );
     let res = protocol::dispatch(
         &json!({"jsonrpc": "2.0", "id": 3, "method": "resources/list", "params": {}}),
         &limits,

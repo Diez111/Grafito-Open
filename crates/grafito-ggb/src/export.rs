@@ -12,6 +12,7 @@
 
 use crate::error::GgbError;
 use crate::map::sanitize_etiqueta;
+use crate::parse::MAX_IO_ATTRS;
 use crate::GGB_XML_NAME;
 use crate::MAX_ELEMS;
 use quick_xml::events::attributes::Attribute;
@@ -330,6 +331,15 @@ pub fn export_ggb_bytes(items: &[GgbExportItem]) -> Result<(Vec<u8>, ExportRepor
                     report
                         .omitidos
                         .push((label, "polígono requiere ≥3 vértices".to_string()));
+                    continue;
+                }
+                // Paridad con el importador (`MAX_IO_ATTRS` en parse.rs):
+                // más vértices emitirían un `<input>` que no re-importa.
+                if vertices.len() > MAX_IO_ATTRS {
+                    report.omitidos.push((
+                        label,
+                        format!("polígono excede {MAX_IO_ATTRS} vértices (tope del importador)"),
+                    ));
                     continue;
                 }
                 if vertices.iter().any(|v| !point_ref_known(&known, v)) {
@@ -787,6 +797,50 @@ mod export_tests {
         assert!(
             valores.iter().filter(|v| v.as_str() == raw).count() >= 2,
             "idéntico tras escapar/des-escapar: {valores:?}"
+        );
+    }
+
+    #[test]
+    fn export_polygon_vertex_cap_matches_importer() {
+        // El importador rechaza `<input>` con más de `MAX_IO_ATTRS` (64)
+        // atributos: sin este tope el export emitiría XML que no re-importa
+        // (rompe la regla de oro "todo lo que exporta debe re-importar").
+        let mut items: Vec<GgbExportItem> = (0..65)
+            .map(|i| GgbExportItem::Point {
+                label: format!("P{i}"),
+                x: i as f64,
+                y: 0.0,
+            })
+            .collect();
+        items.push(GgbExportItem::Polygon {
+            label: "Big".into(),
+            vertices: (0..65).map(|i| format!("P{i}")).collect(),
+        });
+        let (bytes, report) = export_ggb_bytes(&items).expect("exporta");
+        assert!(
+            report.omitidos.iter().any(|(label, _)| label == "Big"),
+            "polígono de 65 vértices debe omitirse honesto: {:?}",
+            report.omitidos
+        );
+        assert_eq!(report.escritos, 65);
+        assert!(!bytes.is_empty());
+        // 64 vértices: roundtrip íntegro (paridad exacta con el tope).
+        let mut items64: Vec<GgbExportItem> = (0..64)
+            .map(|i| GgbExportItem::Point {
+                label: format!("Q{i}"),
+                x: i as f64,
+                y: (i % 8) as f64,
+            })
+            .collect();
+        items64.push(GgbExportItem::Polygon {
+            label: "Q".into(),
+            vertices: (0..64).map(|i| format!("Q{i}")).collect(),
+        });
+        let roundtripped = roundtrip(items64);
+        assert!(
+            roundtripped.objetos.iter().any(|o| o.etiqueta == "Q"),
+            "polígono de 64 vértices debe re-importar: {:?}",
+            roundtripped.objetos
         );
     }
 

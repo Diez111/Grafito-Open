@@ -139,7 +139,8 @@ fn tool_defs() -> Vec<Value> {
     ]
 }
 
-/// Todas las tools: 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+/// Todas las tools: 9 lab (incl. execute_command) + proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
+/// El total exacto lo verifican los tests de forma dinámica (sin pineo frágil).
 pub fn all_tool_defs() -> Vec<Value> {
     let mut defs = tool_defs();
     defs.extend(crate::bridge::proxied_tool_defs());
@@ -444,8 +445,20 @@ mod tests {
             .and_then(|r| r.get("tools"))
             .and_then(Value::as_array)
             .unwrap();
-        // 8 lab + execute + 37 proxedas + 2 Lean + 2 policy + 1 GPU + 2 Colab.
-        assert_eq!(tools.len(), 53);
+        // Total dinámico (sin pineo frágil): 9 lab + proxedas + Lean + policy + GPU + Colab.
+        // Si el asistente suma una tool, el MCP la expone y este assert sigue verde.
+        let expected = tool_defs().len()
+            + crate::bridge::proxied_tool_defs().len()
+            + crate::lean::lean_tool_defs().len()
+            + crate::policy::policy_tool_defs().len()
+            + crate::gpu::gpu_tool_defs().len()
+            + crate::colab::colab_tool_defs().len();
+        assert!(
+            tool_defs().len() >= 9,
+            "tool_defs lab cayó bajo 9: {}",
+            tool_defs().len()
+        );
+        assert_eq!(tools.len(), expected, "tools/list drift vs all_tool_defs");
         // Notificaciones no responden.
         assert!(dispatch(
             &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),

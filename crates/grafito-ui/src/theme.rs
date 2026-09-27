@@ -203,6 +203,10 @@ impl Theme {
     /// Rótulo de canvas con halo opaco (`canvas_bg`): legible sobre curvas,
     /// grilla y widgets que lo crucen (etiqueta de función sobre slider).
     /// Sin halo los textos se funden con lo que pisan. Retorna el rect.
+    /// El layout sale de la caché por contexto (patrón `label_galley_shared`
+    /// de `render_2d.rs`, acá con `HashMap` + desalojo total por no tener
+    /// `lru` en `grafito-ui`): mismo `FontId`/color ⇒ mismo píxel, sin
+    /// re-resolver por frame en paneles con texto dinámico denso.
     pub fn paint_canvas_text(
         &self,
         painter: &egui::Painter,
@@ -212,7 +216,7 @@ impl Theme {
         font_id: egui::FontId,
         color: egui::Color32,
     ) -> egui::Rect {
-        let galley = painter.layout_no_wrap(text.to_owned(), font_id, color);
+        let galley = theme_galley_shared(painter, text, font_id, color);
         let rect = anchor
             .anchor_rect(egui::Rect::from_min_size(pos, galley.size()))
             .expand(2.0);
@@ -340,6 +344,79 @@ pub fn current_theme(ctx: &Context) -> &'static Theme {
     } else {
         &LIGHT
     }
+}
+
+// ── Caché de Galleys por contexto (patrón `label_galley_shared`) ──────────
+// `paint_canvas_text` resolvía layout por frame; los textos repetidos de
+// paneles densos comparten ahora el `Arc<Galley>` por (texto, fuente, color).
+// Sin `lru` en `grafito-ui` (sin dependencias nuevas): `HashMap` acotada con
+// desalojo total al llenar, viva en el `ctx` (`get_persisted`, una por
+// contexto). Visual idéntico: misma `FontId` y color que el camino directo.
+/// Tope de galleys cacheados por contexto (desalojo total al llenar).
+const THEME_GALLEY_CACHE_MAX: usize = 128;
+
+/// Clave de galley: texto + familia/tamaño + color (un cambio de color es
+/// miss, no aliasing; el color va horneado en el galley).
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct ThemeGalleyKey {
+    text: String,
+    family_tag: u8,
+    size_bits: u32,
+    color: u32,
+}
+
+#[derive(Clone, Default)]
+struct ThemeGalleyCache {
+    entradas: std::collections::HashMap<ThemeGalleyKey, std::sync::Arc<egui::Galley>>,
+}
+
+fn theme_galley_cache_id() -> egui::Id {
+    egui::Id::new("grafito_theme_galleys")
+}
+
+fn theme_font_key(font_id: &egui::FontId) -> (u8, u32) {
+    let family_tag = match font_id.family {
+        egui::FontFamily::Proportional => 0,
+        egui::FontFamily::Monospace => 1,
+        _ => 2,
+    };
+    (family_tag, font_id.size.to_bits())
+}
+
+/// Galley compartido por contexto para `paint_canvas_text`. En hit no se
+/// clona el `String` ni se re-resuelve el layout.
+fn theme_galley_shared(
+    painter: &egui::Painter,
+    text: &str,
+    font_id: egui::FontId,
+    color: Color32,
+) -> std::sync::Arc<egui::Galley> {
+    let (family_tag, size_bits) = theme_font_key(&font_id);
+    let key = ThemeGalleyKey {
+        text: text.to_owned(),
+        family_tag,
+        size_bits,
+        color: u32::from_be_bytes([color.r(), color.g(), color.b(), color.a()]),
+    };
+    let ctx = painter.ctx().clone();
+    if let Some(hit) = ctx.data_mut(|mapa| {
+        mapa.get_persisted::<ThemeGalleyCache>(theme_galley_cache_id())
+            .and_then(|caché| caché.entradas.get(&key).cloned())
+    }) {
+        return hit;
+    }
+    let galley = painter.layout_no_wrap(text.to_owned(), font_id, color);
+    ctx.data_mut(|mapa| {
+        let mut caché = mapa
+            .get_persisted::<ThemeGalleyCache>(theme_galley_cache_id())
+            .unwrap_or_default();
+        if caché.entradas.len() >= THEME_GALLEY_CACHE_MAX {
+            caché.entradas.clear();
+        }
+        caché.entradas.insert(key, galley.clone());
+        mapa.insert_persisted(theme_galley_cache_id(), caché);
+    });
+    galley
 }
 
 /// Tema oscuro — Scandinavian: canvas #0A0A0A, panel carbón cálido, separator #E8E8E6 10% alpha (opaco).

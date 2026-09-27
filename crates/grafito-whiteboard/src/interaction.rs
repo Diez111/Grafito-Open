@@ -14,6 +14,12 @@ pub enum WhiteboardTool {
     Eraser,
 }
 
+/// Cota del trazo de borrado (anti-DoS): `update` ignora los puntos más allá.
+/// Igual que el cap de puntos por trazo de la UI (`whiteboard_ui.rs:34`,
+/// `MAX_WHITEBOARD_POINTS_PER_STROKE = 4096`); un arrastre eterno no crece
+/// sin cota en memoria. `take_erase_path` sigue exigiendo ≥2 puntos.
+pub const MAX_ERASE_PATH_POINTS: usize = 4096;
+
 /// Estado del arrastre del puntero.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum WhiteboardInteraction {
@@ -44,7 +50,11 @@ impl WhiteboardInteraction {
     pub fn update(&mut self, point: (f64, f64)) {
         match self {
             Self::Creating { current, .. } => *current = point,
-            Self::Erasing { path } => path.push(point),
+            Self::Erasing { path } => {
+                if path.len() < MAX_ERASE_PATH_POINTS {
+                    path.push(point);
+                }
+            }
             Self::Idle => {}
         }
     }
@@ -170,6 +180,16 @@ mod tests {
         let mut eraser = WhiteboardInteraction::begin((0.0, 0.0), WhiteboardTool::Eraser);
         eraser.update((1.0, 0.0));
         assert!(eraser.take_erase_path().is_some());
+    }
+
+    #[test]
+    fn eraser_path_is_bounded() {
+        let mut eraser = WhiteboardInteraction::begin((0.0, 0.0), WhiteboardTool::Eraser);
+        for index in 0..(MAX_ERASE_PATH_POINTS + 500) {
+            eraser.update((index as f64, 0.0));
+        }
+        let path = eraser.take_erase_path().expect("sigue útil con la cota");
+        assert_eq!(path.len(), MAX_ERASE_PATH_POINTS);
     }
 
     #[test]

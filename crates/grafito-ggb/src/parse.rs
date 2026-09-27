@@ -5,7 +5,11 @@ use crate::{MAX_ATTR_BYTES, MAX_ELEMS, MAX_XML_ATTRS_PER_ELEMENT, MAX_XML_DEPTH}
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
-const MAX_IO_ATTRS: usize = 64;
+/// Tope de atributos `a*` por `<input>`/`<output>` (anti-quadratic-blowup).
+/// Lo usa también el exportador como tope de vértices de `Polygon`: sin
+/// paridad, el export emitiría XML que el importador rechaza y rompería la
+/// regla de oro "todo lo que exporta debe re-importar".
+pub(crate) const MAX_IO_ATTRS: usize = 64;
 fn es_celda_hoja(etiqueta: &str) -> bool {
     let bytes = etiqueta.as_bytes();
     if bytes.len() < 2 || bytes.len() > 6 {

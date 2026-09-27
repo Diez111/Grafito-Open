@@ -67,7 +67,7 @@ pub use transport::{
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Límite de nombres en el dashboard (coherente con `MAX_OBJECT_COUNT 5000`).
 pub const MAX_DASHBOARD_NAMES: usize = 5_000;
@@ -91,7 +91,9 @@ pub struct LearnerSnapshot {
     pub bkt_p_known: f64,
     /// Conteo por misconception (`sign`, `fraction`, `chain_rule`...). Valores
     /// `usize` (no `u8`) para agregación sin saturar rápido.
-    pub misconception_counts: HashMap<String, usize>,
+    /// `BTreeMap` a propósito (no `HashMap`): el orden de serialización es
+    /// determinista (claves ordenadas), igual que `roster`/CRDT/perfil.
+    pub misconception_counts: BTreeMap<String, usize>,
     /// Ramas con repaso vencido (`next_review_epoch <= now`) para este alumno.
     /// `0` si no se dispone. Si hay dato, el dashboard lo suma; si no,
     /// lo infiere por `bkt_p_known < 0.6`.
@@ -105,7 +107,7 @@ impl LearnerSnapshot {
         Self {
             name: name.into(),
             bkt_p_known: sanitize_bkt(bkt_p_known),
-            misconception_counts: HashMap::new(),
+            misconception_counts: BTreeMap::new(),
             branches_due: 0,
         }
     }
@@ -131,8 +133,8 @@ impl LearnerSnapshot {
 
     /// Builder: reemplaza `misconception_counts` completo (claves normalizadas).
     #[must_use]
-    pub fn with_counts(mut self, counts: HashMap<String, usize>) -> Self {
-        let mut normalized = HashMap::new();
+    pub fn with_counts(mut self, counts: BTreeMap<String, usize>) -> Self {
+        let mut normalized = BTreeMap::new();
         for (k, v) in counts {
             let key = normalize_misconception_key(&k);
             if key.is_empty() || v == 0 {
@@ -176,7 +178,7 @@ impl LearnerSnapshot {
         } else {
             0.3
         };
-        let mut counts = HashMap::new();
+        let mut counts = BTreeMap::new();
         for (key, value) in &profile.working_memory.misconception_counts {
             if *value == 0 {
                 continue;
@@ -203,7 +205,7 @@ impl Default for LearnerSnapshot {
         Self {
             name: "Estudiante".to_string(),
             bkt_p_known: 0.3,
-            misconception_counts: HashMap::new(),
+            misconception_counts: BTreeMap::new(),
             branches_due: 0,
         }
     }
@@ -300,7 +302,7 @@ impl TeacherDashboard {
     /// - `bkt_summary = [(name, bkt) ...]` orden alfabético, cap 128.
     /// - `branches_due = sum(snapshot.branches_due)` si alguno >0, si no
     ///   `count(bkt < 0.6)` como inferencia de “vencidas”.
-    /// - `top_misconceptions = agregación HashMap<String,usize>` por
+    /// - `top_misconceptions = agregación BTreeMap<String,usize>` por
     ///   `misconception_counts` (claves normalizadas lowercase) → sort
     ///   `count desc, key asc` → cap 32.
     #[allow(clippy::too_many_arguments)]
@@ -361,7 +363,7 @@ impl TeacherDashboard {
         }
 
         // top_misconceptions: agregación.
-        let mut agg: HashMap<String, usize> = HashMap::new();
+        let mut agg: BTreeMap<String, usize> = BTreeMap::new();
         for p in profiles {
             for (k, v) in &p.misconception_counts {
                 let key = normalize_misconception_key(k);
@@ -523,7 +525,7 @@ fn normalize_misconception_key(k: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     // ── 8 tests de compat (asistencia) ─────────────────────────────────────
 
@@ -748,14 +750,14 @@ mod tests {
 
     #[test]
     fn dashboard_extended_top_misconception_agregado() {
-        let mut c1 = HashMap::new();
+        let mut c1 = BTreeMap::new();
         c1.insert("sign".to_string(), 2);
         c1.insert("fraction".to_string(), 1);
-        let mut c2 = HashMap::new();
+        let mut c2 = BTreeMap::new();
         c2.insert("sign".to_string(), 1);
         c2.insert("Sign".to_string(), 1); // debe normalizar a "sign"
         c2.insert("chain_rule".to_string(), 3);
-        let mut c3 = HashMap::new();
+        let mut c3 = BTreeMap::new();
         c3.insert("fraction".to_string(), 2);
         c3.insert("distributive".to_string(), 1);
 
@@ -872,6 +874,28 @@ mod tests {
 
         let s2 = LearnerSnapshot::new("Bob", 0.4).with_branches_due(3);
         assert_eq!(s2.branches_due, 3);
+    }
+
+    #[test]
+    fn learner_snapshot_serialization_is_deterministic() {
+        // Regresión auditoría: `misconception_counts` era `HashMap` y el JSON
+        // persistido salía en orden aleatorio (digests/snapshots inestables).
+        // Con `BTreeMap` las claves van ordenadas siempre.
+        let mut counts = BTreeMap::new();
+        counts.insert("sign".to_string(), 2);
+        counts.insert("fraction".to_string(), 1);
+        counts.insert("chain_rule".to_string(), 3);
+        let snapshot = LearnerSnapshot::new("Ana", 0.5).with_counts(counts);
+        let first = serde_json::to_string(&snapshot).expect("serialize");
+        let second = serde_json::to_string(&snapshot).expect("serialize");
+        assert_eq!(first, second);
+        let chain = first.find("chain_rule").expect("chain_rule");
+        let fraction = first.find("fraction").expect("fraction");
+        let sign = first.find("\"sign\"").expect("sign");
+        assert!(
+            chain < fraction && fraction < sign,
+            "claves ordenadas en el JSON: {first}"
+        );
     }
 
     #[test]

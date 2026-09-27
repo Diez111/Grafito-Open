@@ -30,8 +30,9 @@
 //!   Ambos paths (síncrono legacy y dispatch asíncrono) usan la regla única
 //!   de [`effective_readback_timeout`] cuando `GRAFITO_REQUIRE_GPU_TESTS`
 //!   está seteada (CI sobre lavapipe).
-//! - [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]: 1. Si llega otro job, se descarta el
-//!   viejo por generación: nunca hay cola infinita.
+//! - [`MAX_GPU_READBACK_JOBS_IN_FLIGHT`]: 4. Hasta 4 jobs conviven en la
+//!   cola multi-slot; solo al exceder se descarta el más viejo por
+//!   generación: nunca hay cola infinita.
 //!
 //! Cancelación honesta: cancelar = descartar por generación/key + `unmap` del
 //! buffer implicado (idempotente, no-op si el map sigue pendiente).
@@ -96,9 +97,11 @@ pub(crate) fn coverage_is_required() -> bool {
         .is_some_and(|value| value != "0" && value != "false")
 }
 
-/// Cap de jobs de readback en vuelo: 1. Un segundo dispatch descarta el viejo
-/// por generación en vez de encolar (nunca cola infinita).
-pub const MAX_GPU_READBACK_JOBS_IN_FLIGHT: usize = 1;
+/// Cap de jobs de readback en vuelo: 4. Hasta 4 dispatches conviven en la
+/// cola multi-slot (`GpuComputeSlot` en canvas.rs); solo al exceder se
+/// descarta el más viejo por generación (nunca cola infinita). Cubre el caso
+/// común de 2-4 objetos GPU sin que el 2do aborte al 1ro.
+pub const MAX_GPU_READBACK_JOBS_IN_FLIGHT: usize = 4;
 
 /// Resultado non-blocking de [`PendingGpuReadback::poll`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -266,11 +269,12 @@ mod tests {
         assert_eq!(pending.poll(), ReadbackPoll::Failed);
     }
 
-    /// El cap es 1 por diseño: el slot (`canvas.rs`) reemplaza por generación
-    /// en vez de encolar; aquí se fija el origen del presupuesto.
+    /// El cap es 4 por diseño: la cola (`canvas.rs`) encola hasta 4 y solo
+    /// al exceder desaloja el más viejo por generación; aquí el origen del
+    /// presupuesto.
     #[test]
     fn in_flight_cap_is_one_by_budget() {
-        assert_eq!(MAX_GPU_READBACK_JOBS_IN_FLIGHT, 1);
+        assert_eq!(MAX_GPU_READBACK_JOBS_IN_FLIGHT, 4);
         assert_eq!(GPU_READBACK_TIMEOUT, Duration::from_millis(250));
     }
 

@@ -107,7 +107,7 @@ impl HsvColorPicker {
             ui.set_max_width(w);
             let _ = self.show_value_slider(ui, w);
         });
-        ui.add_space(14.0);
+        ui.add_space(crate::tokens::OVERLAY_CARD_MARGIN);
         let favorites_outcome = self.show_favorites(ui, favorites);
 
         ColorPickerOutcome {
@@ -415,7 +415,7 @@ impl HsvColorPicker {
         response.on_hover_text("Clic en 'Original' para restaurar");
 
         // Etiquetas
-        ui.add_space(2.0);
+        ui.add_space(crate::tokens::SPACE_XXS);
         ui.horizontal(|ui| {
             let half_w = width / 2.0;
             ui.allocate_ui(Vec2::new(half_w, 16.0), |ui| {

@@ -308,6 +308,15 @@ impl TeachingStep {
     }
 }
 
+/// Tope de una expresión matemática simple en **bytes** (no chars).
+///
+/// Paridad con `grafito-anim::guion::MATH_EXPR_MAX_BYTES` (mismo valor, misma
+/// unidad): el pre-gate del guion y este CAS-gate deben medir igual para que
+/// una expresión que pasa uno no caiga en el otro por el contador. Con texto
+/// multibyte (`²`, `√`, `π`) `len()` (bytes) es más estricto que contar chars,
+/// del lado seguro.
+pub const MATH_EXPR_MAX_BYTES: usize = 200;
+
 /// CAS-gate puro: ¿`expr` es una expresión computable (no prosa matemática)?
 ///
 /// Valida vía geometry `prepare_function_ast` (mismo parser del canvas: la
@@ -343,7 +352,7 @@ pub fn verify_math_expr(expr: &str) -> bool {
 /// Expresión simple sin `=` (CAS-gate estricto, mismo parser del canvas).
 fn verify_expr_sencilla(text: &str) -> bool {
     let text = text.trim();
-    if text.is_empty() || text.len() > 200 {
+    if text.is_empty() || text.len() > MATH_EXPR_MAX_BYTES {
         return false;
     }
     if text.contains(['=', '∫', 'Σ', '→', ';', '\n']) {
@@ -1064,6 +1073,25 @@ mod tests {
                 "{topic:?} quedó sin ninguna math_expr verificada"
             );
         }
+    }
+
+    #[test]
+    fn tope_math_expr_en_bytes_con_paridad_anim() {
+        // El tope es en BYTES (paridad con `grafito-anim::MATH_EXPR_MAX_BYTES`):
+        // 200 `x` (200 bytes) pasa, 201 `x` no. Y lo multibyte mide en bytes:
+        // 100 `é` son 200 bytes (pasa) pero 101 `é` son 202 bytes (no pasa,
+        // aunque sean solo 101 chars). Si esto fuese en chars, 101 chars
+        // pasarían y el pre-gate del guion (bytes) las voltearía después.
+        assert_eq!(MATH_EXPR_MAX_BYTES, 200);
+        assert_eq!(
+            MATH_EXPR_MAX_BYTES,
+            grafito_anim::guion::MATH_EXPR_MAX_BYTES,
+            "paridad de tope y unidad con el gate de anim"
+        );
+        assert!(verify_math_expr(&"x".repeat(200)));
+        assert!(!verify_math_expr(&"x".repeat(201)));
+        assert!(verify_math_expr(&"é".repeat(100)));
+        assert!(!verify_math_expr(&"é".repeat(101)));
     }
 
     #[test]

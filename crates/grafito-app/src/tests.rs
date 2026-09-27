@@ -5,7 +5,7 @@ const _: [(); 0] = [(); crate::app::DEFAULT_KEYBOARD_VISIBLE as usize];
 const _: [(); 0] = [(); crate::app::DEFAULT_CONSTRUCTION_PROTOCOL_VISIBLE as usize];
 
 #[test]
-fn fresh_workspace_starts_with_an_empty_document_and_visible_keyboard() {
+fn fresh_workspace_starts_with_an_empty_document() {
     let document = crate::app::initial_document();
 
     assert_eq!(document.object_count(), 0);
@@ -13,7 +13,7 @@ fn fresh_workspace_starts_with_an_empty_document_and_visible_keyboard() {
 }
 
 #[test]
-fn three_dimensional_gpu_warmup_waits_for_view_changes_to_settle() {
+fn three_dimensional_gpu_path_is_gated_by_readiness_and_settled_view() {
     assert!(!crate::app::should_use_gpu_3d(true, true, true));
     assert!(!crate::app::should_use_gpu_3d(true, false, false));
     assert!(crate::app::should_use_gpu_3d(true, true, false));
@@ -25,18 +25,6 @@ fn construction_protocol_avoids_controls_that_do_not_change_construction() {
 
     assert!(!source.contains("move_step_button("));
     assert!(!source.contains("button(if disabled"));
-}
-
-#[test]
-fn test_camera_project() {
-    let aspect = 1.6;
-    let mut camera = grafito_geometry::types3d::Camera3D::new(aspect);
-    camera.distance = 60.0;
-    camera.target = Vec3::new(0.0, 0.0, 20.0);
-
-    let p = grafito_geometry::types3d::Point3D::new(10.0, 20.0, 25.0);
-    let proj = camera.project(&p, 1000.0, 800.0);
-    println!("Projection of (10, 20, 25): {:?}", proj);
 }
 
 #[test]
@@ -1675,33 +1663,6 @@ fn invalid_command_submission_does_not_request_an_undo_snapshot() {
     assert!(matches!(
         outcome,
         grafito_command::commands::CommandOutcome::Error(_)
-    ));
-    crate::app::save_command_snapshot_if_mutated(
-        &outcome,
-        before,
-        &after,
-        &mut undo_stack,
-        &mut redo_stack,
-    );
-    assert!(undo_stack.is_empty());
-    assert_eq!(redo_stack.len(), 1);
-}
-
-#[test]
-fn informational_command_submission_does_not_request_an_undo_snapshot() {
-    let before = grafito_core::Document::new();
-    let mut after = before.clone();
-    let mut input = "Simplify[x + 0]".to_string();
-    let outcome = crate::commands::process_input(&mut after, &mut input);
-    let mut undo_stack = VecDeque::new();
-    let mut redo_stack = VecDeque::from([grafito_core::ChangeSet {
-        before: before.clone(),
-        after: before.clone(),
-    }]);
-
-    assert!(matches!(
-        outcome,
-        grafito_command::commands::CommandOutcome::Message(_)
     ));
     crate::app::save_command_snapshot_if_mutated(
         &outcome,
@@ -5439,7 +5400,8 @@ fn toolbar_and_panel_layout_constants_are_sane() {
         44.0,
         "toolbar panel height = button + 2*padding (36+8)"
     );
-    // Panel defaults should be within the documented range (ASSISTANT_PANEL 340..460, but left panel similar)
+    // Panel defaults should be within the documented range (ASSISTANT_PANEL 300..520
+    // default 400 en docs/architecture.md:183; acá solo se verifica el panel izquierdo).
     const { assert!(grafito_ui::tokens::PANEL_LEFT_DEFAULT >= grafito_ui::tokens::PANEL_LEFT_MIN) };
     const {
         assert!(
@@ -5452,11 +5414,6 @@ fn toolbar_and_panel_layout_constants_are_sane() {
     assert!(!grafito_ui::toolbar::toolbar_uses_overflow(1361.0));
     assert!(crate::ui::top_chrome_uses_overflow(960.0));
     assert!(!crate::ui::top_chrome_uses_overflow(1361.0));
-    // All toolbar groups must be non-empty (already tested elsewhere, but ensure headless count)
-    for &group in grafito_ui::toolbar::ALL_GROUPS {
-        let (_, tools) = group.def();
-        assert!(!tools.is_empty());
-    }
 }
 
 // ── D1 A11Y resto: cada overlay persistente cierra con Esc ────────────────

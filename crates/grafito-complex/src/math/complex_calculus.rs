@@ -298,7 +298,9 @@ impl ContourAccumulator {
         if previous == z {
             return Ok(());
         }
-        if self.segments >= MAX_CONTOUR_POINTS {
+        // Paridad con `contour_integral` (puntos ≤ MAX_CONTOUR_POINTS): antes
+        // del push ya hay `segments + 1` puntos; el nuevo sería `segments + 2`.
+        if self.segments + 1 >= MAX_CONTOUR_POINTS {
             return Err(format!(
                 "contour too large: {} segments > {MAX_CONTOUR_POINTS}",
                 self.segments
@@ -619,6 +621,33 @@ mod coverage_sweep_calculus {
         let out = resample_path(&degenerate, 3);
         assert_eq!(out.len(), 2);
         assert!(out.iter().all(|z| is_finite(*z)));
+    }
+
+    #[test]
+    fn acumulador_respeta_tope_max_contour_points() {
+        // Paridad con `contour_integral` (puntos ≤ MAX_CONTOUR_POINTS): el
+        // acumulador acepta hasta 10 000 puntos (= 9999 segmentos) y rechaza
+        // el siguiente (antes permitía 10 001 puntos: off-by-one).
+        let vars = HashMap::new();
+        let e = expr("z");
+        let mut accumulator = ContourAccumulator::new(e, "z", vars.clone());
+        for i in 0..MAX_CONTOUR_POINTS {
+            accumulator
+                .push(Complex64::new(i as f64, 0.0))
+                .expect("bajo el tope");
+        }
+        assert_eq!(accumulator.segments(), MAX_CONTOUR_POINTS - 1);
+        assert!(accumulator
+            .push(Complex64::new(MAX_CONTOUR_POINTS as f64, 0.0))
+            .is_err());
+        // La integral completa acepta exactamente el mismo tope.
+        let path: Vec<Complex64> = (0..MAX_CONTOUR_POINTS)
+            .map(|i| Complex64::new(i as f64 / MAX_CONTOUR_POINTS as f64, 0.0))
+            .collect();
+        assert!(contour_integral(&expr("z"), &path, &vars, "z").is_ok());
+        let mut too_long = path.clone();
+        too_long.push(Complex64::new(2.0, 0.0));
+        assert!(contour_integral(&expr("z"), &too_long, &vars, "z").is_err());
     }
 
     #[test]

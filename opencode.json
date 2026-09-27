@@ -10,7 +10,7 @@
   },
   "formatter": true,
   "lsp": true,
-  "plugin": ["opencode-mem"],
+  "plugin": [],
   "server": {
     "port": 4096,
     "hostname": "0.0.0.0",
@@ -138,9 +138,9 @@
     },
     "grafito-mcp": {
       "type": "local",
-      "command": ["cargo", "run", "-p", "grafito-mcp", "--offline"],
+      "command": ["/home/diez/Documentos/github/Grafito-Open/target/debug/grafito-mcp"],
       "enabled": true,
-      "timeout": 30000
+      "timeout": 60000
     }
   },
   "provider": {

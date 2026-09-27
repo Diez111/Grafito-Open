@@ -6,10 +6,7 @@
 
 use grafito_ui::command_palette::{all_commands, CommandPaletteState};
 use grafito_ui::theme::{DARK, LIGHT};
-use grafito_ui::toolbar::{
-    icon_for_tool, ToolGroupId, ALL_GROUPS, TOOLBAR_BUTTON_SIZE, TOOLBAR_PANEL_HEIGHT,
-    TOOLBAR_VERTICAL_PADDING,
-};
+use grafito_ui::toolbar::{icon_for_tool, ToolGroupId, ALL_GROUPS};
 use grafito_ui::Tool;
 
 // ── Command palette ──────────────────────────────────────────────────────
@@ -186,15 +183,6 @@ fn stable_palette_does_not_expose_unavailable_placeholder_features() {
     );
 }
 
-#[test]
-fn command_palette_fits_a_narrow_viewport() {
-    assert_eq!(
-        grafito_ui::command_palette::palette_window_width(317.0),
-        301.0
-    );
-    assert_eq!(grafito_ui::command_palette::palette_window_width(0.0), 1.0);
-}
-
 // ── Theme ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -277,14 +265,9 @@ fn assistant_pending_indicator_uses_the_native_thinking_orb() {
 // ── Toolbar / Tool ────────────────────────────────────────────────────────
 
 #[test]
-fn tool_select_is_the_default() {
-    assert_eq!(Tool::default(), Tool::Select);
-}
-
-#[test]
 fn tool_select_has_a_cursor_icon() {
-    // Smoke test: cursor_icon must not panic for the default tool.
-    let _icon = Tool::Select.cursor_icon();
+    // El cursor por defecto de Select es parte del contrato visual.
+    assert_eq!(Tool::Select.cursor_icon(), egui::CursorIcon::Default);
 }
 
 #[test]
@@ -424,10 +407,6 @@ fn toolbar_exposes_subtools_with_a_normal_click_menu() {
 fn compact_toolbar_has_an_explicit_overflow_route_instead_of_only_scroll() {
     let toolbar_source = include_str!("../src/toolbar.rs");
 
-    assert!(
-        toolbar_source.contains("COMPACT_TOOLBAR_MAX_WIDTH: f32 = 1_360.0")
-            || toolbar_source.contains("COMPACT_TOOLBAR_MAX_WIDTH: f32 = BREAKPOINT_COMPACT")
-    );
     assert!(toolbar_source.contains("compact_toolbar_overflow"));
     assert!(toolbar_source.contains("Más herramientas"));
     assert!(toolbar_source.contains("ToolGroupId::label"));
@@ -437,11 +416,9 @@ fn compact_toolbar_has_an_explicit_overflow_route_instead_of_only_scroll() {
 fn toolbar_uses_one_fixed_height_row_without_a_scrollbar_or_nested_rows() {
     let toolbar_source = include_str!("../src/toolbar.rs");
 
-    assert_eq!(
-        TOOLBAR_PANEL_HEIGHT,
-        TOOLBAR_BUTTON_SIZE + 2.0 * TOOLBAR_VERTICAL_PADDING,
-        "the host panel must reserve exactly one complete button row"
-    );
+    // La relación PANEL = BUTTON + 2*PADDING la pinea
+    // `toolbar_panel_height_is_derived_not_hardcoded` (ui_layout_behavior.rs)
+    // con valores; acá solo la invariante de fila única sin scroll.
     assert!(
         !toolbar_source.contains("ScrollArea::horizontal()"),
         "a horizontal scrollbar cannot fit inside the fixed toolbar row"

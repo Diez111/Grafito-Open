@@ -43,6 +43,10 @@ harness = false
 name = "lighting_cache"
 harness = false
 
+[[bench]]
+name = "cache_keys"
+harness = false
+
 [lints]
 workspace = true
 

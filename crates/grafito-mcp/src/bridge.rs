@@ -1,6 +1,6 @@
 //! Puente hacia el cerebro completo de Grafito (sin duplicar lógica).
 //!
-//! - **Proxy**: las 37 tools puras de `grafito-assistant` (`all_safe_tool_schemas`
+//! - **Proxy**: las tools puras de `grafito-assistant` (`all_safe_tool_schemas`
 //!   menos el harness-2 viejo y `web_search`) se re-exportan tal cual y se
 //!   despachan por `SafeGrafitoDispatcher`. Paridad para siempre: si el
 //!   asistente suma una tool, el MCP la expone sin tocar este crate.
@@ -27,7 +27,9 @@ fn is_excluded(name: &str) -> bool {
     )
 }
 
-/// Definiciones MCP de las tools proxedas (37: 3 base + 8 pedag + 24 math + 2 harness1).
+/// Definiciones MCP de las tools proxedas (3 base + 8 pedag + 24 math + 2 harness1;
+/// el harness-2 viejo y `web_search` los sirve el MCP o se excluyen).
+/// El conteo exacto lo verifica el test de forma dinámica.
 pub fn proxied_tool_defs() -> Vec<Value> {
     grafito_assistant::agent::all_safe_tool_schemas()
         .iter()
@@ -249,13 +251,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn proxy_cubre_37_tools_y_excluye_2_mas_web() {
+    fn proxy_cubre_proxedas_y_excluye_harness2_mas_web() {
         let defs = proxied_tool_defs();
         let names: Vec<&str> = defs
             .iter()
             .filter_map(|d| d.get("name").and_then(Value::as_str))
             .collect();
-        assert_eq!(defs.len(), 37, "nombres: {names:?}");
+        // Dinámico (sin pineo frágil): todo all_safe menos los excluidos
+        // presentes. Hoy: 39 - 2 (search_topp39, export_dimacs; web_search
+        // ni está en all_safe) = 37, pero si el asistente suma tools el
+        // assert sigue verde.
+        let all = grafito_assistant::agent::all_safe_tool_schemas();
+        let excluded_present = all.iter().filter(|s| super::is_excluded(&s.name)).count();
+        assert_eq!(
+            defs.len(),
+            all.len() - excluded_present,
+            "proxy drift vs all_safe_tool_schemas"
+        );
         assert!(!names.contains(&"search_topp39"));
         assert!(!names.contains(&"export_dimacs"));
         assert!(!names.contains(&"web_search"));

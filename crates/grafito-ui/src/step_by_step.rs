@@ -498,7 +498,9 @@ mod tests {
         let card = StepByStepCardState::from_cas_steps("Derivative[x^2, x]", &steps);
         let fence = card.to_code_block();
         assert!(fence.starts_with("```grafito-steps\n"));
-        let parsed = StepByStepCardState::from_code_block(&fence).expect("parsea su propio fence");
+        let Some(parsed) = StepByStepCardState::from_code_block(&fence) else {
+            panic!("parsea su propio fence");
+        };
         assert_eq!(parsed.title, "Derivative[x^2, x]");
         assert_eq!(parsed.steps.len(), 2);
         assert_eq!(parsed.steps[0].rule, "PowerRule");
@@ -515,7 +517,9 @@ mod tests {
             ));
         }
         fence.push_str("```");
-        let card = StepByStepCardState::from_code_block(&fence).expect("fence largo parsea");
+        let Some(card) = StepByStepCardState::from_code_block(&fence) else {
+            panic!("fence largo parsea");
+        };
         assert_eq!(card.steps.len(), MAX_CAS_STEPS);
     }
 

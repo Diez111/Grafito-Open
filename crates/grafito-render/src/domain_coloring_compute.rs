@@ -637,7 +637,7 @@ impl DomainColoringComputePipeline {
     /// Path síncrono legacy (bloquea hasta 250 ms): solo para callers sin slot
     /// background. El prepare usa `dispatch` + `resolve_eval`.
     ///
-    /// FIX 4: grids sobre [`MAX_CELLS`] se tilan en bandas de ≤250k celdas
+    /// FIX 4: grids sobre `MAX_CELLS` se tilan en bandas de ≤250k celdas
     /// (loop secuencial: cada banda hace submit + poll + copia antes de la
     /// siguiente, seguro con los buffers compartidos) en vez de devolver
     /// `None` hacia un fallback CPU silencioso de 360k celdas. El `dispatch`

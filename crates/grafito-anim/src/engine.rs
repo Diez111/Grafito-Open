@@ -8,7 +8,7 @@ use crate::protocol::{
     MAX_WORKER_MESSAGE_LEN,
 };
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
@@ -186,6 +186,25 @@ impl AnimJobState {
     }
     pub fn can_submit(&self) -> bool {
         matches!(self, Self::Ready)
+    }
+    /// Deadline absoluta del estado, si tiene (`AwaitingHello`/`AwaitingPong`/
+    /// `Running`/`ShuttingDown`). Las terminales y las sin reloj devuelven
+    /// `None`. Los relojes se escribían pero nadie los leía (solo los
+    /// locales de `wait_ready`/`run_job`): este accesor + [`Self::is_expired`]
+    /// los hacen chequeables también por la vía manual
+    /// (`spawn`/`wait_ready`/`submit`/`recv_event`).
+    pub fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::AwaitingHello { deadline }
+            | Self::AwaitingPong { deadline }
+            | Self::Running { deadline, .. }
+            | Self::ShuttingDown { deadline } => Some(*deadline),
+            _ => None,
+        }
+    }
+    /// ¿El reloj del estado ya venció? Los sin reloj (`None`) nunca vencen.
+    pub fn is_expired(&self) -> bool {
+        self.deadline().is_some_and(|d| Instant::now() >= d)
     }
 }
 
@@ -400,7 +419,11 @@ impl AnimEngine {
         let diagnostics = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         spawn_reader(stdout, sender, config.line_cap_bytes);
         if let Some(stderr) = stderr {
-            spawn_stderr_drainer(stderr, std::sync::Arc::clone(&diagnostics));
+            spawn_stderr_drainer(
+                stderr,
+                std::sync::Arc::clone(&diagnostics),
+                config.line_cap_bytes,
+            );
         }
         Ok(Self {
             child: Some(child),
@@ -684,7 +707,21 @@ impl AnimEngine {
     ///
     /// Actualiza [`Self::progress_fraction`] con el último `Progress` REAL del
     /// worker (`percent/100.0`). Requiere `&mut` para recordar ese progreso.
+    ///
+    /// Chequea el reloj del `Running`: si la deadline del estado venció
+    /// (vía manual sin `run_job`, que trae su propio reloj), transiciona a
+    /// `TimedOut` y devuelve `Err` honesto SIN matar al worker (el llamador
+    /// decide con `cancel`/`shutdown`; el `Drop` garantiza la limpieza).
     pub fn recv_event(&mut self, timeout: Option<Duration>) -> Result<Option<JobEvent>, String> {
+        if let AnimJobState::Running { .. } = &self.state {
+            if self.state.is_expired() {
+                self.state = AnimJobState::TimedOut;
+                return Err(localize_worker_error(
+                    "job_timeout",
+                    &format!("límite {}s excedido", self.config.job_timeout.as_secs()),
+                ));
+            }
+        }
         match self.recv_raw(timeout)? {
             Some(WireMessage::Progress(progress)) => {
                 self.last_progress = Some(progress.clone());
@@ -810,7 +847,10 @@ impl Drop for AnimEngine {
 }
 
 /// Ejecuta un job de punta a punta contra un motor efimero.
-/// Polling de 200ms para honrar cancel (RJ1) y timeout incluye wait_ready via deadline absoluta.
+/// Polling de 200ms para honrar cancel (RJ1); el `job_timeout` corre desde el
+/// `submit` (el handshake previo va por su propio `idle_timeout` en
+/// `wait_ready`, no consume job). La deadline del `Running` también queda en
+/// el estado ([`AnimJobState::deadline`]) para la vía manual.
 ///
 /// - Progreso REAL: cada `Progress` del worker se reenvía a `on_event` tal cual
 ///   (fracción `percent/100.0` vía [`JobEvent::fraction`], sin inventar %).
@@ -1002,6 +1042,55 @@ fn nearest_existing_ancestor_inside(path: &Path, cwd: &Path) -> bool {
     }
 }
 
+/// Parte un trozo crudo del stdout en líneas: acumula en `line` hasta `\n`
+/// y la parsea; la línea que supera `line_cap` se descarta y se reporta UNA
+/// vez como `Error{protocol}` (nunca se pierde lo ajeno del mismo chunk).
+fn procesa_chunk_stdout(
+    sender: &SyncSender<WireMessage>,
+    line: &mut Vec<u8>,
+    oversized: &mut bool,
+    buf: &[u8],
+    line_cap: usize,
+) {
+    let count = buf.len();
+    let mut start = 0usize;
+    while start < count {
+        match buf[start..count].iter().position(|byte| *byte == b'\n') {
+            Some(offset) => {
+                let end = start + offset;
+                if *oversized {
+                    // terminó la línea descartada: se reporta UNA vez
+                    *oversized = false;
+                    line.clear();
+                    send_oversized_line_error(sender, line_cap);
+                } else if line.len() + (end - start) > line_cap {
+                    send_oversized_line_error(sender, line_cap);
+                    line.clear();
+                } else {
+                    line.extend_from_slice(&buf[start..end]);
+                    send_parsed_line(sender, line);
+                    // La misma `line` se reusa para la próxima línea
+                    // del chunk: sin clear se concatenarían.
+                    line.clear();
+                }
+                start = end + 1;
+            }
+            None => {
+                let remaining = count - start;
+                if !*oversized {
+                    if line.len() + remaining > line_cap {
+                        *oversized = true;
+                        line.clear();
+                    } else {
+                        line.extend_from_slice(&buf[start..count]);
+                    }
+                }
+                start = count;
+            }
+        }
+    }
+}
+
 fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: usize) {
     std::thread::spawn(move || {
         let mut reader = BufReader::new(stdout);
@@ -1010,57 +1099,39 @@ fn spawn_reader(stdout: ChildStdout, sender: SyncSender<WireMessage>, line_cap: 
         let mut chunk = [0_u8; 512];
         loop {
             let count = match reader.read(&mut chunk) {
-                Ok(0) => return,
+                Ok(0) => {
+                    // EOF: la última línea sin `\n` final se parsea en vez de
+                    // perderse en silencio (un worker que muere tras un
+                    // `render_result` sin newline igual entrega su resultado);
+                    // la oversized pendiente se reporta una vez.
+                    if oversized {
+                        send_oversized_line_error(&sender, line_cap);
+                    } else if !line.is_empty() {
+                        send_parsed_line(&sender, &line);
+                    }
+                    return;
+                }
                 Ok(count) => count,
                 Err(_) => return,
             };
             // Un `read` puede traer varias líneas (o el final de una línea
             // oversized y el inicio de la siguiente): se procesa el chunk
             // entero y sólo se descarta lo que pertenece a la línea grande.
-            let mut start = 0usize;
-            while start < count {
-                match chunk[start..count].iter().position(|byte| *byte == b'\n') {
-                    Some(offset) => {
-                        let end = start + offset;
-                        if oversized {
-                            // terminó la línea descartada: se reporta UNA vez
-                            oversized = false;
-                            line.clear();
-                            send_oversized_line_error(&sender);
-                        } else if line.len() + (end - start) > line_cap {
-                            send_oversized_line_error(&sender);
-                            line.clear();
-                        } else {
-                            line.extend_from_slice(&chunk[start..end]);
-                            send_parsed_line(&sender, &line);
-                            // La misma `line` se reusa para la próxima línea
-                            // del chunk: sin clear se concatenarían.
-                            line.clear();
-                        }
-                        start = end + 1;
-                    }
-                    None => {
-                        let remaining = count - start;
-                        if !oversized {
-                            if line.len() + remaining > line_cap {
-                                oversized = true;
-                                line.clear();
-                            } else {
-                                line.extend_from_slice(&chunk[start..count]);
-                            }
-                        }
-                        start = count;
-                    }
-                }
-            }
+            procesa_chunk_stdout(
+                &sender,
+                &mut line,
+                &mut oversized,
+                &chunk[..count],
+                line_cap,
+            );
         }
     });
 }
 
-fn send_oversized_line_error(sender: &SyncSender<WireMessage>) {
+fn send_oversized_line_error(sender: &SyncSender<WireMessage>, line_cap: usize) {
     let _ = sender.send(WireMessage::Error {
         code: "protocol".into(),
-        message: "línea del motor excede el límite de 64 KiB".into(),
+        message: format!("línea del motor excede el límite de {line_cap} bytes"),
     });
 }
 
@@ -1100,33 +1171,117 @@ fn send_parsed_line(sender: &SyncSender<WireMessage>, line: &[u8]) {
 /// spawnear nada.
 pub const MAX_DIAGNOSTIC_LINES: usize = 64;
 
+/// Tope de bytes retenidos por línea de diagnóstico (anti-OOM de stderr).
+///
+/// Espeja en chico el `line_cap` del stdout: el stderr de un worker hostil
+/// con 64 líneas de 100 MB ya no retiene 6 GB sino 64×2 KiB = 128 KiB.
+/// [`push_diagnostic_line`] trunca acá (punto único de inserción, puro y
+/// testeable); el drenador además lee por chunks para no materializar la
+/// línea gigante ni siquiera en tránsito.
+pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 2048;
+
 /// Inserta una línea de stderr con tope: más allá de `MAX_DIAGNOSTIC_LINES`
-/// se descarta (las primeras 64 se conservan). Retorna `true` si se retuvo.
+/// se descarta (las primeras 64 se conservan) y cada línea se trunca a
+/// [`MAX_DIAGNOSTIC_LINE_BYTES`] en borde de char. Retorna `true` si se retuvo.
 fn push_diagnostic_line(guard: &mut Vec<String>, line: String) -> bool {
-    if guard.len() < MAX_DIAGNOSTIC_LINES {
-        guard.push(line);
-        true
-    } else {
-        false
+    if guard.len() >= MAX_DIAGNOSTIC_LINES {
+        return false;
     }
+    guard.push(trunca_linea_diagnostico(line));
+    true
+}
+
+/// Trunca al tope por línea sin partir un char UTF-8 (con marca honesta).
+/// Pura, sin pánicos.
+fn trunca_linea_diagnostico(line: String) -> String {
+    if line.len() <= MAX_DIAGNOSTIC_LINE_BYTES {
+        return line;
+    }
+    let mut fin = MAX_DIAGNOSTIC_LINE_BYTES;
+    while fin > 0 && !line.is_char_boundary(fin) {
+        fin -= 1;
+    }
+    let mut recortada = line[..fin].to_string();
+    recortada.push_str("…[truncada]");
+    recortada
 }
 
 fn spawn_stderr_drainer(
     stderr: std::process::ChildStderr,
     shared: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    line_cap: usize,
 ) {
     std::thread::spawn(move || {
+        // Lectura por chunks con el mismo `line_cap` del stdout: una línea
+        // de stderr sin `\n` de 1 GB ya no se materializa en un `String`
+        // gigante vía `read_line` (bypass del tope); se descarta por tramos
+        // y se conserva una nota acotada. Además `read_line` abortaba el
+        // drenador entero ante bytes no UTF-8 (pérdida de diagnósticos):
+        // acá se convierte con `from_utf8_lossy`.
         let mut reader = BufReader::new(stderr);
-        let mut line = String::new();
+        let mut line: Vec<u8> = Vec::new();
+        let mut oversized = false;
+        let mut chunk = [0_u8; 512];
+        let empuja = |cruda: &[u8], fue_grande: bool| {
+            let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
+            if fue_grande {
+                // La gigante se descarta entera (ni cabeza ni cola arbitraria):
+                // queda nota acotada con el tope que la volteó.
+                push_diagnostic_line(
+                    &mut guard,
+                    format!("línea de stderr descartada: excede {line_cap} bytes"),
+                );
+            } else {
+                let texto = String::from_utf8_lossy(cruda).trim_end().to_string();
+                push_diagnostic_line(&mut guard, texto);
+            }
+        };
         loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {
-                    let mut guard = shared.lock().unwrap_or_else(|p| p.into_inner());
-                    push_diagnostic_line(&mut guard, line.trim_end().to_string());
+            let count = match reader.read(&mut chunk) {
+                Ok(0) => {
+                    if oversized {
+                        empuja(&[], true);
+                    } else if !line.is_empty() {
+                        let resto = std::mem::take(&mut line);
+                        empuja(&resto, false);
+                    }
+                    break;
                 }
+                Ok(count) => count,
                 Err(_) => break,
+            };
+            let mut start = 0usize;
+            while start < count {
+                match chunk[start..count].iter().position(|byte| *byte == b'\n') {
+                    Some(offset) => {
+                        let end = start + offset;
+                        if oversized {
+                            oversized = false;
+                            line.clear();
+                            empuja(&[], true);
+                        } else if line.len() + (end - start) > line_cap {
+                            line.clear();
+                            empuja(&[], true);
+                        } else {
+                            line.extend_from_slice(&chunk[start..end]);
+                            let completa = std::mem::take(&mut line);
+                            empuja(&completa, false);
+                        }
+                        start = end + 1;
+                    }
+                    None => {
+                        let remaining = count - start;
+                        if !oversized {
+                            if line.len() + remaining > line_cap {
+                                oversized = true;
+                                line.clear();
+                            } else {
+                                line.extend_from_slice(&chunk[start..count]);
+                            }
+                        }
+                        start = count;
+                    }
+                }
             }
         }
     });
@@ -1583,6 +1738,80 @@ done
         assert_eq!(guard.last().map(String::as_str), Some("línea 63"));
         assert!(!push_diagnostic_line(&mut guard, "una más".to_string()));
         assert_eq!(guard.len(), 64);
+    }
+
+    // ── Auditoría: diagnósticos acotados por línea + relojes chequeables ──
+    #[test]
+    fn diagnostico_trunca_linea_gigante_en_borde_de_char() {
+        // 64 líneas de 100 MB ya no retienen 6 GB sino 64×2 KiB.
+        let gigante = "á".repeat(MAX_DIAGNOSTIC_LINE_BYTES * 4);
+        let recortada = trunca_linea_diagnostico(gigante);
+        assert!(
+            recortada.len() <= MAX_DIAGNOSTIC_LINE_BYTES + "…[truncada]".len(),
+            "len {}",
+            recortada.len()
+        );
+        assert!(recortada.ends_with("…[truncada]"), "{recortada:?}");
+        // Sin partir el char multibyte (`á` = 2 bytes).
+        assert!(recortada.is_char_boundary(recortada.len()));
+        // La corta pasa intacta, sin marca.
+        assert_eq!(trunca_linea_diagnostico("hola".to_string()), "hola");
+    }
+
+    #[test]
+    fn statem_expone_reloj_y_vencimiento() {
+        use std::time::Instant;
+        let pasado = Instant::now() - Duration::from_secs(1);
+        let futuro = Instant::now() + Duration::from_secs(60);
+        let corriendo_vencido = AnimJobState::Running {
+            job_id: AnimJobId("job-1".to_string()),
+            deadline: pasado,
+        };
+        assert!(corriendo_vencido.deadline().is_some());
+        assert!(corriendo_vencido.is_expired());
+        let corriendo_vivo = AnimJobState::Running {
+            job_id: AnimJobId("job-1".to_string()),
+            deadline: futuro,
+        };
+        assert!(!corriendo_vivo.is_expired());
+        assert!(AnimJobState::Ready.deadline().is_none());
+        assert!(!AnimJobState::Ready.is_expired());
+        assert!(!AnimJobState::TimedOut.is_expired());
+    }
+
+    #[test]
+    fn procesa_chunk_stdout_partea_oversized_y_mensaje_con_bytes() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        let cap = 1024;
+        let mut linea: Vec<u8> = Vec::new();
+        let mut grande = false;
+        // Línea válida partida en dos chunks + newline: llega entera.
+        procesa_chunk_stdout(&tx, &mut linea, &mut grande, b"{\"type\":\"pon", cap);
+        assert!(rx.try_recv().is_err(), "parcial no emite nada");
+        procesa_chunk_stdout(&tx, &mut linea, &mut grande, b"g\"}\n", cap);
+        assert!(
+            matches!(rx.try_recv(), Ok(WireMessage::Pong)),
+            "el chunk partido arma el pong"
+        );
+        // Línea gigante en un chunk: UNA vez, con el tope en bytes (no el
+        // "64 KiB" hardcodeado que mentía con line_cap custom).
+        let gigante = vec![b'A'; cap + 10];
+        procesa_chunk_stdout(&tx, &mut linea, &mut grande, &gigante, cap);
+        procesa_chunk_stdout(&tx, &mut linea, &mut grande, b"\n", cap);
+        match rx.try_recv() {
+            Ok(WireMessage::Error { code, message }) => {
+                assert_eq!(code, "protocol");
+                assert!(
+                    message.contains(&cap.to_string()) && message.contains("límite"),
+                    "msg: {message}"
+                );
+            }
+            otro => panic!("esperaba Error protocol, got {otro:?}"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "el oversized se reporta una sola vez"
+        );
     }
 
     // ── T3 Timeouts configurables + line_cap ─────────────────────────────

@@ -197,8 +197,10 @@ fn p4_todos_visibles_en_paleta() {
     // Harness Fase A (+7 visibles S): 606 → 613, 643 → 650.
     // Frente fantasma+nuevos (+12 visibles S): 650 → 662, 613 → 625.
     // Frente fantasma-2 (+71 visibles S): 662 → 733, 625 → 696.
-    assert_eq!(command_registry::all().len(), 733);
-    assert_eq!(command_registry::palette_commands().count(), 696);
+    // Frente G1 (contrato grafito-geometry: +14 visibles S — CAS +9, AM2 +3,
+    // Texto +2): 733 → 747, 696 → 710.
+    assert_eq!(command_registry::all().len(), 747);
+    assert_eq!(command_registry::palette_commands().count(), 710);
 }
 
 #[test]

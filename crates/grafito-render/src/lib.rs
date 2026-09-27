@@ -30,9 +30,12 @@ use grafito_core::{
 };
 use grafito_geometry::{Camera3D, Color, Point2, Point3D, Tetrahedron3D, ViewTransform, AABB};
 use lyon::{
-    math::point,
+    math::{point, Point as LyonPoint},
     path::Path,
-    tessellation::{BuffersBuilder, FillOptions, FillTessellator, FillVertex, VertexBuffers},
+    tessellation::{
+        BuffersBuilder, FillOptions, FillTessellator, FillVertex, StrokeOptions, StrokeTessellator,
+        StrokeVertex, VertexBuffers,
+    },
 };
 use rayon::prelude::*;
 use wgpu::util::DeviceExt;
@@ -60,12 +63,61 @@ mod tests;
 // bump O(1) y el `Arc` evita clonar los buffers en la bookkeeping del hit.
 type TransformedCacheMap =
     lru::LruCache<u64, (std::sync::Arc<Vec<Vertex>>, std::sync::Arc<Vec<u32>>)>;
+/// AABB mundial de curvas paramétricas/polares por `(nonce, id, versión)`.
+///
+/// `object_world_aabb` muestreaba 4000 puntos por curva por pasada de culling
+/// (una vez por `build_geometry_static` y otra por `build_single_geometry`,
+/// más el thrash con el slot de 1000 del path de geometría). El AABB es
+/// mundo-puro (no depende del view) y solo cambia cuando el documento cambia
+/// (`version` bumpea en cada `touch`/`commit`, incluidas variables) o cuando
+/// cambia el documento (`cache_nonce` distingue dos docs con misma `version`).
+/// Clave O(1) sin allocs; valor `Option<AABB>` copiable (`None` = sin muestras
+/// finitas, idéntico al muestreo directo).
+type CurveAabbCacheMap = lru::LruCache<(u64, ObjectId, u64), Option<AABB>>;
+/// Pool de teseladores por hilo (rayon-safe vía `thread_local`).
+///
+/// El `FillTessellator` único obligaba a pedir prestado un solo teselador y a
+/// crear `VertexBuffers::new()` por polígono (alloc + free por llamada).
+/// Cada hilo worker tiene su propio `TessPool`: `FillTessellator` +
+/// `StrokeTessellator` + buffers con capacidad reutilizada vía `clear()`
+/// (sin free). Seguro en rayon porque `thread_local` da una instancia por
+/// hilo de trabajo.
+struct TessPool {
+    fill: FillTessellator,
+    stroke: StrokeTessellator,
+    fill_buffers: VertexBuffers<LyonPoint, u32>,
+    stroke_buffers: VertexBuffers<LyonPoint, u32>,
+}
+
+const TESS_POOL_VERT_CAP: usize = 512;
+const TESS_POOL_INDEX_CAP: usize = 1024;
+
+impl TessPool {
+    fn new() -> Self {
+        Self {
+            fill: FillTessellator::new(),
+            stroke: StrokeTessellator::new(),
+            fill_buffers: VertexBuffers::with_capacity(TESS_POOL_VERT_CAP, TESS_POOL_INDEX_CAP),
+            stroke_buffers: VertexBuffers::with_capacity(TESS_POOL_VERT_CAP, TESS_POOL_INDEX_CAP),
+        }
+    }
+}
+
 thread_local! {
-    #[allow(clippy::type_complexity)]
-    static FILL_TESS: RefCell<FillTessellator> = RefCell::new(FillTessellator::new());
+    static TESS_POOL: RefCell<TessPool> = RefCell::new(TessPool::new());
     #[allow(clippy::type_complexity)]
     static TRANSFORMED_CACHE: RefCell<TransformedCacheMap> =
         RefCell::new(lru::LruCache::new(TRANSFORMED_CACHE_SIZE));
+    static CURVE_AABB_CACHE: RefCell<CurveAabbCacheMap> =
+        RefCell::new(lru::LruCache::new(CURVE_AABB_CACHE_SIZE));
+    /// Scratch reutilizable para `sample_environment_into` (ver abajo):
+    /// `clear()` por llamada, sin free entre objetos del mismo hilo.
+    static ENV_SCRATCH: RefCell<Vec<(String, f64)>> = const { RefCell::new(Vec::new()) };
+    /// Memo de `prepare_function_ast` por `(expr, ignore, vars-fingerprint)`:
+    /// evita re-parsear la misma expresión por objeto/frame. LRU acotado,
+    /// `clear()` manual solo cuando llena (sin free en caliente).
+    static AST_CACHE: RefCell<lru::LruCache<AstCacheKey, grafito_geometry::ast::Expr>> =
+        RefCell::new(lru::LruCache::new(AST_CACHE_SIZE));
 }
 const TRANSFORMED_CACHE_CAP: usize = 64;
 const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
@@ -73,6 +125,123 @@ const TRANSFORMED_CACHE_SIZE: std::num::NonZeroUsize =
         Some(v) => v,
         None => unreachable!(),
     };
+const CURVE_AABB_CACHE_CAP: usize = 1024;
+const CURVE_AABB_CACHE_SIZE: std::num::NonZeroUsize =
+    match std::num::NonZeroUsize::new(CURVE_AABB_CACHE_CAP) {
+        Some(v) => v,
+        None => unreachable!(),
+    };
+const AST_CACHE_CAP: usize = 128;
+const AST_CACHE_SIZE: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(AST_CACHE_CAP) {
+    Some(v) => v,
+    None => unreachable!(),
+};
+
+/// Clave del memo de AST: `(expr, ignore, fingerprint de vars)`.
+///
+/// `vars-fingerprint` = hash SipHash de la `BTreeMap` completa (ya ordenada):
+/// dos versiones distintas de variables dan fingerprint distinto y el AST
+/// (con sustitución aplicada) no se reutiliza entre versiones. O(cantidad de
+/// variables) por lookup, sin parsear.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AstCacheKey {
+    expr: String,
+    ignore: String,
+    vars_fp: u64,
+}
+
+fn ast_vars_fingerprint(vars: &std::collections::BTreeMap<String, f64>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    for (name, value) in vars {
+        name.hash(&mut hasher);
+        value.to_bits().hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// `prepare_function_ast` memoizado por `(expr, ignore, vars-fingerprint)`.
+///
+/// Hit = `Clone` del AST cacheado (sin parse/sustitución/simplificación);
+/// miss = computa una vez y lo guarda (LRU 128). Resultados bit-idénticos al
+/// path directo: la key incluye expr completa + vars que afectan la
+/// sustitución. Sin `unwrap` en prod: el error de parse se propaga.
+fn prepared_ast_cached(
+    expr: &str,
+    vars: &std::collections::BTreeMap<String, f64>,
+    ignore: &[&str],
+) -> Result<grafito_geometry::ast::Expr, String> {
+    let mut ignore_key = String::new();
+    for (i, name) in ignore.iter().enumerate() {
+        if i > 0 {
+            ignore_key.push('\x1f');
+        }
+        ignore_key.push_str(name);
+    }
+    let key = AstCacheKey {
+        expr: expr.to_string(),
+        ignore: ignore_key,
+        vars_fp: ast_vars_fingerprint(vars),
+    };
+    if let Some(hit) = AST_CACHE.with(|c| c.borrow_mut().get(&key).cloned()) {
+        return Ok(hit);
+    }
+    let ast = grafito_geometry::expr::prepare_function_ast(expr, vars, ignore)?;
+    AST_CACHE.with(|c| {
+        c.borrow_mut().push(key, ast.clone());
+    });
+    Ok(ast)
+}
+
+/// Tesela un trazo abierto con el `StrokeTessellator` del pool del hilo.
+///
+/// Existe para que el pool cubra ambos teseladores en rayon (cada worker
+/// tiene el suyo) con buffers reutilizados (`clear()` sin free). El fill
+/// sigue en `add_polygon_fill`; este helper es el camino de trazo
+/// equivalente. `None` honesto ante path degenerado o error de teselado.
+/// Sin `unwrap` en prod.
+pub fn tessellate_stroke_pooled(
+    points: &[glam::Vec2],
+    width: f32,
+    tolerance: f32,
+) -> Option<(Vec<LyonPoint>, Vec<u32>)> {
+    if points.len() < 2 || !width.is_finite() || width <= 0.0 || !tolerance.is_finite() {
+        return None;
+    }
+    if points.iter().any(|p| !p.is_finite()) {
+        return None;
+    }
+    let mut builder = Path::builder();
+    builder.begin(point(points[0].x, points[0].y));
+    for p in &points[1..] {
+        builder.line_to(point(p.x, p.y));
+    }
+    let path = builder.build();
+    let options = StrokeOptions::default()
+        .with_line_width(width)
+        .with_tolerance(tolerance);
+    TESS_POOL.with(|cell| {
+        let mut pool = cell.borrow_mut();
+        let TessPool {
+            stroke,
+            stroke_buffers,
+            ..
+        } = &mut *pool;
+        stroke_buffers.clear();
+        stroke
+            .tessellate_path(
+                &path,
+                &options,
+                &mut BuffersBuilder::new(stroke_buffers, |vertex: StrokeVertex| vertex.position()),
+            )
+            .ok()?;
+        Some((
+            stroke_buffers.vertices.clone(),
+            stroke_buffers.indices.clone(),
+        ))
+    })
+}
 
 /// Bounded synchronous readback: wraps `map_async` + `poll` in
 /// `pollster::block_on` with a timeout. Uses `wgpu::Maintain::Poll` (non
@@ -337,24 +506,49 @@ pub fn object_world_aabb(
                 _ => None,
             }
         }
-        GeoObject::ParametricCurve2D(pc) => {
+        GeoObject::ParametricCurve2D(pc) => curve_aabb_cached(document, pc.id, || {
             let samples = grafito_core::parametric_sampling::samples_or_compute_curve_2d(
                 pc,
                 4000,
                 &document.variables,
             );
             samples_aabb(&samples)
-        }
-        GeoObject::PolarCurve(pol) => {
+        }),
+        GeoObject::PolarCurve(pol) => curve_aabb_cached(document, pol.id, || {
             let samples = grafito_core::parametric_sampling::samples_or_compute_polar(
                 pol,
                 4000,
                 &document.variables,
             );
             samples_aabb(&samples)
-        }
+        }),
         _ => None,
     }
+}
+
+/// AABB cacheado por `(nonce, id, versión)` para curvas con muestreo caro.
+///
+/// Miss = mismo cómputo que antes (4000 muestras + `samples_aabb`), valores
+/// bit-idénticos al path directo; hit = O(1) sin muestrear ni iterar.
+/// La `version` bumpea en cada mutación (incluidas variables), así que un
+/// cambio de expr/variables invalida (recomputa una vez, luego hits).
+/// El `nonce` evita hits cruzados entre docs distintos con misma `version`.
+/// Solo para curvas mundo-puras (paramétrica/polar); parábola depende de
+/// `view.scale` y no pasa por acá.
+fn curve_aabb_cached(
+    document: &Document,
+    id: ObjectId,
+    compute: impl FnOnce() -> Option<AABB>,
+) -> Option<AABB> {
+    let key = (document.cache_nonce, id, document.version);
+    if let Some(cached) = CURVE_AABB_CACHE.with(|c| c.borrow_mut().get(&key).copied()) {
+        return cached;
+    }
+    let value = compute();
+    CURVE_AABB_CACHE.with(|c| {
+        c.borrow_mut().push(key, value);
+    });
+    value
 }
 
 /// Mínimo y máximo de un iterador de valores finitos; `None` si no hay ninguno.
@@ -425,6 +619,25 @@ fn hyperbola_world_aabb(hb: &HyperbolaObj) -> Option<AABB> {
     ))
 }
 
+/// Key estructural del `Transformed` sin allocs en caliente.
+///
+/// Antes: `format!("{:?}")` del inner completo por objeto por pasada (alloc +
+/// formato + hash, incluyendo cachés `Arc<RwLock<…>>` que cambiaban la key en
+/// warmup). Ahora: O(pasada) = O(profundidad de `Transformed` anidados,
+/// ≤64) hashes directos, cero `String`/`Vec`:
+/// - `document.version` + `cache_nonce`: invalida en cada `touch`/`commit`
+///   (incluidas variables) y distingue docs distintos con misma `version`.
+///   Contrato existente del `Document` (igual que `estimated_bytes_cache`):
+///   quien mute debe bumpear `version`; sin bump la key no cambia.
+/// - `complex_base_symbol` + `render_quality`: afectan al resultado y son
+///   `pub` (asignables sin bump); se hashean directo (str + discriminante).
+/// - view + `dark_mode` + `depth`: contexto de render (bits, sin alloc).
+/// - cadena `Transformed`: cada nivel aporta `complex_expr` +
+///   `compiled_expr` (str, sin alloc); el `inner` hoja aporta discriminante
+///   (`mem::discriminant`, O(1), cubre variantes futuras) + `ObjectId`.
+///   Dos envoltorios con mismo `id` hoja pero distinta cadena
+///   (simple vs doble transform) dan keys distintas; mismo contenido +
+///   misma versión da misma key (hit).
 fn transformed_cache_key(
     document: &Document,
     transformed: &TransformedObj,
@@ -436,6 +649,14 @@ fn transformed_cache_key(
     use std::hash::{Hash, Hasher};
     let mut hasher = DefaultHasher::new();
     document.version.hash(&mut hasher);
+    document.cache_nonce.hash(&mut hasher);
+    document.complex_base_symbol.hash(&mut hasher);
+    let quality_tag: u8 = match document.render_quality {
+        grafito_core::RenderQuality::Preview => 0,
+        grafito_core::RenderQuality::Normal => 1,
+        grafito_core::RenderQuality::High => 2,
+    };
+    quality_tag.hash(&mut hasher);
     view.scale.to_bits().hash(&mut hasher);
     view.offset.x.to_bits().hash(&mut hasher);
     view.offset.y.to_bits().hash(&mut hasher);
@@ -445,23 +666,63 @@ fn transformed_cache_key(
     view.y_log.hash(&mut hasher);
     dark_mode.hash(&mut hasher);
     depth.hash(&mut hasher);
-    transformed.complex_expr.hash(&mut hasher);
-    transformed.inner.id().hash(&mut hasher);
-    format!("{:?}", transformed.inner).hash(&mut hasher);
+    // Cadena de envoltorios: sin alloc, O(profundidad). Cubre simple vs
+    // anidado y exprs intermedias distintas con mismo `id` hoja.
+    let mut current: &TransformedObj = transformed;
+    loop {
+        current.complex_expr.hash(&mut hasher);
+        current.compiled_expr.hash(&mut hasher);
+        match current.inner.as_ref() {
+            GeoObject::Transformed(next) => {
+                current = next;
+            }
+            leaf => {
+                std::mem::discriminant(leaf).hash(&mut hasher);
+                leaf.id().hash(&mut hasher);
+                break;
+            }
+        }
+    }
     hasher.finish()
 }
 
+/// Entorno de fallback para `evaluate`: variables del documento menos los
+/// locales (`x`/`y`/`z`), ya ordenado porque `BTreeMap` itera ordenado.
+///
+/// Sin `sort` ni alloc extra del `Vec` en caliente: el filtro preserva el
+/// orden del `BTreeMap`, así que el `sort_unstable` anterior era O(n log n)
+/// inútil. El `Vec` scratch se reutiliza por hilo vía `ENV_SCRATCH`
+/// (`clear()` sin free); los `String` se clonan una vez (necesarios para el
+/// fallback `evaluate` que pide `&[(String, f64)]`).
+/// variantes con alloc para callers fuera del camino caliente / tests.
+#[allow(dead_code)]
 fn sample_environment(
     variables: &std::collections::BTreeMap<String, f64>,
     local_names: &[&str],
 ) -> Vec<(String, f64)> {
-    let mut environment: Vec<_> = variables
-        .iter()
-        .filter(|(name, _)| !local_names.contains(&name.as_str()))
-        .map(|(name, value)| (name.clone(), *value))
-        .collect();
-    environment.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let mut environment = Vec::with_capacity(variables.len() + local_names.len());
+    sample_environment_into(&mut environment, variables, local_names);
     environment
+}
+
+/// Variante sin alloc del `Vec`: llena `out` con `clear()` + `reserve()`,
+/// sin `sort` (el `BTreeMap` ya itera ordenado). Origen único usado por los
+/// caminos calientes vía `ENV_SCRATCH`.
+fn sample_environment_into(
+    out: &mut Vec<(String, f64)>,
+    variables: &std::collections::BTreeMap<String, f64>,
+    local_names: &[&str],
+) {
+    out.clear();
+    let extra = variables.len().saturating_add(local_names.len());
+    if out.capacity() < extra {
+        let _ = out.try_reserve(extra.saturating_sub(out.capacity()));
+    }
+    for (name, value) in variables {
+        if !local_names.contains(&name.as_str()) {
+            out.push((name.clone(), *value));
+        }
+    }
 }
 
 fn evaluate_prepared_2d(
@@ -536,51 +797,67 @@ pub fn sample_phase_portrait(
     let density = portrait.density.clamp(5, 40);
     let dx = (portrait.x_max - portrait.x_min) / density as f64;
     let dy = (portrait.y_max - portrait.y_min) / density as f64;
-    let prepared_dx =
-        grafito_geometry::expr::prepare_function_ast(&portrait.expr_dx, variables, &["x", "y"])
-            .ok();
-    let prepared_dy =
-        grafito_geometry::expr::prepare_function_ast(&portrait.expr_dy, variables, &["x", "y"])
-            .ok();
-    let mut environment = sample_environment(variables, &["x", "y"]);
-    let x_index = environment.len();
-    environment.push(("x".to_string(), 0.0));
-    let y_index = environment.len();
-    environment.push(("y".to_string(), 0.0));
-    let Ok(density_u32) = u32::try_from(density) else {
-        return Vec::new();
-    };
-    let Some(capacity) = phase_portrait_capacity_for_density(density_u32) else {
-        return Vec::new();
-    };
-    let mut segments = Vec::new();
-    if segments.try_reserve(capacity).is_err() {
-        return Vec::new();
-    }
-
-    for i in 0..=density {
-        let x = portrait.x_min + i as f64 * dx;
-        environment[x_index].1 = x;
-        for j in 0..=density {
-            let y = portrait.y_min + j as f64 * dy;
-            environment[y_index].1 = y;
-            let (Some(u), Some(v)) = (
-                evaluate_prepared_2d(prepared_dx.as_ref(), &portrait.expr_dx, &environment, x, y),
-                evaluate_prepared_2d(prepared_dy.as_ref(), &portrait.expr_dy, &environment, x, y),
-            ) else {
-                continue;
-            };
-            let magnitude = u.hypot(v);
-            if !magnitude.is_finite() || magnitude <= 0.001 {
-                continue;
-            }
-            segments.push((
-                Point2::new(x, y),
-                Point2::new(x + u / magnitude * 0.5, y + v / magnitude * 0.5),
-            ));
+    // Memo por `(expr, vars-fingerprint)`: sin re-parse por frame/objeto.
+    let prepared_dx = prepared_ast_cached(&portrait.expr_dx, variables, &["x", "y"]).ok();
+    let prepared_dy = prepared_ast_cached(&portrait.expr_dy, variables, &["x", "y"]).ok();
+    ENV_SCRATCH.with(|cell| {
+        let mut environment = cell.borrow_mut();
+        sample_environment_into(&mut environment, variables, &["x", "y"]);
+        let x_index = environment.len();
+        environment.push(("x".to_string(), 0.0));
+        let y_index = environment.len();
+        environment.push(("y".to_string(), 0.0));
+        let Ok(density_u32) = u32::try_from(density) else {
+            return Vec::new();
+        };
+        let Some(capacity) = phase_portrait_capacity_for_density(density_u32) else {
+            return Vec::new();
+        };
+        let mut segments = Vec::new();
+        if segments.try_reserve(capacity).is_err() {
+            return Vec::new();
         }
-    }
-    segments
+
+        for i in 0..=density {
+            let x = portrait.x_min + i as f64 * dx;
+            if let Some(slot) = environment.get_mut(x_index) {
+                slot.1 = x;
+            }
+            for j in 0..=density {
+                let y = portrait.y_min + j as f64 * dy;
+                if let Some(slot) = environment.get_mut(y_index) {
+                    slot.1 = y;
+                }
+                let (Some(u), Some(v)) = (
+                    evaluate_prepared_2d(
+                        prepared_dx.as_ref(),
+                        &portrait.expr_dx,
+                        &environment,
+                        x,
+                        y,
+                    ),
+                    evaluate_prepared_2d(
+                        prepared_dy.as_ref(),
+                        &portrait.expr_dy,
+                        &environment,
+                        x,
+                        y,
+                    ),
+                ) else {
+                    continue;
+                };
+                let magnitude = u.hypot(v);
+                if !magnitude.is_finite() || magnitude <= 0.001 {
+                    continue;
+                }
+                segments.push((
+                    Point2::new(x, y),
+                    Point2::new(x + u / magnitude * 0.5, y + v / magnitude * 0.5),
+                ));
+            }
+        }
+        segments
+    })
 }
 
 pub(crate) fn vector_field_3d_sample_count(field: &VectorField3DObj) -> Option<usize> {
@@ -620,57 +897,85 @@ pub fn sample_vector_field_3d(
         return Vec::new();
     }
 
-    let prepared_u =
-        grafito_geometry::expr::prepare_function_ast(&field.expr_u, variables, &["x", "y", "z"])
-            .ok();
-    let prepared_v =
-        grafito_geometry::expr::prepare_function_ast(&field.expr_v, variables, &["x", "y", "z"])
-            .ok();
-    let prepared_w =
-        grafito_geometry::expr::prepare_function_ast(&field.expr_w, variables, &["x", "y", "z"])
-            .ok();
-    let mut environment = sample_environment(variables, &["x", "y", "z"]);
-    let x_index = environment.len();
-    environment.push(("x".to_string(), 0.0));
-    let y_index = environment.len();
-    environment.push(("y".to_string(), 0.0));
-    let z_index = environment.len();
-    environment.push(("z".to_string(), 0.0));
-    let mut segments = Vec::with_capacity(vector_field_3d_sample_count(field).unwrap_or(0));
+    let prepared_u = prepared_ast_cached(&field.expr_u, variables, &["x", "y", "z"]).ok();
+    let prepared_v = prepared_ast_cached(&field.expr_v, variables, &["x", "y", "z"]).ok();
+    let prepared_w = prepared_ast_cached(&field.expr_w, variables, &["x", "y", "z"]).ok();
+    let capacity = vector_field_3d_sample_count(field).unwrap_or(0);
+    ENV_SCRATCH.with(|cell| {
+        let mut environment = cell.borrow_mut();
+        sample_environment_into(&mut environment, variables, &["x", "y", "z"]);
+        let x_index = environment.len();
+        environment.push(("x".to_string(), 0.0));
+        let y_index = environment.len();
+        environment.push(("y".to_string(), 0.0));
+        let z_index = environment.len();
+        environment.push(("z".to_string(), 0.0));
+        let mut segments = Vec::new();
+        if segments.try_reserve(capacity).is_err() {
+            return Vec::new();
+        }
 
-    for i in 0..=density {
-        let x = field.x_min + i as f64 * dx;
-        environment[x_index].1 = x;
-        for j in 0..=density {
-            let y = field.y_min + j as f64 * dy;
-            environment[y_index].1 = y;
-            for k in 0..=density {
-                let z = field.z_min + k as f64 * dz;
-                environment[z_index].1 = z;
-                let (Some(u), Some(v), Some(w)) = (
-                    evaluate_prepared_3d(prepared_u.as_ref(), &field.expr_u, &environment, x, y, z),
-                    evaluate_prepared_3d(prepared_v.as_ref(), &field.expr_v, &environment, x, y, z),
-                    evaluate_prepared_3d(prepared_w.as_ref(), &field.expr_w, &environment, x, y, z),
-                ) else {
-                    continue;
-                };
-                let magnitude = u.hypot(v).hypot(w);
-                if !magnitude.is_finite() || magnitude <= 0.001 {
-                    continue;
+        for i in 0..=density {
+            let x = field.x_min + i as f64 * dx;
+            if let Some(slot) = environment.get_mut(x_index) {
+                slot.1 = x;
+            }
+            for j in 0..=density {
+                let y = field.y_min + j as f64 * dy;
+                if let Some(slot) = environment.get_mut(y_index) {
+                    slot.1 = y;
                 }
-                let start = Point3D::new(x, y, z);
-                let end = Point3D::new(
-                    x + u / magnitude * arrow_scale,
-                    y + v / magnitude * arrow_scale,
-                    z + w / magnitude * arrow_scale,
-                );
-                if end.x.is_finite() && end.y.is_finite() && end.z.is_finite() {
-                    segments.push((start, end));
+                for k in 0..=density {
+                    let z = field.z_min + k as f64 * dz;
+                    if let Some(slot) = environment.get_mut(z_index) {
+                        slot.1 = z;
+                    }
+                    let (Some(u), Some(v), Some(w)) = (
+                        evaluate_prepared_3d(
+                            prepared_u.as_ref(),
+                            &field.expr_u,
+                            &environment,
+                            x,
+                            y,
+                            z,
+                        ),
+                        evaluate_prepared_3d(
+                            prepared_v.as_ref(),
+                            &field.expr_v,
+                            &environment,
+                            x,
+                            y,
+                            z,
+                        ),
+                        evaluate_prepared_3d(
+                            prepared_w.as_ref(),
+                            &field.expr_w,
+                            &environment,
+                            x,
+                            y,
+                            z,
+                        ),
+                    ) else {
+                        continue;
+                    };
+                    let magnitude = u.hypot(v).hypot(w);
+                    if !magnitude.is_finite() || magnitude <= 0.001 {
+                        continue;
+                    }
+                    let start = Point3D::new(x, y, z);
+                    let end = Point3D::new(
+                        x + u / magnitude * arrow_scale,
+                        y + v / magnitude * arrow_scale,
+                        z + w / magnitude * arrow_scale,
+                    );
+                    if end.x.is_finite() && end.y.is_finite() && end.z.is_finite() {
+                        segments.push((start, end));
+                    }
                 }
             }
         }
-    }
-    segments
+        segments
+    })
 }
 
 /// Transforma segmentos independientes por un mapa conforme sin crear líneas
@@ -5127,11 +5432,8 @@ impl Renderer {
                 }
             }
             2 => {
-                let Ok(ast) = grafito_geometry::expr::prepare_function_ast(
-                    &cg.expr,
-                    &document.variables,
-                    &["x", "y"],
-                ) else {
+                let Ok(ast) = prepared_ast_cached(&cg.expr, &document.variables, &["x", "y"])
+                else {
                     return;
                 };
                 for i in 0..res {
@@ -5496,16 +5798,8 @@ impl Renderer {
             }
             GeoObject::ParametricCurve2D(pc) => {
                 if let (Ok(ast_x), Ok(ast_y)) = (
-                    grafito_geometry::expr::prepare_function_ast(
-                        &pc.expr_x,
-                        &document.variables,
-                        &["t"],
-                    ),
-                    grafito_geometry::expr::prepare_function_ast(
-                        &pc.expr_y,
-                        &document.variables,
-                        &["t"],
-                    ),
+                    prepared_ast_cached(&pc.expr_x, &document.variables, &["t"]),
+                    prepared_ast_cached(&pc.expr_y, &document.variables, &["t"]),
                 ) {
                     let steps = match document.render_quality {
                         RenderQuality::Preview => 100,
@@ -5530,11 +5824,7 @@ impl Renderer {
                 }
             }
             GeoObject::PolarCurve(pc) => {
-                if let Ok(ast_r) = grafito_geometry::expr::prepare_function_ast(
-                    &pc.expr_r,
-                    &document.variables,
-                    &["t"],
-                ) {
+                if let Ok(ast_r) = prepared_ast_cached(&pc.expr_r, &document.variables, &["t"]) {
                     let steps = match document.render_quality {
                         RenderQuality::Preview => 100,
                         RenderQuality::Normal => 500,
@@ -6221,38 +6511,45 @@ impl Renderer {
         path_builder.end(true);
 
         let tolerance = lyon_tolerance_for_view_scale(view.scale);
-        let mut tess_ok = false;
-        let mut geometry: VertexBuffers<lyon::math::Point, u32> = VertexBuffers::new();
-        FILL_TESS.with(|cell| {
-            let mut tess = cell.borrow_mut();
-            tess_ok = tess
+        let path = path_builder.build();
+        let options = FillOptions::default().with_tolerance(tolerance);
+        // Pool por hilo: teselador + buffers reutilizados (`clear()` sin
+        // free). Rayon-safe porque cada worker tiene su instancia.
+        let (vert_count, index_count, tess_ok) = TESS_POOL.with(|cell| {
+            let mut pool = cell.borrow_mut();
+            let TessPool {
+                fill, fill_buffers, ..
+            } = &mut *pool;
+            fill_buffers.clear();
+            let ok = fill
                 .tessellate_path(
-                    &path_builder.build(),
-                    &FillOptions::default().with_tolerance(tolerance),
-                    &mut BuffersBuilder::new(&mut geometry, |vertex: FillVertex| vertex.position()),
+                    &path,
+                    &options,
+                    &mut BuffersBuilder::new(fill_buffers, |vertex: FillVertex| vertex.position()),
                 )
                 .is_ok();
+            let (nv, ni) = (fill_buffers.vertices.len(), fill_buffers.indices.len());
+            (nv, ni, ok)
         });
         if !tess_ok {
             return;
         }
-        let Some(base) = reserve_geometry(
-            vertices,
-            indices,
-            geometry.vertices.len(),
-            geometry.indices.len(),
-        ) else {
+        let Some(base) = reserve_geometry(vertices, indices, vert_count, index_count) else {
             return;
         };
-        for p in geometry.vertices {
-            vertices.push(Vertex::new(p.x, p.y, color));
-        }
-        for index in geometry.indices {
-            let Some(index) = base.checked_add(index) else {
-                return;
-            };
-            indices.push(index);
-        }
+        TESS_POOL.with(|cell| {
+            let pool = cell.borrow_mut();
+            for p in &pool.fill_buffers.vertices {
+                vertices.push(Vertex::new(p.x, p.y, color));
+            }
+            for index in &pool.fill_buffers.indices {
+                if let Some(index) = base.checked_add(*index) {
+                    indices.push(index);
+                } else {
+                    return;
+                }
+            }
+        });
     }
 
     fn add_polygon_stroke(

@@ -1,5 +1,10 @@
 //! Buffer de texto simple para la pizarra: edición inline, caret y auto-resize.
 
+/// Cota del buffer de edición (igual que `MAX_WHITEBOARD_TEXT_CHARS = 2000`
+/// en app/core): `insert` más allá de la cota ignora el carácter (honesto,
+/// sin panic, sin crecer sin cota).
+pub const MAX_TEXT_BUFFER_CHARS: usize = 2000;
+
 /// Buffer de texto con caret, para edición WYSIWYG-lite.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextBuffer {
@@ -25,6 +30,9 @@ impl TextBuffer {
     }
 
     pub fn insert(&mut self, character: char) {
+        if self.content.chars().count() >= MAX_TEXT_BUFFER_CHARS {
+            return;
+        }
         let byte_index = self
             .content
             .chars()
@@ -89,6 +97,15 @@ mod tests {
         buffer.insert('x');
         assert_eq!(buffer.content(), "xy");
         assert_eq!(buffer.caret(), 1);
+    }
+
+    #[test]
+    fn text_buffer_is_bounded() {
+        let mut buffer = TextBuffer::new();
+        for _ in 0..(MAX_TEXT_BUFFER_CHARS + 100) {
+            buffer.insert('a');
+        }
+        assert_eq!(buffer.content().chars().count(), MAX_TEXT_BUFFER_CHARS);
     }
 
     #[test]

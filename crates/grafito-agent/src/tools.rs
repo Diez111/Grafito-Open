@@ -5,7 +5,7 @@
 //! para mantener el DAG como hoja y ownership exclusivo en este crate.
 //! Los datos curriculares replican los IDs/títulos reales del `Curriculum`
 //! (`grafito-pedagogy/src/curriculum.rs`) y la lógica determinista
-//! (wyhash, tolerancia 2 %, plantillas nativas) replica el comportamiento
+//! (hash_con_sal, tolerancia 2 %, plantillas nativas) replica el comportamiento
 //! verificado en `grafito-pedagogy` y `grafito-anim/src/protocol.rs`.
 
 use crate::loop_engine::ToolDispatcher;
@@ -784,17 +784,26 @@ fn lo_to_json(lo: &Lo) -> Value {
     })
 }
 
-// ── Ejercicios deterministas (wyhash, replica pedagogy) ─────────────────────
+// ── Ejercicios deterministas (hash_con_sal, replica pedagogy) ───────────────
 
-const WY_CONST: u64 = 0x9E37_79B9_7F4A_7C15;
-const WY_CONST2: u64 = 0xBF58_476D_1CE4_E5B9;
+// Réplica de `grafito-pedagogy::exercise::hash_con_sal`: deriva un `u64`
+// pseudoaleatorio de `(seed, sal)` con avalancha completa (splitmix64).
+// Cada parámetro (`h0`, `h1`, `h2`) usa sal distinta: flujos independientes
+// entre sí y entre semillas consecutivas. La cadena lineal anterior
+// (`h1 = h0*K+C`, `h2 = h1*K`) dejaba `(a, b)` correlacionados y divergía
+// del nativo; la paridad está pineada por
+// `agent_tools_parity_exercise_determinism` (vive en `grafito-assistant`,
+// fuera de este crate): si el nativo cambia sales o finalizador, este
+// espejo debe cambiar a la par.
+const SAL_DORADA: u64 = 0x9E37_79B9_7F4A_7C15;
 
-fn wyhash(seed: u64) -> u64 {
-    seed.wrapping_mul(WY_CONST)
-}
-
-fn wyhash2(seed: u64) -> u64 {
-    seed.wrapping_mul(WY_CONST).wrapping_add(WY_CONST2)
+fn hash_con_sal(seed: u64, sal: u64) -> u64 {
+    let mut z = seed
+        .wrapping_add(sal.wrapping_mul(SAL_DORADA))
+        .wrapping_add(SAL_DORADA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 struct GeneratedExercise {
@@ -806,9 +815,9 @@ struct GeneratedExercise {
 }
 
 fn generate_exercise_inner(lo_id: &str, seed: u64) -> GeneratedExercise {
-    let h0 = wyhash(seed);
-    let h1 = wyhash2(h0);
-    let h2 = wyhash(h1);
+    let h0 = hash_con_sal(seed, 0);
+    let h1 = hash_con_sal(seed, 1);
+    let h2 = hash_con_sal(seed, 2);
     match lo_id {
         "am1-der" => {
             let a = 1 + (h0 % 3);
@@ -830,7 +839,12 @@ fn generate_exercise_inner(lo_id: &str, seed: u64) -> GeneratedExercise {
             let a = 1 + (h0 % 3);
             let prompt = format!("Calcula ∫₀¹ {a}*x^2 dx");
             let val = a as f64 / 3.0;
-            let solution = format!("{val}");
+            // Paridad nativa: múltiplo de 3 → entero exacto ("1"), si no decimal.
+            let solution = if a.is_multiple_of(3) {
+                (val as i64).to_string()
+            } else {
+                format!("{val}")
+            };
             let mut params = BTreeMap::new();
             params.insert("a".to_string(), a as f64);
             GeneratedExercise {
@@ -873,12 +887,18 @@ fn generate_exercise_inner(lo_id: &str, seed: u64) -> GeneratedExercise {
             params.insert("a".to_string(), a as f64);
             params.insert("b".to_string(), b as f64);
             params.insert("c".to_string(), c as f64);
-            let kind = if lo_id == "am1-lim" || lo_id == "am1-cont" {
-                "Symbolic"
+            // Paridad nativa: `am1-lim` frasea como límite (mismo a/b/c).
+            let (prompt, kind) = if lo_id == "am1-lim" {
+                (
+                    format!("Si f(x)={a}*x+{b}, ¿cuánto vale lim_{{x→{c}}} f(x)?"),
+                    "Symbolic",
+                )
+            } else if lo_id == "am1-cont" {
+                (prompt, "Symbolic")
             } else if lo_id.starts_with("sec-") || lo_id.starts_with("am1-") {
-                "Numeric"
+                (prompt, "Numeric")
             } else {
-                "Graphical"
+                (prompt, "Graphical")
             };
             GeneratedExercise {
                 prompt,

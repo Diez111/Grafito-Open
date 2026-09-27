@@ -4,18 +4,9 @@
 use grafito_geometry::expr::prepare_function_ast;
 use std::collections::BTreeMap;
 
-#[test]
-fn test_y_squared_parses() {
-    let result = prepare_function_ast("y²", &BTreeMap::new(), &["y"]);
-    match result {
-        Ok(ast) => {
-            let v = ast.eval_at("y", 3.0);
-            println!("y² at 3.0 = {}", v);
-            assert_eq!(v, 9.0);
-        }
-        Err(e) => panic!("y² should parse, got error: {}", e),
-    }
-}
+// NOTE: el caso `y²` → 9.0 se cubre en
+// `y_squared_support.rs:16` (`test_unicode_squared_in_user_input`);
+// acá solo queda la variante mixta `x^2 + y²`.
 
 #[test]
 fn test_x2_plus_y2_parses() {

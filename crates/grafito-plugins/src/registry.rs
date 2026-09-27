@@ -71,15 +71,19 @@ impl PluginRegistry {
             let raw = match read_manifest_bounded(&path) {
                 Ok(raw) => raw,
                 Err(error) => {
-                    if seen_ids.insert(String::new()) {
-                        plugins.push(unreadable_plugin(&path, error));
-                    }
+                    // Sin dedup por id vacío: cada manifiesto ilegible queda
+                    // visible con su error (nunca silencio).
+                    plugins.push(unreadable_plugin(&path, error));
                     continue;
                 }
             };
-            let id = manifest_id_of(&raw).unwrap_or_default();
-            if !seen_ids.insert(id) {
-                continue;
+            // Sin dedup para ids vacíos o manifiestos que no parsean: cada
+            // plugin roto queda visible con su error en vez de colapsar en
+            // un único `""`. Solo ids válidos no vacíos deduplican.
+            if let Some(id) = manifest_id_of(&raw) {
+                if !id.is_empty() && !seen_ids.insert(id) {
+                    continue;
+                }
             }
             plugins.push(load_plugin(&path, &raw, ctx));
         }
@@ -165,7 +169,7 @@ impl PluginRegistry {
                     use std::os::unix::fs::OpenOptionsExt;
                     match std::fs::OpenOptions::new()
                         .read(true)
-                        .custom_flags(libc::O_NOFOLLOW)
+                        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
                         .open(&canonical)
                     {
                         Ok(file) => file,
@@ -215,6 +219,31 @@ impl PluginRegistry {
                         Err(_) => continue,
                     }
                 };
+                // `O_NONBLOCK` evita que un FIFO (swap TOCTOU tras el
+                // `collect_manifests`, que solo junta regulares) cuelgue el
+                // arranque en `open`. El `fstat` sobre el fd ya abierto
+                // rechaza sin carrera todo lo que no sea archivo regular
+                // (FIFO, socket, directorio, dispositivo) antes de leer.
+                // Los regulares ignoran `O_NONBLOCK` en lectura.
+                match fh.metadata() {
+                    Ok(meta) if meta.is_file() => {}
+                    Ok(_) => {
+                        log::warn!(
+                            "plugin '{}' instruction file '{}' no es archivo regular (rechazado)",
+                            plugin.manifest.plugin.id,
+                            file
+                        );
+                        continue;
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            "plugin '{}' instruction file '{}' metadata failed: {error}",
+                            plugin.manifest.plugin.id,
+                            file
+                        );
+                        continue;
+                    }
+                }
                 // Presupuesto OOM: OpenOptions + take(budget+1) + try_reserve + reject > MAX_INSTRUCTION_FILE_BYTES
                 // Usa constante MAX_INSTRUCTION_FILE_BYTES (32 KiB) en lugar de hardcode 10_001.
                 const PER_FILE_LIMIT_PLUS_ONE: u64 = (MAX_INSTRUCTION_FILE_BYTES as u64) + 1;
@@ -275,7 +304,23 @@ impl PluginRegistry {
                 block = truncate_bytes(&block, section.budget_bytes);
             }
             if !block.trim().is_empty() {
-                output.push_str(&format!("[{}]\n", plugin.manifest.plugin.name));
+                // Saneado en profundidad: la validación ya rechaza controles,
+                // pero `LoadedPlugin.manifest` es público y podría construirse
+                // fuera del loader; nunca interpolar controles al prompt.
+                let safe_name: String = plugin
+                    .manifest
+                    .plugin
+                    .name
+                    .chars()
+                    .map(|character| {
+                        if character.is_control() {
+                            ' '
+                        } else {
+                            character
+                        }
+                    })
+                    .collect();
+                output.push_str(&format!("[{safe_name}]\n"));
                 output.push_str(&block);
                 output.push('\n');
             }
@@ -370,7 +415,7 @@ fn read_manifest_bounded(path: &Path) -> Result<String, String> {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new()
             .read(true)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(path)
             .map_err(|error| format!("cannot read manifest (O_NOFOLLOW): {error}"))?
     };
@@ -389,8 +434,13 @@ fn read_manifest_bounded(path: &Path) -> Result<String, String> {
         std::fs::File::open(path).map_err(|error| format!("cannot read manifest: {error}"))?
     };
     // Fail-closed por metadata (corta antes de leer 100 MB) + lectura acotada
-    // igual por si el archivo cambia después del stat (TOCTOU).
+    // igual por si el archivo cambia después del stat (TOCTOU). El `fstat`
+    // sobre el fd rechaza sin carrera lo no-regular (FIFO por swap TOCTOU,
+    // directorio, socket, dispositivo); los regulares ignoran `O_NONBLOCK`.
     if let Ok(meta) = fh.metadata() {
+        if !meta.is_file() {
+            return Err("manifest is not a regular file".to_string());
+        }
         if meta.len() > MAX_MANIFEST_BYTES as u64 {
             return Err(format!(
                 "plugin manifest excede {MAX_MANIFEST_BYTES} bytes ({} bytes)",
@@ -1026,6 +1076,73 @@ budget_bytes = 4
             "salida acotada en bytes: {} bytes",
             instructions.len()
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn multiple_broken_manifests_are_all_visible() {
+        // Antes los manifiestos que no parseaban colapsaban en un único
+        // `""` por dedup de id vacío: el segundo roto quedaba en silencio.
+        let dir = std::env::temp_dir().join("grafito_plugins_multi_broken_fixture");
+        for broken in ["roto1", "roto2"] {
+            let plugin_dir = dir.join(broken);
+            fs::create_dir_all(&plugin_dir).unwrap();
+            fs::write(
+                plugin_dir.join(PLUGIN_MANIFEST_FILENAME),
+                "esto no es toml [[[",
+            )
+            .unwrap();
+        }
+
+        let registry = PluginRegistry::load(&dir, &ctx());
+        assert_eq!(
+            registry.plugins.len(),
+            2,
+            "cada manifiesto roto debe quedar visible con su error"
+        );
+        assert!(registry.plugins.iter().all(|p| p.error.is_some()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn fifo_instruction_file_is_rejected_without_hanging() {
+        // Un FIFO como instruction file bloqueaba `open` (DoS de arranque).
+        // Con `O_NONBLOCK` + `fstat` is_file se rechaza sin colgar. El test
+        // corre la lectura en un hilo con timeout: si regresa el bloqueo,
+        // falla en vez de colgar CI.
+        use std::os::unix::ffi::OsStrExt as _;
+        let dir = std::env::temp_dir().join("grafito_plugins_fifo_fixture");
+        let plugin_dir = dir.join("plug");
+        fs::create_dir_all(&plugin_dir).unwrap();
+        fs::write(
+            plugin_dir.join(PLUGIN_MANIFEST_FILENAME),
+            r#"[plugin]
+id = "plug"
+name = "Plug"
+version = "1.0.0"
+category = "skills"
+
+[instructions]
+files = ["evil.md"]
+budget_bytes = 4096
+"#,
+        )
+        .unwrap();
+        let fifo = plugin_dir.join("evil.md");
+        let c_path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o644) }, 0);
+
+        let registry = PluginRegistry::load(&dir, &ctx());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let out = registry.instructions_bounded(8192);
+            let _ = tx.send(out);
+        });
+        let output = rx
+            .recv_timeout(std::time::Duration::from_secs(15))
+            .expect("instructions_bounded se colgó con un FIFO (DoS)");
+        assert!(output.is_empty() || !output.contains("Plug"));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

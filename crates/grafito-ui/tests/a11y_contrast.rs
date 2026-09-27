@@ -13,6 +13,7 @@ use grafito_ui::theme::{Theme, DARK, LIGHT};
 use grafito_ui::tokens::{
     self, HIT_TARGET_MIN, RANGE_FIELD_H, STROKE_EMPHASIS, STROKE_HAIRLINE, TEXT_GAMMA_FLOOR,
 };
+use grafito_ui::toolbar::ALL_TOOLS;
 
 fn channel(value: u8) -> f64 {
     let value = f64::from(value) / 255.0;
@@ -314,6 +315,11 @@ fn stroke_tokens_exist_and_hairline_is_used() {
 
 #[test]
 fn tool_counts_are_consistent() {
+    // Pin real del conteo vigente (docs/architecture.md §8: 89 variantes,
+    // `ALL_TOOLS: &[Tool; 89]` en toolbar.rs:530): falla si alguien agrega o
+    // quita una variante sin actualizar docs + i18n. Los needles de abajo son
+    // el lint rancio (nombres viejos que no deben reaparecer en fuentes).
+    assert_eq!(ALL_TOOLS.len(), 89, "Tool debe seguir en 89 variantes");
     let toolbar = include_str!("../src/toolbar.rs");
     assert!(!toolbar.contains("all_87_tools"));
     assert!(!toolbar.contains("88 variantes"));

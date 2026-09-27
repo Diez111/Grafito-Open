@@ -1723,6 +1723,37 @@ mod universal_tests {
             "gradient-field"
         );
     }
+    #[test]
+    fn template_for_concept_alcanza_las_13_canonicas() {
+        // Sync 13↔13↔13: cada canónica tiene al menos un concepto que la
+        // resuelve (si alguna cae a `universal`, el dispatcher nativo nunca
+        // la atendería por concepto y el registro mentiría).
+        for (concepto, esperada) in [
+            ("derivada como pendiente de la tangente", "derivative-slope"),
+            ("integral del área bajo la curva", "integral-area"),
+            ("serie de taylor del seno", "taylor-series"),
+            ("mapeo conforme del plano complejo", "conformal-map"),
+            ("teorema de pitágoras con triángulo rectángulo", "pitagoras"),
+            ("la exponencial y el número e", "euler"),
+            ("serie de armónicos de fourier", "fourier"),
+            ("bifurcación de la logística", "logistic-bifurcation"),
+            ("campo gradiente de la función", "gradient-field"),
+            ("transformación de möbius", "mobius-transform"),
+            ("subespacio generado por combinación lineal", "subspace"),
+            ("copo de koch fractal", "fractal"),
+            ("tarea sin matemática", "universal"),
+        ] {
+            assert_eq!(template_for_concept(concepto), esperada, "{concepto}");
+        }
+        // Y las 13 pasan literales por sanitize (sin degradar por concepto).
+        for t in CANONICAL_TEMPLATES {
+            assert_eq!(
+                sanitize_template(t, "tarea sin matemática").expect("canónica"),
+                *t,
+                "{t}"
+            );
+        }
+    }
 
     // ── v3: params vivos + timeline + sync plantillas + webm ────────────
     #[test]

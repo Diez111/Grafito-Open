@@ -1204,6 +1204,17 @@ pub fn advance_implicit_job(
             };
             match poll {
                 SegmentsPoll::Ready(segments) => {
+                    // Época: el marching-squares corrió en background mientras
+                    // la vista/expr pudo cambiar; re-chequear vigencia antes
+                    // de escribir (descarta resultados viejos sin cambiar los
+                    // vigentes: bit-idénticos al path síncrono).
+                    let fresh_now = ic.cache_key(padded_bounds, grid_size, variables);
+                    if fresh_now != key {
+                        log::debug!(
+                            "Implicit marching-squares obsoleto (key cambió en background); descartando"
+                        );
+                        return ImplicitResolveStep::Done(false);
+                    }
                     populate_implicit_cache(ic, &key, padded_bounds, segments);
                     ImplicitResolveStep::Done(true)
                 }
