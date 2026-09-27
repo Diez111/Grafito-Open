@@ -92,3 +92,7 @@ dist/
 
 # Local cargo-fuzz output (artifacts siempre ignorados; corpus semilla sí versionado)
 fuzz/artifacts/
+
+# Bulk de skills instaladas por CLI (equivalente a .opencode/skills/* ignorado)
+.agents/
+skills-lock.json

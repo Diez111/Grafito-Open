@@ -1,10 +1,11 @@
-# Motor de animaciones de Grafito (plugin externo)
+# Motor de animaciones de Grafito (puente nativo 100% Rust)
 
-Para no complejizar el núcleo y conservar eficiencia, el motor de animaciones
-matemáticas es un **plugin externo, fuera del proceso Rust**, invocado por IPC.
-Se permite otro lenguaje (p. ej. Python + Manim) siempre que el puente hable el
-protocolo versionado. La app sigue siendo 100% Rust y funciona sin el motor
-(el asistente degrada a explicación).
+El motor de animaciones es el puente nativo `grafito-anim`: 13 plantillas
+canónicas (`CANONICAL_TEMPLATES` en `protocol.rs`) renderizadas en Rust
+(`anim_native.rs`) con MP4 vía ffmpeg-sidecar (`FfmpegMissing` honesto sin
+`ffmpeg` en PATH). El antiguo `engines/python` (Python + Manim por IPC) ya fue
+eliminado del árbol, y los 10 notebooks `.ipynb` de `lab/colab_upload/` también
+(el port del lab a `crates/grafito-lab` está en curso; el futuro es el binario).
 
 ## Arquitectura
 
@@ -15,8 +16,8 @@ grafito-app / grafito-assistant (Rust)
    grafito-anim  (puente Rust: spawn, handshake, jobs, timeouts)
         |  JSON v1 sobre stdio (líneas)
         v
-   motor externo (p. ej. crates/grafito-anim/engines/python/manim_engine)
-   analiza concepto -> genera escena (Manim) o placeholder -> render -> media
+   motor nativo (13 plantillas en crates/grafito-anim/src/anim_native.rs)
+   concepto -> frames nativos (o placeholder) -> media (MP4 vía ffmpeg-sidecar)
 ```
 
 ## Protocolo (v1)
@@ -38,5 +39,5 @@ Líneas JSON sobre stdin/stdout (ver `crates/grafito-anim/src/protocol.rs`):
 - Las líneas de salida se acotan; stderr se recoge como diagnóstico sin crashear.
 - El motor escribe en su `working_dir` y el puente **rechaza** cualquier ruta de
   artefacto fuera de ese directorio (`validate_media_path`).
-- Si el motor no responde el handshake (falta Python/Manim), el puente reporta
-  un error claro y el asistente ofrece la explicación sin render.
+- Si falta `ffmpeg` en PATH, el puente reporta `FfmpegMissing` honesto
+  y el asistente ofrece la explicación sin render.

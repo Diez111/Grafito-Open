@@ -7,6 +7,7 @@
 //! Incluye generador universal estilo canal de YouTube: cualquier texto produce
 //! una animación profesional en <2s con fallback garantizado.
 
+pub mod anims;
 pub mod captions;
 pub mod engine;
 pub mod guion;
@@ -14,6 +15,17 @@ pub mod parametric;
 pub mod player;
 pub mod protocol;
 pub mod scene;
+pub mod textanim;
+pub mod tpl_3d;
+pub mod tpl_4d;
+pub mod tpl_am1;
+pub mod tpl_am2;
+pub mod tpl_chaos;
+pub mod tpl_edo;
+pub mod tpl_graphs;
+pub mod tpl_linalg;
+pub mod tpl_pipeline;
+pub mod tpl_stats;
 
 pub use captions::{
     cuenta_palabras, envuelve_dos_lineas, escapa_ass, escapa_srt, formatea_ass_ts, formatea_srt_ts,

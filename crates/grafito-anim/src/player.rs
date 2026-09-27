@@ -370,7 +370,13 @@ fn empuja_frame(
     Ok(true)
 }
 
-fn valida_frames_run(frames: usize, run_ms: u64, donde: &'static str) -> SceneResult<()> {
+/// Valida frames/run del player (`pub(crate)` para `anims.rs`: mismos
+/// topes 1..=48 y 100..=60000 ms en toda la expansión 3Blue1Brown).
+pub(crate) fn valida_frames_run(
+    frames: usize,
+    run_ms: u64,
+    donde: &'static str,
+) -> SceneResult<()> {
     if frames == 0 || frames > PLAYER_MAX_FRAMES {
         return Err(SceneError::MorphInvalido {
             detalle: format!(
@@ -1129,37 +1135,331 @@ impl UpdateFromTracker {
         };
         let s = if s.is_finite() { s } else { 0.0 };
         let base = centroide_de(&self.mobject);
-        let (opacity, scale, center) = match self.map {
-            TrackerMap::Opacity { lo, hi } => {
-                let o = lo + (hi - lo) * (s as f32);
-                let o = if o.is_finite() {
-                    o.clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                (o, 1.0, base)
-            }
-            TrackerMap::Scale { lo, hi } => {
-                let k = lo + (hi - lo) * (s as f32);
-                let k = if k.is_finite() && k > 0.0 { k } else { 1.0 };
-                (1.0, k, base)
-            }
-            TrackerMap::CenterX { lo, hi } => {
-                let x = lo + (hi - lo) * s;
-                let x = if x.is_finite() { x } else { base[0] };
-                (1.0, 1.0, [x, base[1]])
-            }
-            TrackerMap::CenterY { lo, hi } => {
-                let y = lo + (hi - lo) * s;
-                let y = if y.is_finite() { y } else { base[1] };
-                (1.0, 1.0, [base[0], y])
-            }
-        };
-        PlacedMobject::try_new(self.mobject.clone(), opacity, scale, center)
+        coloca_segun_mapa(&self.mobject, base, self.map, s)
     }
 }
 
 impl Animation for UpdateFromTracker {
+    fn run_time_ms(&self) -> u64 {
+        self.run_ms
+    }
+    fn rate(&self) -> RateFunc {
+        self.rate
+    }
+}
+
+// ── P3Blue: tracks con keys + always_redraw ─────────────────────────────────
+// `UpdateFromTracker` barre `start→end` lineal; acá el valor sigue una
+// polilínea de keys (Manim: animar el `ValueTracker` por escena) y
+// `AlwaysRedraw` regenera el mobject por frame con una callback pura
+// (`always_redraw(func)`: sin I/O por contrato —la closure solo ve el
+// progreso eased y datos ya capturados por clon/`Arc`).
+
+/// Tope de keys por track (paridad `MAX_TRACK_KEYS`/`MAX_TIMELINE_KEYFRAMES`).
+pub const TRACKER_MAX_KEYS: usize = 64;
+
+/// Key del track: valor en la posición `pos` 0..1 del progreso.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackerKey {
+    /// Posición 0..1 (finita; estrictamente creciente entre keys).
+    pub pos: f64,
+    /// Valor finito en esa posición.
+    pub value: f64,
+}
+
+/// Track de valores por keys (lineal entre keys, clamp en extremos).
+/// Lo evalúa el player por frame; [`ValueTracker::aplica_track`] lo usa
+/// para fijar el valor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrackerTimeline {
+    keys: Vec<TrackerKey>,
+    minimo: f64,
+    maximo: f64,
+}
+
+impl TrackerTimeline {
+    /// Constructor validado (1..=64 keys, `pos` finitas 0..=1 estrictamente
+    /// crecientes, valores finitos).
+    pub fn try_new(keys: Vec<TrackerKey>) -> SceneResult<Self> {
+        if keys.is_empty() || keys.len() > TRACKER_MAX_KEYS {
+            return Err(SceneError::TrackInvalido {
+                prop: "tracker.track".to_string(),
+                detalle: format!("{} keys (válido 1..={TRACKER_MAX_KEYS})", keys.len()),
+            });
+        }
+        let mut anterior: Option<f64> = None;
+        let mut minimo = f64::INFINITY;
+        let mut maximo = f64::NEG_INFINITY;
+        for (i, k) in keys.iter().enumerate() {
+            if !k.pos.is_finite() || !(0.0..=1.0).contains(&k.pos) {
+                return Err(SceneError::TrackInvalido {
+                    prop: "tracker.track".to_string(),
+                    detalle: format!("key {i}: pos {} fuera de 0..=1", k.pos),
+                });
+            }
+            if !k.value.is_finite() {
+                return Err(SceneError::TrackInvalido {
+                    prop: "tracker.track".to_string(),
+                    detalle: format!("key {i}: valor no finito"),
+                });
+            }
+            if let Some(a) = anterior {
+                if k.pos <= a {
+                    return Err(SceneError::TrackInvalido {
+                        prop: "tracker.track".to_string(),
+                        detalle: format!("key {i}: pos debe ser estrictamente creciente"),
+                    });
+                }
+            }
+            anterior = Some(k.pos);
+            minimo = minimo.min(k.value);
+            maximo = maximo.max(k.value);
+        }
+        Ok(Self {
+            keys,
+            minimo,
+            maximo,
+        })
+    }
+
+    /// Cantidad de keys.
+    pub fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// ¿Vacío? (nunca tras `try_new`, pero la deserialización puede).
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Mínimo y máximo de los valores (para normalizar al mapa).
+    pub fn rango(&self) -> (f64, f64) {
+        (self.minimo, self.maximo)
+    }
+
+    /// Valor en `pos` cruda 0..1 (lerp entre keys, clamp en extremos;
+    /// `pos` no finita → primera key). Puro, sin pánicos.
+    pub fn eval(&self, pos: f64) -> f64 {
+        let primero = self.keys.first().copied().unwrap_or(TrackerKey {
+            pos: 0.0,
+            value: 0.0,
+        });
+        let ultimo = self.keys.last().copied().unwrap_or(primero);
+        if self.keys.len() < 2 {
+            return primero.value;
+        }
+        let p = if pos.is_finite() {
+            pos.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if p <= primero.pos {
+            return primero.value;
+        }
+        if p >= ultimo.pos {
+            return ultimo.value;
+        }
+        for par in self.keys.windows(2) {
+            let (a, b) = (par[0], par[1]);
+            if p >= a.pos && p <= b.pos {
+                let span = b.pos - a.pos;
+                if !span.is_finite() || span <= 0.0 {
+                    return a.value;
+                }
+                let u = ((p - a.pos) / span).clamp(0.0, 1.0);
+                let v = a.value + (b.value - a.value) * u;
+                return if v.is_finite() { v } else { a.value };
+            }
+        }
+        ultimo.value
+    }
+}
+
+impl ValueTracker {
+    /// Fija el valor según el track en `alpha` crudo 0..1 (clamp + guardia
+    /// finita; `Err` honesto si el evaluado desborda). Es el puente
+    /// tracker→track: el player llama esto por frame y la escena reacciona
+    /// vía [`UpdateFromTimeline`] o callbacks que leen el tracker.
+    pub fn aplica_track(&mut self, track: &TrackerTimeline, alpha: f64) -> SceneResult<()> {
+        let v = track.eval(alpha);
+        self.set_value(v)
+    }
+}
+
+/// Colocado según [`TrackerMap`] con `s` normalizado 0..1 (extraído de
+/// `UpdateFromTracker` para reuso; comportamiento idéntico). Puro.
+fn coloca_segun_mapa(
+    mobject: &Mobject,
+    base: [f64; 2],
+    map: TrackerMap,
+    s: f64,
+) -> SceneResult<PlacedMobject> {
+    let s = if s.is_finite() { s } else { 0.0 };
+    let (opacity, scale, center) = match map {
+        TrackerMap::Opacity { lo, hi } => {
+            let o = lo + (hi - lo) * (s as f32);
+            let o = if o.is_finite() {
+                o.clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            (o, 1.0, base)
+        }
+        TrackerMap::Scale { lo, hi } => {
+            let k = lo + (hi - lo) * (s as f32);
+            let k = if k.is_finite() && k > 0.0 { k } else { 1.0 };
+            (1.0, k, base)
+        }
+        TrackerMap::CenterX { lo, hi } => {
+            let x = lo + (hi - lo) * s;
+            let x = if x.is_finite() { x } else { base[0] };
+            (1.0, 1.0, [x, base[1]])
+        }
+        TrackerMap::CenterY { lo, hi } => {
+            let y = lo + (hi - lo) * s;
+            let y = if y.is_finite() { y } else { base[1] };
+            (1.0, 1.0, [base[0], y])
+        }
+    };
+    PlacedMobject::try_new(mobject.clone(), opacity, scale, center)
+}
+
+/// `UpdateFromTimeline`: el valor sigue el track y cada frame mapea al
+/// colocado según [`TrackerMap`]. Rango degenerado (`min==max`) → piso del
+/// mapa (misma convención honesta que `UpdateFromTracker`).
+#[derive(Debug, Clone)]
+pub struct UpdateFromTimeline {
+    mobject: Mobject,
+    timeline: TrackerTimeline,
+    frames: usize,
+    run_ms: u64,
+    rate: RateFunc,
+    map: TrackerMap,
+}
+
+impl UpdateFromTimeline {
+    /// Constructor validado (mobject válido, frames 1..=48, mapa válido).
+    pub fn try_new(
+        mobject: Mobject,
+        timeline: TrackerTimeline,
+        frames: usize,
+        run_ms: u64,
+        rate: RateFunc,
+        map: TrackerMap,
+    ) -> SceneResult<Self> {
+        valida_frames_run(frames, run_ms, "UpdateFromTimeline")?;
+        mobject.validate()?;
+        map.validate()?;
+        Ok(Self {
+            mobject,
+            timeline,
+            frames,
+            run_ms,
+            rate,
+            map,
+        })
+    }
+
+    /// Fotogramas del player.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Valor del track en `alpha` (rate aplicado antes de evaluar).
+    pub fn valor_en(&self, alpha: f64) -> f64 {
+        let e = self.interpolate(alpha);
+        let p = if e.is_finite() {
+            e.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        self.timeline.eval(p)
+    }
+
+    /// Colocado en `alpha`: normaliza el valor al rango del track y mapea.
+    /// R6d: `Err` honesto si el colocado no valida.
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
+        let v = self.valor_en(alpha);
+        let (lo, hi) = self.timeline.rango();
+        let s = if hi > lo && lo.is_finite() && hi.is_finite() {
+            ((v - lo) / (hi - lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let base = centroide_de(&self.mobject);
+        coloca_segun_mapa(&self.mobject, base, self.map, s)
+    }
+}
+
+impl Animation for UpdateFromTimeline {
+    fn run_time_ms(&self) -> u64 {
+        self.run_ms
+    }
+    fn rate(&self) -> RateFunc {
+        self.rate
+    }
+}
+
+/// `always_redraw` Manim: regenera el mobject por frame con una callback
+/// pura (`eased 0..1 → Mobject`). Sin I/O por contrato: la closure no recibe
+/// mundo, solo el progreso; los datos viajan capturados (`Arc`/clon).
+/// El colocado valida por frame (`Err` honesto si la callback devuelve
+/// algo inválido).
+#[derive(Clone)]
+pub struct AlwaysRedraw {
+    func: std::sync::Arc<dyn Fn(f64) -> Mobject + Send + Sync>,
+    frames: usize,
+    run_ms: u64,
+    rate: RateFunc,
+}
+
+impl std::fmt::Debug for AlwaysRedraw {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AlwaysRedraw")
+            .field("frames", &self.frames)
+            .field("run_ms", &self.run_ms)
+            .field("rate", &self.rate)
+            .finish_non_exhaustive()
+    }
+}
+
+impl AlwaysRedraw {
+    /// Constructor validado (frames 1..=48; la callback se valida por
+    /// frame en [`AlwaysRedraw::placed_at`]).
+    pub fn try_new(
+        func: impl Fn(f64) -> Mobject + Send + Sync + 'static,
+        frames: usize,
+        run_ms: u64,
+        rate: RateFunc,
+    ) -> SceneResult<Self> {
+        valida_frames_run(frames, run_ms, "AlwaysRedraw")?;
+        Ok(Self {
+            func: std::sync::Arc::new(func),
+            frames,
+            run_ms,
+            rate,
+        })
+    }
+
+    /// Fotogramas del player.
+    pub fn frames(&self) -> usize {
+        self.frames
+    }
+
+    /// Regenera y coloca en `alpha` crudo (rate aplicado antes de llamar).
+    /// R6d: `Err` honesto si lo regenerado no valida.
+    pub fn placed_at(&self, alpha: f64) -> SceneResult<PlacedMobject> {
+        let e = self.interpolate(alpha);
+        let p = if e.is_finite() {
+            e.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        PlacedMobject::opaco((self.func)(p))
+    }
+}
+
+impl Animation for AlwaysRedraw {
     fn run_time_ms(&self) -> u64 {
         self.run_ms
     }
@@ -1541,6 +1841,10 @@ pub enum PlayItem {
     Indicate(IndicateAnim),
     /// Tracker evaluado por frame.
     Tracker(UpdateFromTracker),
+    /// Track con keys evaluado por frame.
+    Timeline(UpdateFromTimeline),
+    /// Mobject regenerado por frame con callback pura.
+    Redraw(AlwaysRedraw),
     /// Matching por submobjects.
     MatchingShapes(TransformMatchingShapes),
     /// Espera: congela el último frame N veces.
@@ -1583,6 +1887,8 @@ impl PlayItem {
             Self::GrowFromCenter(a) => a.frames(),
             Self::Indicate(a) => a.frames(),
             Self::Tracker(a) => a.frames(),
+            Self::Timeline(a) => a.frames(),
+            Self::Redraw(a) => a.frames(),
             Self::MatchingShapes(a) => a.frames(),
             Self::Wait(a) => a.frames(),
         }
@@ -1831,6 +2137,38 @@ impl ScenePlayer {
                     anim.finish();
                 }
                 PlayItem::Tracker(mut anim) => {
+                    let n = anim.frames().clamp(1, PLAYER_MAX_FRAMES);
+                    anim.begin();
+                    for fi in 0..n {
+                        if out.len() >= PLAYER_MAX_TOTAL_FRAMES {
+                            break;
+                        }
+                        let mut frame = fondo.clone();
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
+                    }
+                    anim.finish();
+                }
+                PlayItem::Timeline(mut anim) => {
+                    let n = anim.frames().clamp(1, PLAYER_MAX_FRAMES);
+                    anim.begin();
+                    for fi in 0..n {
+                        if out.len() >= PLAYER_MAX_TOTAL_FRAMES {
+                            break;
+                        }
+                        let mut frame = fondo.clone();
+                        let colocado = anim.placed_at(alpha_en(fi, n));
+                        empuja_colocado(&mut frame, colocado, clamp)?;
+                        if !empuja_frame(&mut out, &mut bytes, frame, clamp)? {
+                            break 'items;
+                        }
+                    }
+                    anim.finish();
+                }
+                PlayItem::Redraw(mut anim) => {
                     let n = anim.frames().clamp(1, PLAYER_MAX_FRAMES);
                     anim.begin();
                     for fi in 0..n {
@@ -2396,5 +2734,191 @@ mod player_tests {
         let a0 = t.frame_at(0.0).unwrap();
         let r0 = r.frame_at(0.0).unwrap();
         assert_eq!(a0.len(), r0.len());
+    }
+
+    #[test]
+    fn tracker_timeline_evalua_keys_y_value_tracker_lo_aplica() {
+        let track = TrackerTimeline::try_new(vec![
+            TrackerKey {
+                pos: 0.0,
+                value: 0.0,
+            },
+            TrackerKey {
+                pos: 0.5,
+                value: 10.0,
+            },
+            TrackerKey {
+                pos: 1.0,
+                value: 4.0,
+            },
+        ])
+        .unwrap();
+        assert_eq!(track.len(), 3);
+        assert_eq!(track.rango(), (0.0, 10.0));
+        assert_eq!(track.eval(0.0), 0.0);
+        assert_eq!(track.eval(0.5), 10.0);
+        assert_eq!(track.eval(1.0), 4.0);
+        assert!((track.eval(0.25) - 5.0).abs() < 1e-12);
+        assert!((track.eval(0.75) - 7.0).abs() < 1e-12);
+        // Clamp en extremos + guardia no finita.
+        assert_eq!(track.eval(-1.0), 0.0);
+        assert_eq!(track.eval(2.0), 4.0);
+        assert_eq!(track.eval(f64::NAN), 0.0);
+        // Una sola key = constante.
+        let cte = TrackerTimeline::try_new(vec![TrackerKey {
+            pos: 0.0,
+            value: 7.0,
+        }])
+        .unwrap();
+        assert_eq!(cte.eval(0.3), 7.0);
+        // Inválidos: vacía, pos repetida, valor no finito.
+        assert!(TrackerTimeline::try_new(vec![]).is_err());
+        assert!(TrackerTimeline::try_new(vec![
+            TrackerKey {
+                pos: 0.0,
+                value: 0.0
+            },
+            TrackerKey {
+                pos: 0.0,
+                value: 1.0
+            },
+        ])
+        .is_err());
+        assert!(TrackerTimeline::try_new(vec![TrackerKey {
+            pos: 0.0,
+            value: f64::INFINITY,
+        }])
+        .is_err());
+        // El tracker sigue al track por frame.
+        let mut t = ValueTracker::try_new(0.0).unwrap();
+        t.aplica_track(&track, 0.25).unwrap();
+        assert!((t.get() - 5.0).abs() < 1e-12);
+        t.aplica_track(&track, 1.0).unwrap();
+        assert_eq!(t.get(), 4.0);
+    }
+
+    #[test]
+    fn update_from_timeline_mapea_y_degenera_al_piso() {
+        let track = TrackerTimeline::try_new(vec![
+            TrackerKey {
+                pos: 0.0,
+                value: 0.0,
+            },
+            TrackerKey {
+                pos: 1.0,
+                value: 1.0,
+            },
+        ])
+        .unwrap();
+        let u = UpdateFromTimeline::try_new(
+            Mobject::Dot { x: 0.0, y: 0.0 },
+            track,
+            4,
+            500,
+            RateFunc::Linear,
+            TrackerMap::Opacity { lo: 0.2, hi: 0.8 },
+        )
+        .unwrap();
+        assert!((u.valor_en(0.0) - 0.0).abs() < 1e-12);
+        assert!((u.valor_en(1.0) - 1.0).abs() < 1e-12);
+        assert!((u.placed_at(0.5).expect("timeline válido").opacity - 0.5).abs() < 1e-6);
+        // Rango degenerado → piso del mapa (misma convención que Tracker).
+        let plano = TrackerTimeline::try_new(vec![TrackerKey {
+            pos: 0.0,
+            value: 3.0,
+        }])
+        .unwrap();
+        let d = UpdateFromTimeline::try_new(
+            Mobject::Dot { x: 0.0, y: 0.0 },
+            plano,
+            3,
+            500,
+            RateFunc::Linear,
+            TrackerMap::Scale { lo: 2.0, hi: 5.0 },
+        )
+        .unwrap();
+        assert_eq!(d.placed_at(0.7).expect("timeline válido").scale, 2.0);
+    }
+
+    #[test]
+    fn always_redraw_regenera_por_frame_sin_io() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let llamadas = Arc::new(AtomicUsize::new(0));
+        let llamadas2 = llamadas.clone();
+        let r = AlwaysRedraw::try_new(
+            move |p| {
+                llamadas2.fetch_add(1, Ordering::SeqCst);
+                Mobject::Dot {
+                    x: p * 10.0,
+                    y: 0.0,
+                }
+            },
+            4,
+            500,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        assert_eq!(r.frames(), 4);
+        let p0 = r.placed_at(0.0).expect("redraw válido");
+        let p1 = r.placed_at(1.0).expect("redraw válido");
+        assert_eq!(p0.center, [0.0, 0.0]);
+        assert_eq!(p1.center, [10.0, 0.0]);
+        assert_eq!(llamadas.load(Ordering::SeqCst), 2);
+        // Integrado al player: 3 frames con centros barriendo 0→10.
+        let r2 = AlwaysRedraw::try_new(
+            |p| Mobject::Dot {
+                x: p * 10.0,
+                y: 0.0,
+            },
+            3,
+            500,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        let mut escena = escena1();
+        let frames = ScenePlayer::play(&mut escena, vec![PlayItem::Redraw(r2)]);
+        assert_eq!(frames.len(), 3);
+        let xs: Vec<f64> = frames.iter().map(|f| f.objects[1].center[0]).collect();
+        assert!((xs[0] - 0.0).abs() < 1e-9);
+        assert!((xs[1] - 5.0).abs() < 1e-9);
+        assert!((xs[2] - 10.0).abs() < 1e-9);
+        // Callback que devuelve inválido → `Err` honesto, sin punto falso.
+        let mala = AlwaysRedraw::try_new(
+            |_| Mobject::Dot {
+                x: f64::NAN,
+                y: 0.0,
+            },
+            2,
+            500,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        assert!(mala.placed_at(0.5).is_err());
+        // Timeline también juega por el player.
+        let track = TrackerTimeline::try_new(vec![
+            TrackerKey {
+                pos: 0.0,
+                value: 0.0,
+            },
+            TrackerKey {
+                pos: 1.0,
+                value: 1.0,
+            },
+        ])
+        .unwrap();
+        let tl = UpdateFromTimeline::try_new(
+            Mobject::Dot { x: 0.0, y: 0.0 },
+            track,
+            2,
+            500,
+            RateFunc::Linear,
+            TrackerMap::CenterX { lo: -1.0, hi: 1.0 },
+        )
+        .unwrap();
+        let mut escena = escena1();
+        let frames = ScenePlayer::try_play(&mut escena, vec![PlayItem::Timeline(tl)])
+            .expect("timeline válido juega");
+        assert_eq!(frames.len(), 2);
     }
 }

@@ -1,4 +1,7 @@
 #!/bin/bash
+echo "overnight.sh RETIRADO: path Documentos/Github (mayúscula) no existe, esperaba PID muerto, llamaba a lab/nn_siren.py y virt_test.py inexistentes. Ver historia debajo; port del lab a crates/grafito-lab en curso." >&2
+exit 1
+# ── HISTORIA (no se ejecuta; conservada como registro) ─────────────────────
 # overnight.sh — turno noche autónomo (solo CPU local, sin TPU/Colab).
 # 1) Espera que termine el mining G3 (libera 10 cores).
 # 2) Criba SIREN-CPU de evobundle (8) + dobles (C5/C6/C7).

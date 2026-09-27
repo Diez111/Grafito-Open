@@ -2,16 +2,29 @@
 //!
 //! El voiceover reparte la narración de cada [`PasoGuion`]
 //! en su ventana de tiempo; este módulo la baja a pistas de subtítulos
-//! ([`CaptionTrack`]) serializables en dos formatos:
+//! ([`CaptionTrack`]) serializables en tres formatos:
 //! - SRT (RFC: numeración 1-based, `HH:MM:SS,mmm`, ≤2 renglones, tags escapados)
 //! - ASS v4+ (estilo `Caption`: blanco `#FFFFFF`, highlight amarillo `#FFD700`
 //!   por palabra vía karaoke `{\k}`, outline 3, MarginV 80, fontsize 56
 //!   relativo al player 720p —la Piel lo escala—).
+//! - WebVTT (`WEBVTT`, `HH:MM:SS.mmm --> HH:MM:SS.mmm`, ≤2 renglones,
+//!   karaoke palabra a palabra vía [`KaraokeTrack`], una cue por palabra).
+//!
+//! [`KaraokeTrack`] es la pista de palabra con `t0`/`t1` en ms (validada y
+//! acotada a [`KARAOKE_MAX_PALABRAS`] palabras): la alimenta la alineación
+//! de `grafito-app` (`voice.rs`: Piper no da timestamps en el CLI —solo el
+//! ONNX parcheado con alignments experimentales—, así que se estima por
+//! chars con WPM configurable) y de acá sale al `.vtt`.
+//!
+//! [`beats_a_rangos`] y [`beats_a_captions`] sincronizan beats con
+//! duraciones a rangos/captions (estilo Manim voiceover): fns puras que
+//! acumulan el cursor y reparten cada beat proporcionalmente.
 //!
 //! Presupuestos: texto `1..=200` chars, segmento dentro de 60 s
-//! (`end_ms <= 60_000`), pista `0..=2000` segmentos, salida
-//! `<= 256 KiB` en ambos formatos (cota PREVENTIVA: se chequea durante el
-//! armado y aborta al cruzarla, sin materializar la salida entera).
+//! (`end_ms <= 60_000`), pista `0..=2000` segmentos, karaoke `0..=5000`
+//! palabras, salida `<= 256 KiB` en los tres formatos (cota PREVENTIVA: se
+//! chequea durante el armado y aborta al cruzarla, sin materializar la
+//! salida entera).
 //!
 //! Cerebro puro: sin egui, sin wgpu, sin I/O, sin red. Todo `Err` en
 //! español, sin pánicos (sin `unwrap` en prod).
@@ -30,10 +43,18 @@ pub const CAPTION_MAX_END_MS: u32 = 60_000;
 /// Palabras con timing máximas por segmento (anti-OOM; el voiceover real
 /// trae `<= 40` por validación del guion).
 pub const CAPTION_MAX_PALABRAS: usize = 500;
-/// Cota de salida de `to_srt`/`to_ass` en bytes (256 KiB).
+/// Cota de salida de `to_srt`/`to_ass`/`to_vtt` en bytes (256 KiB).
 pub const CAPTION_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 /// Renglones máximos por bloque SRT.
 pub const SRT_MAX_LINEAS: usize = 2;
+/// Renglones máximos por cue WebVTT (paridad con SRT).
+pub const VTT_MAX_LINEAS: usize = 2;
+/// Palabras con timing máximas por pista karaoke (`0..=5000`, anti-OOM de
+/// wire: 5000 cues de una palabra rondan ~200 KiB de `.vtt`, dentro del tope).
+pub const KARAOKE_MAX_PALABRAS: usize = 5000;
+/// Beats máximos por llamada a [`beats_a_rangos`]/[`beats_a_captions`]
+/// (paridad con [`CAPTION_MAX_SEGMENTS`]: 1 beat = 1 segmento como mucho).
+pub const BEATS_MAX: usize = CAPTION_MAX_SEGMENTS;
 /// Estilo ASS: fontsize relativo al player (la Piel lo escala).
 pub const ASS_FONTSIZE: u32 = 56;
 /// Estilo ASS: outline.
@@ -80,6 +101,13 @@ pub enum CaptionError {
     /// Ventanas desparejas con los pasos.
     #[error("tenés {duraciones} ventanas para {pasos} pasos: pasalas 1 a 1")]
     VentanasDesparejas { pasos: usize, duraciones: usize },
+    /// Bloque WebVTT mal formado (solo lo devuelve `from_vtt`).
+    #[error("webvtt inválido: {motivo}")]
+    VttInvalido { motivo: String },
+}
+
+fn vtt_invalido(motivo: String) -> CaptionError {
+    CaptionError::VttInvalido { motivo }
 }
 
 fn palabra_invalida(motivo: String) -> CaptionError {
@@ -299,6 +327,64 @@ impl CaptionTrack {
         Ok(out)
     }
 
+    /// Baja la pista a WebVTT (`WEBVTT`, cues `HH:MM:SS.mmm -->
+    /// HH:MM:SS.mmm`, ≤2 renglones, tags escapados). Sin karaoke inline: una
+    /// cue por segmento (el karaoke palabra a palabra vive en
+    /// [`KaraokeTrack::to_vtt`]). Cota `<= 256 KiB` PREVENTIVA vía
+    /// [`empuja_acotado`], igual que `to_srt`/`to_ass`.
+    pub fn to_vtt(&self) -> Result<String, CaptionError> {
+        self.validate()?;
+        let mut out = String::new();
+        empuja_acotado(&mut out, "WEBVTT\n\n")?;
+        for (i, seg) in self.segments.iter().enumerate() {
+            let mut bloque = String::new();
+            bloque.push_str(&(i + 1).to_string());
+            bloque.push('\n');
+            bloque.push_str(&formatea_vtt_ts(seg.start_ms));
+            bloque.push_str(" --> ");
+            bloque.push_str(&formatea_vtt_ts(seg.end_ms));
+            bloque.push('\n');
+            for linea in envuelve_dos_lineas(&seg.texto) {
+                bloque.push_str(&escapa_vtt(&linea));
+                bloque.push('\n');
+            }
+            bloque.push('\n');
+            empuja_acotado(&mut out, &bloque)?;
+        }
+        Ok(out)
+    }
+
+    /// Lee un `.vtt` propio de vuelta a pista (roundtrip de [`to_vtt`]: las
+    /// ≤2 líneas de cada cue se re-unen con un espacio, que invierte
+    /// [`envuelve_dos_lineas`]). Los segmentos salen sin karaoke. Pura.
+    pub fn from_vtt(s: &str) -> Result<Self, CaptionError> {
+        let bloques = parse_vtt_bloques(s)?;
+        let mut segmentos = Vec::with_capacity(bloques.len());
+        for b in bloques {
+            let texto = b.lineas.join(" ");
+            segmentos.push(CaptionSegment::frase(texto, b.inicio, b.fin)?);
+        }
+        Self::try_new(segmentos)
+    }
+
+    /// Aplana el karaoke timed de los segmentos a [`KaraokeTrack`] (los
+    /// segmentos sin `palabras` se saltean: su texto no tiene timing y no
+    /// hay nada honesto que aplanar). Pura.
+    pub fn karaoke(&self) -> Result<KaraokeTrack, CaptionError> {
+        self.validate()?;
+        let mut palabras = Vec::new();
+        for seg in &self.segments {
+            for (texto, t0, t1) in &seg.palabras {
+                palabras.push(KaraokeWord {
+                    texto: texto.clone(),
+                    t0_ms: *t0,
+                    t1_ms: *t1,
+                });
+            }
+        }
+        KaraokeTrack::try_new(palabras)
+    }
+
     /// Baja la pista a ASS v4+ (estilo `Caption`: blanco `#FFFFFF`,
     /// highlight amarillo `#FFD700` por palabra vía karaoke `{\k}`,
     /// outline 3, MarginV 80, fontsize relativo). Sin `palabras` la
@@ -505,6 +591,427 @@ pub fn voiceover_segments(
         }
         segmentos.push(CaptionSegment {
             texto,
+            start_ms: inicio.min(u64::from(u32::MAX)) as u32,
+            end_ms: fin.min(u64::from(u32::MAX)) as u32,
+            palabras: con_tiempos,
+        });
+    }
+    CaptionTrack::try_new(segmentos)
+}
+
+/// Una palabra con timing en ms (`t0 < t1`, dentro de 60 s).
+///
+/// Es la unidad de [`KaraokeTrack`]: la produce la alineación de voz
+/// (`grafito-app`, estimada por chars con WPM configurable porque el CLI de
+/// Piper no expone timestamps) y de acá sale al `.vtt` palabra por palabra.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KaraokeWord {
+    /// Palabra (`1..=200` chars, sin controles ni llaves —las llaves
+    /// romperían el karaoke ASS si alguna vez se convierte—).
+    pub texto: String,
+    /// Inicio en ms (`< t1_ms`).
+    pub t0_ms: u32,
+    /// Fin en ms (`<= 60_000`).
+    pub t1_ms: u32,
+}
+
+impl KaraokeWord {
+    /// Constructor validado.
+    pub fn try_new(texto: String, t0_ms: u32, t1_ms: u32) -> Result<Self, CaptionError> {
+        let w = Self {
+            texto,
+            t0_ms,
+            t1_ms,
+        };
+        w.validate()?;
+        Ok(w)
+    }
+
+    /// Validación estricta (todo `Err` en español, sin pánicos).
+    pub fn validate(&self) -> Result<(), CaptionError> {
+        let texto = self.texto.trim();
+        if texto.is_empty() {
+            return Err(palabra_invalida("palabra vacía".to_string()));
+        }
+        if texto.chars().count() > CAPTION_MAX_CHARS {
+            return Err(palabra_invalida(format!(
+                "palabra de más de {CAPTION_MAX_CHARS} chars"
+            )));
+        }
+        if texto.contains(['{', '}', '\0']) || texto.chars().any(|c| c.is_control()) {
+            return Err(palabra_invalida(format!(
+                "palabra {texto:?} con control o llaves"
+            )));
+        }
+        if self.t0_ms >= self.t1_ms {
+            return Err(palabra_invalida(format!(
+                "{texto:?}: inicio {} no menor que fin {}",
+                self.t0_ms, self.t1_ms
+            )));
+        }
+        if self.t1_ms > CAPTION_MAX_END_MS {
+            return Err(CaptionError::FueraDeRango {
+                end: self.t1_ms,
+                max: CAPTION_MAX_END_MS,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Pista karaoke: palabras con timing en orden sin solapar (`0..=5000`).
+///
+/// Exporta a WebVTT (una cue por palabra) y se lee de vuelta con
+/// [`from_vtt`](KaraokeTrack::from_vtt) (roundtrip exacto byte a byte en el
+/// payload de una palabra). Vacía = silencio total, válida.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct KaraokeTrack {
+    /// Palabras en orden de reproducción.
+    #[serde(default)]
+    pub palabras: Vec<KaraokeWord>,
+}
+
+impl KaraokeTrack {
+    /// Constructor validado.
+    pub fn try_new(palabras: Vec<KaraokeWord>) -> Result<Self, CaptionError> {
+        let pista = Self { palabras };
+        pista.validate()?;
+        Ok(pista)
+    }
+
+    /// Pista vacía (silencio total, válida).
+    pub fn vacia() -> Self {
+        Self {
+            palabras: Vec::new(),
+        }
+    }
+
+    /// ¿Sin palabras?
+    pub fn is_empty(&self) -> bool {
+        self.palabras.is_empty()
+    }
+
+    /// Cantidad de palabras.
+    pub fn len(&self) -> usize {
+        self.palabras.len()
+    }
+
+    /// Validación estricta: tope, cada palabra, orden sin solapar (los
+    /// huecos entre palabras son legítimos: pausas del habla).
+    pub fn validate(&self) -> Result<(), CaptionError> {
+        if self.palabras.len() > KARAOKE_MAX_PALABRAS {
+            return Err(CaptionError::DemasiadasPalabras {
+                got: self.palabras.len(),
+                max: KARAOKE_MAX_PALABRAS,
+            });
+        }
+        let mut previo_fin: Option<u32> = None;
+        for w in &self.palabras {
+            w.validate()?;
+            if let Some(previo) = previo_fin {
+                if w.t0_ms < previo {
+                    return Err(palabra_invalida(format!(
+                        "{:?} arranca en {} antes del fin previo {previo}",
+                        w.texto, w.t0_ms
+                    )));
+                }
+            }
+            previo_fin = Some(w.t1_ms);
+        }
+        Ok(())
+    }
+
+    /// Baja la pista a WebVTT: una cue numerada por palabra
+    /// (`HH:MM:SS.mmm --> HH:MM:SS.mmm`, payload de una palabra escapada).
+    /// Cota `<= 256 KiB` PREVENTIVA vía [`empuja_acotado`].
+    pub fn to_vtt(&self) -> Result<String, CaptionError> {
+        self.validate()?;
+        let mut out = String::new();
+        empuja_acotado(&mut out, "WEBVTT\n\n")?;
+        for (i, w) in self.palabras.iter().enumerate() {
+            let mut bloque = String::new();
+            bloque.push_str(&(i + 1).to_string());
+            bloque.push('\n');
+            bloque.push_str(&formatea_vtt_ts(w.t0_ms));
+            bloque.push_str(" --> ");
+            bloque.push_str(&formatea_vtt_ts(w.t1_ms));
+            bloque.push('\n');
+            bloque.push_str(&escapa_vtt(w.texto.trim()));
+            bloque.push_str("\n\n");
+            empuja_acotado(&mut out, &bloque)?;
+        }
+        Ok(out)
+    }
+
+    /// Lee un `.vtt` propio de vuelta a pista (roundtrip de [`to_vtt`](Self::to_vtt):
+    /// cada cue trae exactamente una línea de payload). Pura.
+    pub fn from_vtt(s: &str) -> Result<Self, CaptionError> {
+        let bloques = parse_vtt_bloques(s)?;
+        let mut palabras = Vec::with_capacity(bloques.len());
+        for b in bloques {
+            if b.lineas.len() != 1 {
+                return Err(vtt_invalido(format!(
+                    "la cue {}..{} trae {} líneas (el karaoke es 1 palabra por cue)",
+                    b.inicio,
+                    b.fin,
+                    b.lineas.len()
+                )));
+            }
+            let Some(linea) = b.lineas.into_iter().next() else {
+                return Err(vtt_invalido(
+                    "cue sin payload: no debería pasar".to_string(),
+                ));
+            };
+            palabras.push(KaraokeWord {
+                texto: linea,
+                t0_ms: b.inicio,
+                t1_ms: b.fin,
+            });
+        }
+        Self::try_new(palabras)
+    }
+}
+
+/// Formatea ms a `HH:MM:SS.mmm` (WebVTT, punto —no coma como SRT—). Pura.
+pub fn formatea_vtt_ts(ms: u32) -> String {
+    let total_s = ms / 1000;
+    let resto_ms = ms % 1000;
+    let s = total_s % 60;
+    let total_m = total_s / 60;
+    let m = total_m % 60;
+    let h = total_m / 60;
+    format!("{h:02}:{m:02}:{s:02}.{resto_ms:03}")
+}
+
+/// Escapa texto para WebVTT (`&` primero para no re-escapar). Pura.
+pub fn escapa_vtt(texto: &str) -> String {
+    texto
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Invierte [`escapa_vtt`] (orden inverso: `&` último). Pura.
+pub fn desescapa_vtt(texto: &str) -> String {
+    texto
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/// Lee `HH:MM:SS.mmm` o `MM:SS.mmm` a ms (`None` si mal formado). Pura.
+fn parse_vtt_ts(raw: &str) -> Option<u32> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let partes: Vec<&str> = t.split(':').collect();
+    let (h, m, s_ms) = match partes.len() {
+        2 => (0u64, partes[0], partes[1]),
+        3 => (partes[0].parse::<u64>().ok()?, partes[1], partes[2]),
+        _ => return None,
+    };
+    let m = m.parse::<u64>().ok()?;
+    let (s, ms) = s_ms.split_once('.')?;
+    if ms.len() != 3 {
+        return None;
+    }
+    let s = s.parse::<u64>().ok()?;
+    let ms = ms.parse::<u64>().ok()?;
+    if m >= 60 || s >= 60 || ms >= 1000 {
+        return None;
+    }
+    let total = h
+        .checked_mul(3_600_000)?
+        .checked_add(m.checked_mul(60_000)?)?
+        .checked_add(s.checked_mul(1000)?)?
+        .checked_add(ms)?;
+    u32::try_from(total).ok()
+}
+
+/// Una cue parseada: ventana + líneas de payload ya desescapadas.
+struct BloqueVtt {
+    inicio: u32,
+    fin: u32,
+    lineas: Vec<String>,
+}
+
+/// Parte un `.vtt` en cues (`WEBVTT` + bloques separados por líneas vacías;
+/// identificador numérico opcional, settings tras el fin tolerados).
+/// Acota a [`CAPTION_MAX_SEGMENTS`] bloques. Pura.
+fn parse_vtt_bloques(s: &str) -> Result<Vec<BloqueVtt>, CaptionError> {
+    let mut lineas = s.lines();
+    let primera = lineas
+        .next()
+        .ok_or_else(|| vtt_invalido("archivo vacío: falta la cabecera WEBVTT".to_string()))?;
+    let cabecera = primera.strip_prefix('\u{FEFF}').unwrap_or(primera);
+    if cabecera != "WEBVTT" && !cabecera.starts_with("WEBVTT ") && !cabecera.starts_with("WEBVTT\t")
+    {
+        return Err(vtt_invalido(
+            "falta la cabecera WEBVTT en la primera línea".to_string(),
+        ));
+    }
+    let resto: Vec<&str> = lineas.collect();
+    let mut bloques = Vec::new();
+    let mut actual: Vec<&str> = Vec::new();
+    for linea in resto {
+        if linea.trim().is_empty() {
+            if !actual.is_empty() {
+                bloques.push(actual);
+                actual = Vec::new();
+            }
+        } else {
+            actual.push(linea);
+        }
+    }
+    if !actual.is_empty() {
+        bloques.push(actual);
+    }
+    if bloques.len() > CAPTION_MAX_SEGMENTS {
+        return Err(CaptionError::DemasiadosSegmentos {
+            got: bloques.len(),
+            max: CAPTION_MAX_SEGMENTS,
+        });
+    }
+    let mut out = Vec::with_capacity(bloques.len());
+    for bloque in bloques {
+        let mut lineas = bloque.iter().peekable();
+        // Identificador opcional: primera línea sin `-->` se salta.
+        if let Some(primera) = lineas.peek() {
+            if !primera.contains("-->") {
+                lineas.next();
+            }
+        }
+        let tiempos = lineas.next().ok_or_else(|| {
+            vtt_invalido("cue sin línea de tiempos: falta `inicio --> fin`".to_string())
+        })?;
+        let (izq, der) = tiempos
+            .split_once("-->")
+            .ok_or_else(|| vtt_invalido(format!("línea de tiempos sin `-->`: {tiempos:?}")))?;
+        let inicio = parse_vtt_ts(izq).ok_or_else(|| {
+            vtt_invalido(format!("inicio mal formado: {izq:?} (usá HH:MM:SS.mmm)"))
+        })?;
+        // Tras el fin puede haber settings (`align:center`): solo el token.
+        let fin_token = der.split_whitespace().next().unwrap_or("");
+        let fin = parse_vtt_ts(fin_token).ok_or_else(|| {
+            vtt_invalido(format!("fin mal formado: {fin_token:?} (usá HH:MM:SS.mmm)"))
+        })?;
+        if inicio >= fin {
+            return Err(vtt_invalido(format!(
+                "ventana {inicio}..{fin} inválida: el inicio debe ser menor que el fin"
+            )));
+        }
+        if fin > CAPTION_MAX_END_MS {
+            return Err(CaptionError::FueraDeRango {
+                end: fin,
+                max: CAPTION_MAX_END_MS,
+            });
+        }
+        let payload: Vec<String> = lineas.map(|l| desescapa_vtt(l.trim())).collect();
+        if payload.is_empty() || payload.iter().all(|l| l.trim().is_empty()) {
+            return Err(vtt_invalido(format!(
+                "la cue {inicio}..{fin} no trae texto"
+            )));
+        }
+        out.push(BloqueVtt {
+            inicio,
+            fin,
+            lineas: payload,
+        });
+    }
+    Ok(out)
+}
+
+/// Sincroniza beats con duraciones a rangos acumulados (estilo Manim
+/// voiceover: el cursor avanza beat a beat desde 0).
+///
+/// `duraciones_ms[i]` = largo del beat `i`; el rango sale
+/// `(cursor, cursor + dur)`. Exige `<= 2000` beats y total dentro de 60 s.
+/// Pura, sin I/O, sin pánicos.
+pub fn beats_a_rangos(duraciones_ms: &[u32]) -> Result<Vec<(u32, u32)>, CaptionError> {
+    if duraciones_ms.len() > BEATS_MAX {
+        return Err(CaptionError::DemasiadosSegmentos {
+            got: duraciones_ms.len(),
+            max: BEATS_MAX,
+        });
+    }
+    let mut rangos = Vec::with_capacity(duraciones_ms.len());
+    let mut cursor: u64 = 0;
+    for dur in duraciones_ms {
+        let inicio = cursor;
+        cursor = cursor.saturating_add(u64::from(*dur));
+        if cursor > u64::from(CAPTION_MAX_END_MS) {
+            return Err(CaptionError::FueraDeRango {
+                end: cursor.min(u64::from(u32::MAX)) as u32,
+                max: CAPTION_MAX_END_MS,
+            });
+        }
+        rangos.push((
+            inicio.min(u64::from(u32::MAX)) as u32,
+            cursor.min(u64::from(u32::MAX)) as u32,
+        ));
+    }
+    Ok(rangos)
+}
+
+/// Sincroniza beats `(texto, duración)` a pista de subtítulos.
+///
+/// Cada beat ocupa su rango de [`beats_a_rangos`] y reparte sus palabras
+/// proporcionalmente (misma técnica que [`voiceover_segments`]: división
+/// entera con el resto a las primeras palabras, 1 ms mínimo por palabra).
+/// El beat con texto vacío se saltea (hueco silencioso legítimo, el cursor
+/// igual avanza). Pura, sin I/O, sin pánicos.
+pub fn beats_a_captions(beats: &[(&str, u32)]) -> Result<CaptionTrack, CaptionError> {
+    if beats.len() > BEATS_MAX {
+        return Err(CaptionError::DemasiadosSegmentos {
+            got: beats.len(),
+            max: BEATS_MAX,
+        });
+    }
+    let mut segmentos = Vec::new();
+    let mut cursor: u64 = 0;
+    for (texto, dur) in beats {
+        let inicio = cursor;
+        cursor = cursor.saturating_add(u64::from(*dur));
+        let normalizado = normaliza_texto(texto);
+        if normalizado.is_empty() {
+            continue;
+        }
+        let palabras: Vec<&str> = normalizado.split(' ').filter(|w| !w.is_empty()).collect();
+        if palabras.is_empty() {
+            continue;
+        }
+        let dur_u64 = u64::from(*dur);
+        if dur_u64 < palabras.len() as u64 {
+            return Err(reparto_imposible(format!(
+                "ventana de {dur} ms muy corta para {} palabras: dale al menos 1 ms por palabra",
+                palabras.len()
+            )));
+        }
+        let fin = inicio.saturating_add(dur_u64);
+        if fin > u64::from(CAPTION_MAX_END_MS) {
+            return Err(CaptionError::FueraDeRango {
+                end: fin.min(u64::from(u32::MAX)) as u32,
+                max: CAPTION_MAX_END_MS,
+            });
+        }
+        let base = *dur / palabras.len() as u32;
+        let resto = *dur % palabras.len() as u32;
+        let mut cursor_palabra = inicio;
+        let mut con_tiempos = Vec::with_capacity(palabras.len());
+        for (k, palabra) in palabras.iter().enumerate() {
+            let extra = if (k as u32) < resto { 1 } else { 0 };
+            let tramo = base.saturating_add(extra);
+            let fin_palabra = cursor_palabra.saturating_add(u64::from(tramo));
+            con_tiempos.push((
+                (*palabra).to_string(),
+                cursor_palabra.min(u64::from(u32::MAX)) as u32,
+                fin_palabra.min(u64::from(u32::MAX)) as u32,
+            ));
+            cursor_palabra = fin_palabra;
+        }
+        segmentos.push(CaptionSegment {
+            texto: normalizado,
             start_ms: inicio.min(u64::from(u32::MAX)) as u32,
             end_ms: fin.min(u64::from(u32::MAX)) as u32,
             palabras: con_tiempos,
@@ -736,9 +1243,166 @@ mod tests {
         assert_eq!(formatea_srt_ts(61_500), "00:01:01,500");
         assert_eq!(formatea_ass_ts(0), "0:00:00.00");
         assert_eq!(formatea_ass_ts(61_500), "0:01:01.50");
+        assert_eq!(formatea_vtt_ts(0), "00:00:00.000");
+        assert_eq!(formatea_vtt_ts(61_500), "00:01:01.500");
+        assert_eq!(formatea_vtt_ts(3_661_000), "01:01:01.000");
         // Dos líneas balanceadas sin cortar palabras.
         let lineas = envuelve_dos_lineas("una dos tres cuatro cinco seis");
         assert_eq!(lineas.len(), 2);
         assert_eq!(envuelve_dos_lineas("sola"), vec!["sola".to_string()]);
+    }
+
+    #[test]
+    fn karaoke_valida_bordes_topa_y_ordena() {
+        assert!(KaraokeWord::try_new("hola".to_string(), 0, 500).is_ok());
+        assert!(KaraokeWord::try_new("".to_string(), 0, 500).is_err());
+        assert!(KaraokeWord::try_new("hola".to_string(), 500, 500).is_err());
+        assert!(KaraokeWord::try_new("hola".to_string(), 600, 500).is_err());
+        assert!(KaraokeWord::try_new("hola".to_string(), 0, 60_001).is_err());
+        assert!(KaraokeWord::try_new("a{b".to_string(), 0, 500).is_err());
+        assert!(KaraokeTrack::vacia().validate().is_ok());
+        assert!(KaraokeTrack::vacia().is_empty());
+        assert_eq!(KaraokeTrack::vacia().len(), 0);
+        // Huecos legítimos, solape no.
+        let con_hueco = KaraokeTrack::try_new(vec![
+            KaraokeWord::try_new("hola".to_string(), 0, 400).unwrap(),
+            KaraokeWord::try_new("mundo".to_string(), 600, 1000).unwrap(),
+        ]);
+        assert!(con_hueco.is_ok());
+        let solapada = KaraokeTrack::try_new(vec![
+            KaraokeWord::try_new("hola".to_string(), 0, 500).unwrap(),
+            KaraokeWord::try_new("mundo".to_string(), 499, 1000).unwrap(),
+        ]);
+        assert!(solapada.is_err());
+        // Tope 5000.
+        let muchas: Vec<KaraokeWord> = (0..5001)
+            .map(|i| KaraokeWord {
+                texto: "x".to_string(),
+                t0_ms: i * 10,
+                t1_ms: i * 10 + 5,
+            })
+            .collect();
+        assert!(KaraokeTrack::try_new(muchas).is_err());
+    }
+
+    #[test]
+    fn vtt_caption_cabecera_tiempos_y_escape() {
+        let pista = CaptionTrack::try_new(vec![
+            segmento("hola", 1000, 3500),
+            segmento("a <b> & c", 4000, 8000),
+        ])
+        .unwrap();
+        let vtt = pista.to_vtt().unwrap();
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        assert!(vtt.contains("1\n00:00:01.000 --> 00:00:03.500\nhola\n\n"));
+        // Punto (no coma como SRT) y tags escapados.
+        assert!(vtt.contains("00:00:04.000 --> 00:00:08.000"));
+        assert!(vtt.contains("a &lt;b&gt;"));
+        assert!(vtt.contains("&amp; c"));
+        assert!(!vtt.contains("00:00:01,000"));
+    }
+
+    #[test]
+    fn vtt_roundtrip_caption_byte_identico() {
+        let pista = CaptionTrack::try_new(vec![
+            segmento("hola mundo", 0, 1200),
+            CaptionSegment {
+                texto: "esta frase es bastante larga y se parte en dos renglones seguro"
+                    .to_string(),
+                start_ms: 1500,
+                end_ms: 4000,
+                palabras: Vec::new(),
+            },
+            segmento("a <b> & c", 5000, 6000),
+        ])
+        .unwrap();
+        let vtt = pista.to_vtt().unwrap();
+        let leida = CaptionTrack::from_vtt(&vtt).unwrap();
+        assert_eq!(leida.len(), pista.len());
+        for (a, b) in pista.segments.iter().zip(leida.segments.iter()) {
+            assert_eq!(a.texto, b.texto);
+            assert_eq!((a.start_ms, a.end_ms), (b.start_ms, b.end_ms));
+        }
+        // El wrap es determinista: re-exportar da los mismos bytes.
+        assert_eq!(leida.to_vtt().unwrap(), vtt);
+    }
+
+    #[test]
+    fn vtt_roundtrip_karaoke_palabra_por_cue() {
+        let pista = KaraokeTrack::try_new(vec![
+            KaraokeWord::try_new("hola".to_string(), 0, 400).unwrap(),
+            KaraokeWord::try_new("mundo".to_string(), 400, 1000).unwrap(),
+            KaraokeWord::try_new("a & b".to_string(), 1200, 1600).unwrap(),
+        ])
+        .unwrap();
+        let vtt = pista.to_vtt().unwrap();
+        assert!(vtt.starts_with("WEBVTT\n\n"));
+        assert!(vtt.contains("00:00:00.000 --> 00:00:00.400\nhola\n\n"));
+        assert!(vtt.contains("a &amp; b"));
+        let leida = KaraokeTrack::from_vtt(&vtt).unwrap();
+        assert_eq!(leida, pista);
+        // Una cue con 2 líneas no es karaoke de una palabra.
+        let doble = "WEBVTT\n\n1\n00:00:00.000 --> 00:00:01.000\nhola\nmundo\n\n";
+        assert!(KaraokeTrack::from_vtt(doble).is_err());
+        // Sin cabecera no hay pista.
+        assert!(CaptionTrack::from_vtt("1\n00:00:00.000 --> 00:00:01.000\nhola\n\n").is_err());
+        assert!(CaptionTrack::from_vtt("").is_err());
+    }
+
+    #[test]
+    fn vtt_acota_a_256kib_igual_que_srt_y_ass() {
+        let muchos: Vec<CaptionSegment> = (0..2000)
+            .map(|i| segmento("a".repeat(200).as_str(), i * 30, i * 30 + 25))
+            .collect();
+        let pista = CaptionTrack::try_new(muchos).unwrap();
+        let bytes = match pista.to_vtt() {
+            Err(CaptionError::SalidaMuyGrande { bytes }) => bytes,
+            otro => panic!("esperaba SalidaMuyGrande, got {otro:?}"),
+        };
+        assert!(
+            bytes <= CAPTION_MAX_OUTPUT_BYTES + 1024,
+            "debe frenar al cruzar el tope: {bytes} bytes"
+        );
+    }
+
+    #[test]
+    fn beats_a_rangos_acumula_y_topa() {
+        assert_eq!(beats_a_rangos(&[]).unwrap(), vec![]);
+        assert_eq!(
+            beats_a_rangos(&[2500, 5000, 4000]).unwrap(),
+            vec![(0, 2500), (2500, 7500), (7500, 11_500)]
+        );
+        // Beat de 0 ms = rango degenerado pero honesto (silencio).
+        assert_eq!(beats_a_rangos(&[0, 100]).unwrap(), vec![(0, 0), (0, 100)]);
+        // Más de 60 s no entra.
+        assert!(beats_a_rangos(&[59_000, 2000]).is_err());
+        assert!(beats_a_rangos(&[60_000]).is_ok());
+        // Tope de beats.
+        assert!(beats_a_rangos(&vec![1u32; 2001]).is_err());
+    }
+
+    #[test]
+    fn beats_a_captions_reparte_salta_silencios_y_falla_corto() {
+        let pista =
+            beats_a_captions(&[("hola mundo", 2500), ("", 500), ("una prueba", 3000)]).unwrap();
+        // El beat vacío se saltea pero el cursor avanza (tercer beat en 3000).
+        assert_eq!(pista.len(), 2);
+        assert_eq!(pista.segments[0].start_ms, 0);
+        assert_eq!(pista.segments[0].end_ms, 2500);
+        assert_eq!(pista.segments[1].start_ms, 3000);
+        assert_eq!(pista.segments[1].end_ms, 6000);
+        // Karaoke suma la ventana entera.
+        for seg in &pista.segments {
+            let total: u32 = seg.palabras.iter().map(|(_, i, f)| f - i).sum();
+            assert_eq!(total, seg.end_ms - seg.start_ms);
+        }
+        // Ventana más corta que las palabras = `Err` (1 ms mínimo).
+        assert!(beats_a_captions(&[("una dos tres", 2)]).is_err());
+        // Aplanar el karaoke da la pista palabra a palabra.
+        let plana = pista.karaoke().unwrap();
+        assert_eq!(plana.len(), 4);
+        assert_eq!(plana.palabras[0].texto, "hola");
+        let vtt = plana.to_vtt().unwrap();
+        assert_eq!(KaraokeTrack::from_vtt(&vtt).unwrap(), plana);
     }
 }

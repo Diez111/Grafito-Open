@@ -1110,6 +1110,36 @@ impl Camera {
         }
     }
 
+    /// Profundidad de un punto en la cámara (pinta lejos-primero).
+    ///
+    /// `Perspective` devuelve la distancia a lo largo de `forward` (`None`
+    /// honesto si el punto cae detrás o la base degenera; mismo criterio que
+    /// [`Camera::project_3d`]). `Ortho` devuelve `-z` (el visor mira desde
+    /// `+z`; mayor `z` = más cerca). Mayor valor = más lejos: ordenar
+    /// descendente pinta lejos→cerca (painter's algorithm, espejo conceptual
+    /// del `depth_3d` de `grafito-render`, acá CPU/offline sin wgpu). Puro,
+    /// sin pánicos.
+    pub fn depth_of(self, p: [f64; 3]) -> Option<f64> {
+        if !p.iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        match self {
+            Self::Ortho(_) => Some(-p[2]),
+            Self::Perspective { eye, center, .. } => {
+                let fwd = forward_normalizado(eye, center)?;
+                let vx = p[0] - eye[0];
+                let vy = p[1] - eye[1];
+                let vz = p[2] - eye[2];
+                let prof = vx * fwd[0] + vy * fwd[1] + vz * fwd[2];
+                if prof.is_finite() && prof > 0.0 {
+                    Some(prof)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Interpola hacia `otra` (misma variante) con fracción `f` 0..1.
     /// Variante distinta → `self` (el constructor ya lo impide; total).
     pub fn lerp_hacia(self, otra: Self, f: f64) -> Self {
@@ -1292,6 +1322,443 @@ impl MovingCamera {
             )?);
         }
         Ok(tracks)
+    }
+}
+
+/// `forward = center - eye` normalizado (`None` si degenera o no es finito).
+/// Puro, sin pánicos; lo comparten `depth_of` y la cámara extendida.
+fn forward_normalizado(eye: [f64; 3], center: [f64; 3]) -> Option<[f64; 3]> {
+    if !eye.iter().all(|v| v.is_finite()) || !center.iter().all(|v| v.is_finite()) {
+        return None;
+    }
+    let fx = center[0] - eye[0];
+    let fy = center[1] - eye[1];
+    let fz = center[2] - eye[2];
+    let len = (fx * fx + fy * fy + fz * fz).sqrt();
+    if !len.is_finite() || len < 1e-9 {
+        return None;
+    }
+    Some([fx / len, fy / len, fz / len])
+}
+
+/// Lerp total con guardia finita (no finito → `a`). Puro, sin pánicos.
+fn lerp_finito(a: f64, b: f64, f: f64) -> f64 {
+    let f = if f.is_finite() {
+        f.clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let v = a + (b - a) * f;
+    if v.is_finite() {
+        v
+    } else {
+        a
+    }
+}
+
+/// Lerp 3D por componentes (total, finito). Puro, sin pánicos.
+fn lerp3(a: [f64; 3], b: [f64; 3], f: f64) -> [f64; 3] {
+    [
+        lerp_finito(a[0], b[0], f),
+        lerp_finito(a[1], b[1], f),
+        lerp_finito(a[2], b[2], f),
+    ]
+}
+
+/// Fracción eased 0..1 de un travelling (`t_ms` sobre `duration_ms`,
+/// clamp en extremos; `duration_ms == 0` imposible tras `try_new` pero
+/// total). Pura, sin pánicos.
+fn fraccion_eased(easing: RateFunc, t_ms: u64, duration_ms: u64) -> f64 {
+    let f = if duration_ms == 0 {
+        1.0
+    } else {
+        (t_ms.min(duration_ms) as f64) / (duration_ms as f64)
+    };
+    let e = easing.apply(f);
+    if e.is_finite() {
+        e.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+// ── Cámara 3D extendida: órbita ambiental, zoom y look-at (3Blue1Brown) ────
+// Paridad Manim (`docs.manim.community`, verificado 2026-09-27):
+// - `AmbientOrbit` ≈ `ThreeDScene::begin_ambient_camera_rotation(rate)`:
+//   Manim rota `theta` a tasa fija sobre `Z_AXIS` en antihorario; acá la
+//   órbita es explícita y parametrizable (radio, altura, velocidad, fase).
+// - `ZoomAnim` ≈ `ThreeDCamera::{zoom, focal_distance}` + `MovingCameraScene`
+//   (fov y distancia viajan como tracks `cam.*`, el mismo vocabulario que
+//   `MovingCamera::as_tracks`: `cam.fov` + `cam.eye_*`).
+// - `LookAtAnim` ≈ `ThreeDScene::{move_camera, set_camera_orientation}`:
+//   paneo suave del `center` con `eye` fijo.
+// Todo CPU/offline, sin wgpu: el orden por profundidad vive en
+// `surfaces3d` (painter `O(n log n)` sobre `Camera::depth_of`; espejo
+// conceptual del `depth_3d`/`composite_3d` de `grafito-render`).
+
+/// Superficies 3D CPU (mallas paramétricas, curvas 3D, ejes 3D y painter).
+/// Vive en `surfaces3d.rs` y se cablea acá —junto a la cámara— para no
+/// tocar `lib.rs`: el coordinador lo reexporta con un `pub use` sin
+/// duplicar el `mod`.
+#[path = "surfaces3d.rs"]
+pub mod surfaces3d;
+
+/// Radio orbital 1e-9..=1e6 (paridad con figuras `MIN/MAX_FIGURE_SIZE`).
+pub const ORBIT_MIN_RADIUS: f64 = 1e-9;
+/// Radio orbital máximo (paridad con figuras).
+pub const ORBIT_MAX_RADIUS: f64 = 1e6;
+/// Altura orbital (`|height| ≤ 1e6`, paridad con figuras).
+pub const ORBIT_MAX_HEIGHT: f64 = 1e6;
+/// Velocidad angular máxima (`|omega| ≤ 2 vueltas/s`; más es mareo).
+pub const MAX_ORBIT_OMEGA_RAD_S: f64 = 2.0 * std::f64::consts::TAU;
+/// Distancia mínima ojo→objetivo del zoom (paridad con cámara: 1e-9).
+pub const ZOOM_MIN_DIST: f64 = 1e-9;
+/// Distancia máxima ojo→objetivo del zoom (paridad con figuras: 1e6).
+pub const ZOOM_MAX_DIST: f64 = 1e6;
+
+/// Órbita ambiental continua (≈ Manim `begin_ambient_camera_rotation`).
+///
+/// El ojo gira sobre un círculo horizontal de `radius` a `height` sobre
+/// `center`, con `theta(t) = phase_rad + omega_rad_s · t` (t en segundos):
+/// `eye = center + [r·cos θ, height, r·sin θ]`, mirando siempre a `center`.
+/// `omega = 0` vale (cámara estática); el signo da el sentido (`omega > 0`
+/// antihorario visto desde `+y`, como Manim sobre `+Z`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AmbientOrbit {
+    pub center: [f64; 3],
+    pub radius: f64,
+    pub height: f64,
+    pub omega_rad_s: f64,
+    pub phase_rad: f64,
+    pub fov_deg: f64,
+}
+
+impl AmbientOrbit {
+    /// Constructor validado (`center` finito, radio 1e-9..=1e6,
+    /// `|height| ≤ 1e6`, `|omega| ≤ 2 vueltas/s` finito, `phase` finita,
+    /// `fov` 1..=179). La fase se normaliza a `[0, 2π)`. Todo `Err` honesto.
+    pub fn try_new(
+        center: [f64; 3],
+        radius: f64,
+        height: f64,
+        omega_rad_s: f64,
+        phase_rad: f64,
+        fov_deg: f64,
+    ) -> SceneResult<Self> {
+        if !center.iter().all(|v| v.is_finite()) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: "center no finito".to_string(),
+            });
+        }
+        if !radius.is_finite() || !(ORBIT_MIN_RADIUS..=ORBIT_MAX_RADIUS).contains(&radius) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("radio {radius} fuera de {ORBIT_MIN_RADIUS}..={ORBIT_MAX_RADIUS}"),
+            });
+        }
+        if !height.is_finite() || height.abs() > ORBIT_MAX_HEIGHT {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("altura {height} fuera de ±{ORBIT_MAX_HEIGHT}"),
+            });
+        }
+        if !omega_rad_s.is_finite() || omega_rad_s.abs() > MAX_ORBIT_OMEGA_RAD_S {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("velocidad {omega_rad_s} fuera de ±{MAX_ORBIT_OMEGA_RAD_S} rad/s"),
+            });
+        }
+        if !phase_rad.is_finite() {
+            return Err(SceneError::CamaraInvalida {
+                detalle: "phase no finita".to_string(),
+            });
+        }
+        if !fov_deg.is_finite() || !(1.0..=179.0).contains(&fov_deg) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("fov {fov_deg} fuera de 1..=179"),
+            });
+        }
+        Ok(Self {
+            center,
+            radius,
+            height,
+            omega_rad_s,
+            phase_rad: phase_rad.rem_euclid(std::f64::consts::TAU),
+            fov_deg,
+        })
+    }
+
+    /// Ojo en `t_ms` (`theta = phase + omega·t`, t en segundos).
+    /// Puro, sin pánicos (no finito → fase quieta en el origen del círculo).
+    pub fn orbit_eye_at(self, t_ms: u64) -> [f64; 3] {
+        let t_s = (t_ms as f64) / 1000.0;
+        let t_s = if t_s.is_finite() { t_s } else { 0.0 };
+        let theta = self.phase_rad + self.omega_rad_s * t_s;
+        let (seno, coseno) = if theta.is_finite() {
+            theta.sin_cos()
+        } else {
+            (0.0, 1.0)
+        };
+        [
+            self.center[0] + self.radius * coseno,
+            self.center[1] + self.height,
+            self.center[2] + self.radius * seno,
+        ]
+    }
+
+    /// Cámara en `t_ms` (perspectiva que mira a `center`). `Err` honesto
+    /// (inaccesible tras `try_new`, pero total ante deserialización).
+    pub fn camera_at(self, t_ms: u64) -> SceneResult<Camera> {
+        Camera::perspective(self.fov_deg, self.orbit_eye_at(t_ms), self.center)
+    }
+
+    /// Período orbital en ms (`None` honesto si `omega == 0` —estática— o el
+    /// período desborda `u64`). Tras un período la órbita cierra 360° exacto.
+    pub fn period_ms(self) -> Option<u64> {
+        let w = self.omega_rad_s.abs();
+        if !w.is_finite() || w <= 0.0 {
+            return None;
+        }
+        let ms = std::f64::consts::TAU / w * 1000.0;
+        if !ms.is_finite() || ms <= 0.0 || ms > u64::MAX as f64 {
+            None
+        } else {
+            Some(ms.round() as u64)
+        }
+    }
+}
+
+/// Zoom animado: fov + distancia como tracks (≈ `ThreeDCamera::zoom`).
+///
+/// El ojo viaja sobre la semirrecta `center + dir·dist` con `dist` y `fov`
+/// interpolados por `easing`: `sample(t)` da la perspectiva y `as_tracks`
+/// los 7 tracks `cam.*` (igual vocabulario que `MovingCamera::as_tracks`;
+/// la distancia viaja codificada en `cam.eye_*`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ZoomAnim {
+    pub center: [f64; 3],
+    /// Dirección ojo−objetivo normalizada en `try_new`.
+    pub dir: [f64; 3],
+    pub dist_from: f64,
+    pub dist_to: f64,
+    pub fov_from: f64,
+    pub fov_to: f64,
+    /// Duración en ms (1..=`MAX_TRACK_DURATION_MS`, P0.1 long-form).
+    pub duration_ms: u64,
+    pub easing: RateFunc,
+}
+
+impl ZoomAnim {
+    /// Constructor validado (`center`/`dir` finitos con `dir ≠ 0`,
+    /// distancias 1e-9..=1e6, fovs 1..=179, duración 1..=60000).
+    /// Todo `Err` honesto.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new(
+        center: [f64; 3],
+        dir: [f64; 3],
+        dist_from: f64,
+        dist_to: f64,
+        fov_from: f64,
+        fov_to: f64,
+        duration_ms: u64,
+        easing: RateFunc,
+    ) -> SceneResult<Self> {
+        if !center.iter().all(|v| v.is_finite()) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: "center no finito".to_string(),
+            });
+        }
+        if !dir.iter().all(|v| v.is_finite()) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: "dir no finita".to_string(),
+            });
+        }
+        let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        if !len.is_finite() || len < 1e-9 {
+            return Err(SceneError::CamaraInvalida {
+                detalle: "dir degenerada: pasame una dirección no nula".to_string(),
+            });
+        }
+        for (nombre, d) in [("dist_from", dist_from), ("dist_to", dist_to)] {
+            if !d.is_finite() || !(ZOOM_MIN_DIST..=ZOOM_MAX_DIST).contains(&d) {
+                return Err(SceneError::CamaraInvalida {
+                    detalle: format!("{nombre} {d} fuera de {ZOOM_MIN_DIST}..={ZOOM_MAX_DIST}"),
+                });
+            }
+        }
+        for (nombre, f) in [("fov_from", fov_from), ("fov_to", fov_to)] {
+            if !f.is_finite() || !(1.0..=179.0).contains(&f) {
+                return Err(SceneError::CamaraInvalida {
+                    detalle: format!("{nombre} {f} fuera de 1..=179"),
+                });
+            }
+        }
+        if duration_ms == 0 || duration_ms > MAX_TRACK_DURATION_MS {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("duración {duration_ms} fuera de 1..={MAX_TRACK_DURATION_MS}"),
+            });
+        }
+        Ok(Self {
+            center,
+            dir: [dir[0] / len, dir[1] / len, dir[2] / len],
+            dist_from,
+            dist_to,
+            fov_from,
+            fov_to,
+            duration_ms,
+            easing,
+        })
+    }
+
+    /// Distancia ojo→objetivo en `t_ms` (easing aplicado). Pura, sin pánicos.
+    pub fn dist_at(self, t_ms: u64) -> f64 {
+        lerp_finito(
+            self.dist_from,
+            self.dist_to,
+            fraccion_eased(self.easing, t_ms, self.duration_ms),
+        )
+    }
+
+    /// Fov en `t_ms` (easing aplicado). Puro, sin pánicos.
+    pub fn fov_at(self, t_ms: u64) -> f64 {
+        lerp_finito(
+            self.fov_from,
+            self.fov_to,
+            fraccion_eased(self.easing, t_ms, self.duration_ms),
+        )
+    }
+
+    /// Cámara en `t_ms` (perspectiva; total: si la interpolación degenerara
+    /// —inaccesible tras `try_new`— cae a la orto 16:9 en vez de mentir).
+    pub fn sample(self, t_ms: u64) -> Camera {
+        let dist = self.dist_at(t_ms);
+        let eye = [
+            self.center[0] + self.dir[0] * dist,
+            self.center[1] + self.dir[1] * dist,
+            self.center[2] + self.dir[2] * dist,
+        ];
+        match Camera::perspective(self.fov_at(t_ms), eye, self.center) {
+            Ok(c) => c,
+            Err(_) => Camera::Ortho(Ortho::default_16_9()),
+        }
+    }
+
+    /// El zoom como [`MovingCamera`] (`sample(0) → sample(duration)`).
+    /// `Err` honesto (inaccesible tras `try_new`, pero total).
+    pub fn as_moving_camera(self) -> SceneResult<MovingCamera> {
+        MovingCamera::try_new(
+            self.sample(0),
+            self.sample(self.duration_ms),
+            self.duration_ms,
+            self.easing,
+        )
+    }
+
+    /// El zoom como 7 [`PropertyTrack`]s `cam.*` (delega en
+    /// [`MovingCamera::as_tracks`]: `cam.fov` + `cam.eye_*` + `cam.center_*`).
+    pub fn as_tracks(self) -> SceneResult<Vec<PropertyTrack>> {
+        self.as_moving_camera()?.as_tracks()
+    }
+}
+
+/// `look_at` suave entre targets (≈ `ThreeDScene::move_camera`).
+///
+/// El `eye` queda fijo y el `center` viaja `from → to` con `easing`:
+/// `sample(t)` da la perspectiva y `as_tracks` los 7 tracks `cam.*`.
+/// Si el segmento `from → to` pasa por el `eye`, los frames intermedios
+/// degeneran y `sample` cae a la orto 16:9 en ese tramo (honesto, sin
+/// pánicos: separá el ojo de la recta para evitarlo).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct LookAtAnim {
+    pub eye: [f64; 3],
+    pub from: [f64; 3],
+    pub to: [f64; 3],
+    pub fov_deg: f64,
+    /// Duración en ms (1..=`MAX_TRACK_DURATION_MS`, P0.1 long-form).
+    pub duration_ms: u64,
+    pub easing: RateFunc,
+}
+
+impl LookAtAnim {
+    /// Constructor validado (`eye`/`from`/`to` finitos, `eye` a más de 1e-9
+    /// de ambos targets, `fov` 1..=179, duración 1..=60000). `from == to`
+    /// vale (paneo quieto). Todo `Err` honesto.
+    pub fn try_new(
+        eye: [f64; 3],
+        from: [f64; 3],
+        to: [f64; 3],
+        fov_deg: f64,
+        duration_ms: u64,
+        easing: RateFunc,
+    ) -> SceneResult<Self> {
+        for (nombre, p) in [("eye", &eye), ("from", &from), ("to", &to)] {
+            if !p.iter().all(|v| v.is_finite()) {
+                return Err(SceneError::CamaraInvalida {
+                    detalle: format!("{nombre} no finito"),
+                });
+            }
+        }
+        for (nombre, tgt) in [("from", &from), ("to", &to)] {
+            let dx = tgt[0] - eye[0];
+            let dy = tgt[1] - eye[1];
+            let dz = tgt[2] - eye[2];
+            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+            if !dist.is_finite() || dist < 1e-9 {
+                return Err(SceneError::CamaraInvalida {
+                    detalle: format!("eye pegado a {nombre}: separá la cámara del objetivo"),
+                });
+            }
+        }
+        if !fov_deg.is_finite() || !(1.0..=179.0).contains(&fov_deg) {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("fov {fov_deg} fuera de 1..=179"),
+            });
+        }
+        if duration_ms == 0 || duration_ms > MAX_TRACK_DURATION_MS {
+            return Err(SceneError::CamaraInvalida {
+                detalle: format!("duración {duration_ms} fuera de 1..={MAX_TRACK_DURATION_MS}"),
+            });
+        }
+        Ok(Self {
+            eye,
+            from,
+            to,
+            fov_deg,
+            duration_ms,
+            easing,
+        })
+    }
+
+    /// Objetivo en `t_ms` (easing aplicado). Puro, sin pánicos.
+    pub fn target_at(self, t_ms: u64) -> [f64; 3] {
+        lerp3(
+            self.from,
+            self.to,
+            fraccion_eased(self.easing, t_ms, self.duration_ms),
+        )
+    }
+
+    /// Cámara en `t_ms` (perspectiva; total: tramo degenerado —el segmento
+    /// cruza el ojo— cae a la orto 16:9 en vez de mentir).
+    pub fn sample(self, t_ms: u64) -> Camera {
+        match Camera::perspective(self.fov_deg, self.eye, self.target_at(t_ms)) {
+            Ok(c) => c,
+            Err(_) => Camera::Ortho(Ortho::default_16_9()),
+        }
+    }
+
+    /// El paneo como [`MovingCamera`] (`sample(0) → sample(duration)`).
+    /// `Err` honesto si un extremo degenera (ojo sobre un target).
+    pub fn as_moving_camera(self) -> SceneResult<MovingCamera> {
+        MovingCamera::try_new(
+            self.sample(0),
+            self.sample(self.duration_ms),
+            self.duration_ms,
+            self.easing,
+        )
+    }
+
+    /// El paneo como 7 [`PropertyTrack`]s `cam.*` (delega en
+    /// [`MovingCamera::as_tracks`]).
+    pub fn as_tracks(self) -> SceneResult<Vec<PropertyTrack>> {
+        self.as_moving_camera()?.as_tracks()
     }
 }
 
@@ -2985,5 +3452,226 @@ mod scene_f1_tests {
         )
         .is_ok());
         assert!(TransformAnim::try_new(a, b, 8, 4, 60_001, RateFunc::Linear, false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod camara_orbita_tests {
+    use super::*;
+
+    fn persp(eye: [f64; 3], center: [f64; 3]) -> Camera {
+        Camera::perspective(60.0, eye, center).unwrap()
+    }
+
+    #[test]
+    fn project_3d_roundtrip_centro_al_origen_y_depth_crece() {
+        // Mirando sobre -z desde (1,2,5): el centro cae al origen 2D y la
+        // profundidad es la distancia ojo→objetivo.
+        let cam = persp([1.0, 2.0, 5.0], [1.0, 2.0, 0.0]);
+        let c = cam.project_3d([1.0, 2.0, 0.0]).unwrap();
+        assert!(c[0].abs() < 1e-12 && c[1].abs() < 1e-12);
+        assert!((cam.depth_of([1.0, 2.0, 0.0]).unwrap() - 5.0).abs() < 1e-9);
+        // Más lejos = más profundidad; detrás = None en ambas.
+        assert!((cam.depth_of([1.0, 2.0, -5.0]).unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(cam.project_3d([1.0, 2.0, 6.0]), None);
+        assert_eq!(cam.depth_of([1.0, 2.0, 6.0]), None);
+        // Ortho: depth = -z (mayor z = más cerca).
+        let orto = Camera::Ortho(Ortho::default_16_9());
+        assert_eq!(orto.depth_of([0.0, 0.0, 3.0]), Some(-3.0));
+        assert_eq!(orto.depth_of([0.0, 0.0, f64::NAN]), None);
+    }
+
+    #[test]
+    fn orbita_cierra_360_y_periodo_honesto() {
+        let orbita =
+            AmbientOrbit::try_new([0.0, 0.0, 0.0], 5.0, 2.0, std::f64::consts::TAU, 0.0, 60.0)
+                .unwrap();
+        // 1 vuelta/s → período 1000 ms.
+        assert_eq!(orbita.period_ms(), Some(1000));
+        // Tras un período el ojo vuelve exacto (cierra 360°).
+        let a = orbita.orbit_eye_at(0);
+        let b = orbita.orbit_eye_at(1000);
+        for k in 0..3 {
+            assert!((a[k] - b[k]).abs() < 1e-9, "eje {k}: {a:?} vs {b:?}");
+        }
+        // A mitad de vuelta está del otro lado.
+        let mitad = orbita.orbit_eye_at(500);
+        assert!((mitad[0] + 5.0).abs() < 1e-9, "mitad {mitad:?}");
+        assert!((mitad[1] - 2.0).abs() < 1e-9);
+        // Las cámaras miran al centro en ambos extremos.
+        for t in [0, 1000] {
+            match orbita.camera_at(t).unwrap() {
+                Camera::Perspective { eye, center, .. } => {
+                    for k in 0..3 {
+                        assert!((eye[k] - orbita.orbit_eye_at(t)[k]).abs() < 1e-12);
+                        assert_eq!(center[k], 0.0);
+                    }
+                }
+                otro => panic!("esperaba Perspective, got {otro:?}"),
+            }
+        }
+        // Fase normalizada a [0, 2π).
+        let f = AmbientOrbit::try_new(
+            [0.0, 0.0, 0.0],
+            5.0,
+            0.0,
+            1.0,
+            3.0 * std::f64::consts::TAU,
+            60.0,
+        )
+        .unwrap();
+        assert!(f.phase_rad.abs() < 1e-9);
+        // Omega 0: estática, sin período.
+        let quieta = AmbientOrbit::try_new([0.0, 0.0, 0.0], 5.0, 0.0, 0.0, 0.0, 60.0).unwrap();
+        assert_eq!(quieta.period_ms(), None);
+        assert_eq!(quieta.orbit_eye_at(0), quieta.orbit_eye_at(9999));
+    }
+
+    #[test]
+    fn orbita_invalida_honesta() {
+        let base = || ([0.0, 0.0, 0.0], 5.0, 2.0, 1.0, 0.0, 60.0);
+        let (c, r, h, w, p, fov) = base();
+        assert!(AmbientOrbit::try_new(c, 0.0, h, w, p, fov).is_err());
+        assert!(AmbientOrbit::try_new(c, r, h, f64::INFINITY, p, fov).is_err());
+        assert!(AmbientOrbit::try_new(c, r, h, 99.0, p, fov).is_err());
+        assert!(AmbientOrbit::try_new(c, r, f64::NAN, w, p, fov).is_err());
+        assert!(AmbientOrbit::try_new([f64::NAN, 0.0, 0.0], r, h, w, p, fov).is_err());
+        assert!(AmbientOrbit::try_new(c, r, h, w, f64::INFINITY, fov).is_err());
+        assert!(AmbientOrbit::try_new(c, r, h, w, p, 0.0).is_err());
+        assert!(AmbientOrbit::try_new(c, r, h, w, p, 180.0).is_err());
+    }
+
+    #[test]
+    fn zoom_mueve_fov_y_distancia_con_tracks() {
+        let zoom = ZoomAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            8.0,
+            4.0,
+            60.0,
+            40.0,
+            1000,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        // dir normalizada aunque venga sin normalizar.
+        let largo = ZoomAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 3.0],
+            8.0,
+            4.0,
+            60.0,
+            40.0,
+            1000,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        assert!((largo.dir[2] - 1.0).abs() < 1e-12);
+        // Extremos exactos, medio lineal.
+        assert!((zoom.dist_at(0) - 8.0).abs() < 1e-12);
+        assert!((zoom.dist_at(1000) - 4.0).abs() < 1e-12);
+        assert!((zoom.dist_at(500) - 6.0).abs() < 1e-12);
+        assert!((zoom.fov_at(500) - 50.0).abs() < 1e-12);
+        match zoom.sample(1000) {
+            Camera::Perspective {
+                fov_deg,
+                eye,
+                center,
+            } => {
+                assert!((fov_deg - 40.0).abs() < 1e-9);
+                assert!((eye[2] - 4.0).abs() < 1e-9);
+                assert_eq!(center, [0.0, 0.0, 0.0]);
+            }
+            otro => panic!("esperaba Perspective, got {otro:?}"),
+        }
+        // 7 tracks cam.* con fov en los extremos.
+        let tracks = zoom.as_tracks().unwrap();
+        assert_eq!(tracks.len(), 7);
+        assert_eq!(tracks[0].prop_id, "cam.fov");
+        assert!((tracks[0].sample(0) - 60.0).abs() < 1e-6);
+        assert!((tracks[0].sample(1000) - 40.0).abs() < 1e-6);
+        // Malformados honestos.
+        assert!(ZoomAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            8.0,
+            4.0,
+            60.0,
+            40.0,
+            1000,
+            RateFunc::Linear
+        )
+        .is_err());
+        assert!(ZoomAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            0.0,
+            4.0,
+            60.0,
+            40.0,
+            1000,
+            RateFunc::Linear
+        )
+        .is_err());
+        assert!(ZoomAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            8.0,
+            4.0,
+            60.0,
+            40.0,
+            0,
+            RateFunc::Linear
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn look_at_suave_pasa_por_el_medio() {
+        let paneo = LookAtAnim::try_new(
+            [0.0, 0.0, 6.0],
+            [-2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            60.0,
+            2000,
+            RateFunc::Linear,
+        )
+        .unwrap();
+        assert_eq!(paneo.target_at(0), [-2.0, 0.0, 0.0]);
+        assert_eq!(paneo.target_at(2000), [2.0, 0.0, 0.0]);
+        let medio = paneo.target_at(1000);
+        assert!((medio[0]).abs() < 1e-12 && medio[1].abs() < 1e-12);
+        match paneo.sample(1000) {
+            Camera::Perspective { center, eye, .. } => {
+                assert!(center[0].abs() < 1e-9, "center {center:?}");
+                assert_eq!(eye, [0.0, 0.0, 6.0]);
+            }
+            otro => panic!("esperaba Perspective, got {otro:?}"),
+        }
+        // 7 tracks y el centro viaja en cam.center_x.
+        let tracks = paneo.as_tracks().unwrap();
+        assert_eq!(tracks.len(), 7);
+        let cx = tracks.iter().find(|t| t.prop_id == "cam.center_x").unwrap();
+        assert!((cx.sample(0) + 2.0).abs() < 1e-6);
+        assert!((cx.sample(2000) - 2.0).abs() < 1e-6);
+        // Ojo pegado a un target → Err (degenera el forward).
+        assert!(LookAtAnim::try_new(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            60.0,
+            1000,
+            RateFunc::Linear
+        )
+        .is_err());
+        assert!(LookAtAnim::try_new(
+            [0.0, 0.0, 6.0],
+            [-2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            60.0,
+            60_001,
+            RateFunc::Linear
+        )
+        .is_err());
     }
 }

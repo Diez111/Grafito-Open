@@ -1455,18 +1455,24 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     "universal"
 }
 
-/// Registro canónico de plantillas (sync 13↔13↔13, ANIM-REVIVE).
+/// Registro canónico de plantillas (sync 65↔65↔65, ola de 52).
 ///
-/// Única fuente del protocolo: las 13 canónicas con renderer nativo propio.
+/// Única fuente del protocolo: las 13 históricas con renderer nativo propio
+/// más las 52 de la ola (9 módulos `tpl_*`). Orden: las 13 intactas primero;
+/// la ola agrupada por dominio y alfabética dentro de cada grupo.
+///
 /// `sanitize_template` la usa (sin `match` duplicado que diverja);
 /// `anim_native::NATIVE_TEMPLATES` y `anim_ui::PLANTILLAS_COMBO` (crate
-/// `grafito-app`) se pinean iguales por test, en el mismo orden.
+/// `grafito-app`) se pinean iguales por test, en el mismo orden las dos
+/// primeras y por conjunto la UI.
 /// `limit-epsilon` / `ode-*` NO están aquí: no tienen renderer propio y caen
 /// al fallback por concepto (ver `native_dispatch_for` en `anim_native`).
 ///
 /// F0: el worker Python está jubilado y su divergencia 11/6 ya no existe.
 /// La paridad vive en `native_templates_once_y_wire_v1_paridad` (tests
-/// abajo): las 13 son nativas y el wire v1 hace roundtrip solo para tests.
+/// abajo): las 65 son nativas y el wire v1 hace roundtrip solo para tests.
+/// Presupuestos intactos (follow-up documentado, no de esta ola): 1500
+/// frames, 64 MiB, 60 s, 64 KiB de línea, 500 chars de mensaje.
 pub const CANONICAL_TEMPLATES: &[&str] = &[
     "derivative-slope",
     "integral-area",
@@ -1481,6 +1487,67 @@ pub const CANONICAL_TEMPLATES: &[&str] = &[
     "universal",
     "subspace",
     "fractal",
+    // Ola 52: álgebra lineal (`tpl_linalg`, 6).
+    "cambio-de-base",
+    "determinante-area",
+    "eigenvectores",
+    "matriz-transformacion",
+    "producto-cruz",
+    "vectores-combinacion-lineal",
+    // Ola 52: análisis I (`tpl_am1`, 6).
+    "chain-rule",
+    "epsilon-delta",
+    "improper-integral",
+    "ode-slope-field",
+    "riemann-sums",
+    "taylor-remainder",
+    // Ola 52: análisis II (`tpl_am2`, 6).
+    "double-integral",
+    "gradient-descent",
+    "green-stokes",
+    "jacobian",
+    "lagrange-multipliers",
+    "partial-derivatives",
+    // Ola 52: caos (`tpl_chaos`, 5).
+    "chaos-bifurcacion-barrido",
+    "chaos-julia-morph",
+    "chaos-lorenz",
+    "chaos-mandelbrot-zoom",
+    "chaos-pendulo-doble",
+    // Ola 52: EDO (`tpl_edo`, 5).
+    "edo-calor-onda",
+    "edo-campo-direcciones",
+    "edo-convolucion",
+    "edo-fourier-epiciclos",
+    "edo-laplace",
+    // Ola 52: estadística y ML (`tpl_stats`, 8).
+    "backprop-flujo",
+    "descenso-gradiente-3d",
+    "distribuciones",
+    "limite-central",
+    "pca-rotacion",
+    "perceptron-mlp",
+    "regresion-lineal",
+    "teorema-bayes",
+    // Ola 52: superficies 3D (`tpl_3d`, 6).
+    "sup-campo-vectorial",
+    "sup-interseccion",
+    "sup-onda-3d",
+    "sup-paraboloide-tangente",
+    "sup-silla-descenso",
+    "sup-toro-rotante",
+    // Ola 52: politopos 4D (`tpl_4d`, 5).
+    "celda-24",
+    "estereografica",
+    "hipercubo-corte",
+    "simplex-nd",
+    "tesseract-xw",
+    // Ola 52: grafos y redes (`tpl_graphs`, 5).
+    "bfs-animado",
+    "camino-minimo",
+    "force-directed",
+    "moser-spindle-coloreo",
+    "unit-distance",
 ];
 
 /// Sanitiza un template libre a uno conocido (R6d: devuelve `Result`).
@@ -2009,9 +2076,10 @@ mod universal_tests {
 
     #[test]
     fn canonical_templates_once_y_sanitize_roundtrip() {
-        // Sync 13↔13↔13: este registro es la fuente; anim_native y anim_ui
-        // se pinean iguales por test en grafito-app (mismo orden).
-        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
+        // Sync 65↔65↔65: este registro es la fuente; anim_native y anim_ui
+        // se pinean iguales por test en grafito-app (mismo orden las dos
+        // primeras, por conjunto la UI).
+        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
         for t in CANONICAL_TEMPLATES {
             assert_eq!(
                 sanitize_template(t, "cualquier concepto").expect("canónica"),
@@ -2046,14 +2114,14 @@ mod universal_tests {
     fn native_templates_once_y_wire_v1_paridad() {
         // F0: jubilado el worker Python, la divergencia 11/6 ya no existe.
         // Paridad portada del viejo `TestParidad11_6` (Python, borrado):
-        // las 13 canónicas son las soportadas y el wire v1 hace roundtrip
+        // las 65 canónicas son las soportadas y el wire v1 hace roundtrip
         // para los 5 mensajes que el puente lee (hello/pong/progress/
         // render_result/error). Presupuestos pineados: canvas 64..=4096,
         // duration 0.1..=60 s (P0.1 long-form), line_cap 64 KiB (engine), mensaje 500 chars.
         use std::collections::BTreeSet;
-        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
         let canon: BTreeSet<&&str> = CANONICAL_TEMPLATES.iter().collect();
-        assert_eq!(canon.len(), 13, "canónicas sin duplicados");
+        assert_eq!(canon.len(), 65, "canónicas sin duplicados");
         // Las 5 ex-"solo Rust" hoy son nativas como el resto: sanitize las
         // pasa literales en lugar de degradarlas por concepto.
         for t in [
@@ -2071,6 +2139,33 @@ mod universal_tests {
                 t,
                 "{t}"
             );
+        }
+        // Ola 52: los 9 módulos nuevos están registrados acá (13+52=65).
+        // Cada `TEMPLATE_IDS` vive en su módulo; este test pinnea que el
+        // registro canónico los cubre todos, sin duplicados ni colisiones
+        // con las 13 históricas.
+        for ids in [
+            crate::tpl_linalg::TEMPLATE_IDS,
+            crate::tpl_am1::TEMPLATE_IDS,
+            crate::tpl_am2::TEMPLATE_IDS,
+            crate::tpl_chaos::TEMPLATE_IDS,
+            crate::tpl_edo::TEMPLATE_IDS,
+            crate::tpl_stats::TEMPLATE_IDS,
+            crate::tpl_3d::TEMPLATE_IDS,
+            crate::tpl_4d::TEMPLATE_IDS,
+            crate::tpl_graphs::TEMPLATE_IDS,
+        ] {
+            for id in ids {
+                assert!(
+                    CANONICAL_TEMPLATES.contains(id),
+                    "{id} de la ola debe estar en CANONICAL_TEMPLATES"
+                );
+                assert_eq!(
+                    sanitize_template(id, "cualquier concepto").expect("ola"),
+                    *id,
+                    "{id}"
+                );
+            }
         }
         // Wire v1: cada mensaje documentado en el head del módulo parsea.
         let hello = serde_json::json!({

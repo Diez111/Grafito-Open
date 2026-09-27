@@ -32,7 +32,8 @@ use crate::player::{
 };
 use crate::protocol::{
     AnimDuration, AnimRequest, AnimationGroup, ExportFormat, Playlist, PlaylistStep, Resolution,
-    CANONICAL_TEMPLATES, PLAYLIST_MAX_FRAMES_TOTAL, PLAYLIST_MAX_STEPS, PLAYLIST_MAX_WAIT_MS,
+    CANONICAL_TEMPLATES, MAX_TIMELINE_DURATION_MS, PLAYLIST_MAX_FRAMES_TOTAL, PLAYLIST_MAX_STEPS,
+    PLAYLIST_MAX_WAIT_MS,
 };
 use crate::scene::{Mobject, Ortho, RateFunc, Scene, MAX_SCENE_LAYERS};
 
@@ -1230,6 +1231,568 @@ pub fn short_script(concepto: &str) -> Result<GuionTexto, GuionError> {
     Ok(guion)
 }
 
+// ── Guion largo 60 s (long-form estilo 3b1b) ─────────────────────────────
+// Estructura Manim (`Scene.construct` + `play(run_time)` + `Wait`, ver
+// `docs.manim.community/.../scene/Scene.html` y `.../animation/Wait.html`):
+// cada beat es un `play` con su `run_time` y la pregunta socrática es un
+// `Wait` que congela el cuadro (`PlaylistStep::pausa`, 0 frames propios).
+// Pacing 3b1b (AMS Notices 2022, Sanderson): el hook es "una sola imagen
+// que hace una pregunta", ritmo lento y deliberado con "pausa para
+// reflexionar" antes de la respuesta — de ahí el beat `Pregunta` con su
+// duración propia y su continuación en el beat siguiente.
+// Arco: hook → desarrollo → clímax → cierre (4 actos / 8 pasos).
+
+/// Guion largo: mínimo de palabras de voz total (informativo, no `Err`).
+pub const LONG_MIN_PALABRAS: usize = 140;
+/// Guion largo: máximo de palabras de voz total (informativo, no `Err`).
+pub const LONG_MAX_PALABRAS: usize = 175;
+/// Guion largo: duración total objetivo en ms (60 s = tope del timeline).
+pub const LONG_TOTAL_MS: u64 = 60_000;
+/// Garantía de presupuesto en compilación: el largo nunca supera el
+/// timeline (si alguien mueve el pacing, esto deja de compilar).
+const _: () = assert!(LONG_TOTAL_MS <= MAX_TIMELINE_DURATION_MS);
+/// Índice del beat-pregunta socrática dentro del guion largo.
+pub const PREGUNTA_LARGO_INDICE: usize = 2;
+/// Duración del beat-pregunta (`Wait` 1..=10000, congela el último frame).
+pub const PREGUNTA_LARGO_RUN_MS: u64 = 2600;
+/// Frames por paso del guion largo (8 × 6 = 48, mismo set que el corto).
+pub const LONG_FRAMES_POR_PASO: usize = 6;
+/// `pacing`: `run_ms` por beat del guion largo (hook de 8 s, pregunta de
+/// 2.6 s, resto de 8 s).
+/// La suma es [`LONG_TOTAL_MS`] (ver [`duracion_total_largo_ms`]).
+pub const PACING_LARGO_RUN_MS: [u64; 8] = [8000, 8000, 2600, 8000, 8000, 8000, 8000, 8000];
+/// `pacing`: `wait_after_ms` por beat (la pregunta no lleva espera posterior,
+/// paridad con `PlaylistStep::pausa`).
+pub const PACING_LARGO_WAIT_MS: [u64; 8] = [200, 200, 0, 200, 200, 200, 200, 200];
+/// Efectos por beat del guion largo (el índice 2 es la pregunta: `Wait`).
+const EFECTOS_LARGO: [&str; 8] = [
+    "write", "fade", "wait", "create", "tracker", "indicate", "grow", "fade",
+];
+
+/// Duración total del guion largo en ms (`Σ run + wait_after`, saturada).
+/// Pura. Por construcción es [`LONG_TOTAL_MS`] (`<= MAX_TIMELINE_DURATION_MS`).
+pub fn duracion_total_largo_ms() -> u64 {
+    let mut total: u64 = 0;
+    for i in 0..PACING_LARGO_RUN_MS.len() {
+        total = total
+            .saturating_add(PACING_LARGO_RUN_MS[i])
+            .saturating_add(PACING_LARGO_WAIT_MS[i]);
+    }
+    total
+}
+
+/// Beat-pregunta socrática: pregunta que congela el cuadro (`Wait`) con su
+/// duración propia y la continuación (apertura del beat que la responde).
+/// Pura, sin I/O, sin pánicos.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeatPregunta {
+    /// Texto del beat-pregunta (el que ve el espectador en la pausa).
+    pub pregunta: String,
+    /// Duración de la pausa en ms (siempre [`PREGUNTA_LARGO_RUN_MS`]).
+    pub espera_ms: u64,
+    /// Apertura del beat siguiente (la respuesta arranca acá).
+    pub continuacion: String,
+}
+
+/// Beat-pregunta del guion largo para `template` (canónico o alias
+/// `pythagoras`; desconocido → familia universal, jamás `Err`).
+/// Pura.
+pub fn beat_pregunta(template: &str) -> BeatPregunta {
+    let copy = familia_largo_por_nombre(template);
+    BeatPregunta {
+        pregunta: copy.beats[PREGUNTA_LARGO_INDICE].0.to_string(),
+        espera_ms: PREGUNTA_LARGO_RUN_MS,
+        continuacion: copy.beats[PREGUNTA_LARGO_INDICE + 1].0.to_string(),
+    }
+}
+
+/// Copy del guion largo por familia: los 8 beats del arco (hook, desarrollo
+/// 1, pregunta, desarrollo 2/respuesta, clímax 1..2, cierre 1..2) con
+/// `(texto, voz)` propios y una pista de pizarra común. Misma idea que
+/// `BeatsCorto`: la ESTRUCTURA no cambia entre familias (4 actos / 8 pasos
+/// / 48 frames / 60 s); cambia el copy.
+struct BeatsLargo {
+    /// Pista de pizarra de los 8 pasos (`<= 200` chars).
+    pizarra: &'static str,
+    /// `(texto, voz)` por beat (el índice 2 es la pregunta socrática).
+    beats: [(&'static str, &'static str); 8],
+}
+
+/// Copy largo de cálculo: "una idea simple atrás de una cuenta que parece
+/// magia", con pregunta sobre lo que se mantiene igual.
+static BEATS_LARGO_CALCULO: BeatsLargo = BeatsLargo {
+    pizarra: "ejes y curva animada",
+    beats: [
+        (
+            "Hook largo: la idea antes que la cuenta",
+            "Che, mirá esto con atención: una idea simple se esconde atrás de una cuenta que parece magia, y en este minuto la vas a ver nacer.",
+        ),
+        (
+            "Desarrollo: el patrón que se repite",
+            "Fijate bien: el mismo truco aparece en cada ejemplo, siempre igual, y si lo agarrás una vez lo reconocés en todos lados.",
+        ),
+        (
+            "Pregunta: ¿qué se mantiene igual si movés todo?",
+            "Pregunta para vos: si movés todo el dibujo de lugar, ¿qué es lo único que se mantiene igual? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta es la pendiente: cada pedacito se porta como una recta cortita, y esa recta manda sobre toda la curva.",
+        ),
+        (
+            "Clímax 1: el punto que se mueve",
+            "Ahora mirá el punto que se mueve: la recta lo acompaña a cada paso y nunca lo deja solo en la curva.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada caso, del más fácil al más retorcido, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: lo curvo se entiende con rectas chiquitas, y eso es todo el cálculo.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy largo de análisis complejo: "el plano que se deforma sin romper
+/// ángulos", con pregunta sobre el ángulo que sobrevive.
+static BEATS_LARGO_COMPLEJO: BeatsLargo = BeatsLargo {
+    pizarra: "plano complejo y grilla animada",
+    beats: [
+        (
+            "Hook largo: el plano que se deforma",
+            "Che, mirá esto con atención: un plano entero se dobla y se estira como si fuera de goma, y nada se rompe en el camino.",
+        ),
+        (
+            "Desarrollo: lo que no cambia nunca",
+            "Fijate bien: las curvas se deforman pero los ángulos quedan igualitos, y esa es la pista que vamos a seguir.",
+        ),
+        (
+            "Pregunta: ¿qué ángulo sobrevive al doblez?",
+            "Pregunta para vos: si doblás el plano como una goma, ¿qué ángulo sobrevive igualito? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta es el ángulo: cada cruce se porta como dos rectas cortitas, y ese cruce manda sobre toda la grilla.",
+        ),
+        (
+            "Clímax 1: la grilla que se acomoda",
+            "Ahora mirá la grilla que se mueve: cada cuadradito se deforma solito y ningún ángulo se deja torcer.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada curva, de la más simple a la más retorcida, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: deformar sin romper ángulos, y eso es todo el análisis complejo.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si entendiste el gesto, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy largo de dinámica: "una regla chiquita que mueve un sistema entero",
+/// con pregunta sobre el destino de cada flecha.
+static BEATS_LARGO_DINAMICA: BeatsLargo = BeatsLargo {
+    pizarra: "campo de flechas animado",
+    beats: [
+        (
+            "Hook largo: un sistema que se desboca",
+            "Che, mirá esto con atención: una regla re chiquita mueve un sistema entero, y en este minuto vas a ver cómo se desboca.",
+        ),
+        (
+            "Desarrollo: el patrón que se repite",
+            "Fijate bien: hay un patrón que se repite en cada rincón del sistema, y si lo agarrás ya entendés el lío entero.",
+        ),
+        (
+            "Pregunta: ¿a dónde termina cada flecha?",
+            "Pregunta para vos: si soltás un puntito en cualquier lado, ¿a dónde termina después de mucho tiempo? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta son los destinos: cada zona tiene un punto que atrae todo, y las flechas mandan hacia ese lugar.",
+        ),
+        (
+            "Clímax 1: el punto que atrae todo",
+            "Ahora mirá el punto que atrae: todo lo de alrededor cae hacia él, rapidito al principio y despacio al final.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada resultado, del más manso al más caótico, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: reglas chiquitas deciden destinos grandes, y eso es toda la dinámica.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy largo de series: "una suma de piezas simples que arma una figura",
+/// con pregunta sobre cuántas piezas alcanzan.
+static BEATS_LARGO_SERIES: BeatsLargo = BeatsLargo {
+    pizarra: "piezas de la suma animada",
+    beats: [
+        (
+            "Hook largo: una suma que dibuja",
+            "Che, mirá esto con atención: una suma larguita de piezas re simples arma una figura que parece magia de verdad.",
+        ),
+        (
+            "Desarrollo: las piezas por peso",
+            "Fijate bien: las mismas piezas se repiten siempre, ordenadas por peso, y cada una aporta un detalle nuevo.",
+        ),
+        (
+            "Pregunta: ¿cuántas piezas alcanzan?",
+            "Pregunta para vos: si sumás de a una pieza por vez, ¿cuántas alcanzan para reconocer la figura? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta es el peso: cada pieza nueva corrige un poco la forma, y la suma manda sobre el dibujo entero.",
+        ),
+        (
+            "Clímax 1: la forma que aparece",
+            "Ahora mirá la forma que aparece: sumamos una sola pieza y todo el dibujo se acomoda solito detrás.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada pieza, de la más gruesa a la más finita, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: piezas simples sumadas con paciencia arman cualquier figura que quieras.",
+        ),
+        (
+            "Payoff: mirá la suma y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Mirá la suma otra vez y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy largo de forma y estructura: "una regla que se repite en cada
+/// escala", con pregunta sobre el zoom.
+static BEATS_LARGO_FORMA: BeatsLargo = BeatsLargo {
+    pizarra: "figura y sus copias animadas",
+    beats: [
+        (
+            "Hook largo: una forma que se repite",
+            "Che, mirá esto con atención: una figura se repite en cada escala, y en este minuto vas a ver hasta dónde llega.",
+        ),
+        (
+            "Desarrollo: la regla en chico y en grande",
+            "Fijate bien: la misma regla aparece en chico y en grande, siempre igual, y eso ordena todo el dibujo.",
+        ),
+        (
+            "Pregunta: ¿qué ves si hacés zoom?",
+            "Pregunta para vos: si hacés zoom bien adentro del dibujo, ¿qué creés que vas a encontrar? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta es la copia: cada pedacito repite la forma grande, y esa repetición manda sobre todo el dibujo.",
+        ),
+        (
+            "Clímax 1: el zoom que no termina",
+            "Ahora mirá el zoom que no termina: cada nivel esconde otro igual, y el dibujo nunca se queda sin detalle.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada trozo, del más grande al más chiquito, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: una regla repetida en cada escala arma un infinito que se puede dibujar.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si agarraste la idea, ya la tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Copy largo universal (placeholder honesto): el histórico "parece magia,
+/// pero tiene un truco cortito", con pregunta sobre la parte que se repite.
+static BEATS_LARGO_UNIVERSAL: BeatsLargo = BeatsLargo {
+    pizarra: "ejes y curva animada",
+    beats: [
+        (
+            "Hook largo: mirá el truco de cerca",
+            "Che, mirá esto con atención: parece magia, pero tiene un truco cortito que en este minuto vas a ver.",
+        ),
+        (
+            "Desarrollo: el patrón que se repite",
+            "Fijate bien: hay un patrón que se repite siempre igual, y si lo agarrás ya entendés todo el truco.",
+        ),
+        (
+            "Pregunta: ¿qué parte se repite?",
+            "Pregunta para vos: si mirás cada paso con lupa, ¿qué parte se repite siempre igual? Pensalo unos segundos.",
+        ),
+        (
+            "Desarrollo: la respuesta, paso a paso",
+            "La respuesta es el gesto: cada paso repite el mismo movimiento chiquito, y ese gesto manda sobre todo.",
+        ),
+        (
+            "Clímax 1: el punto de partida",
+            "Primero mirá bien el punto de partida: todo arranca quieto, ordenado, sin ningún misterio a la vista.",
+        ),
+        (
+            "Clímax 2: un mismo gesto para todo",
+            "¿Ves? Un mismo gesto explica cada caso, del más fácil al más retorcido, sin cambiar nunca la idea.",
+        ),
+        (
+            "Cierre: la idea en una frase",
+            "Entonces la idea en una frase: un truco cortito repetido con cuidado explica el dibujo entero.",
+        ),
+        (
+            "Payoff: miralo de nuevo y comprobalo",
+            "Y acá viene lo lindo: si lo entendiste una vez, ya lo tenés para siempre. Miralo de nuevo y comprobalo vos.",
+        ),
+    ],
+};
+
+/// Familia de copy largo de una plantilla canónica (mismo agrupamiento que
+/// `familia_corto`: 13 → 6 familias).
+fn familia_largo(template: &str) -> &'static BeatsLargo {
+    match template {
+        "derivative-slope" | "integral-area" | "taylor-series" => &BEATS_LARGO_CALCULO,
+        "conformal-map" | "mobius-transform" => &BEATS_LARGO_COMPLEJO,
+        "logistic-bifurcation" | "gradient-field" => &BEATS_LARGO_DINAMICA,
+        "euler" | "fourier" => &BEATS_LARGO_SERIES,
+        "pitagoras" | "subspace" | "fractal" => &BEATS_LARGO_FORMA,
+        _ => &BEATS_LARGO_UNIVERSAL,
+    }
+}
+
+/// Resuelve la familia con nombre ya saneado (alias histórico `pythagoras` →
+/// `pitagoras`; desconocido → universal). Pura, sin `Err`.
+fn familia_largo_por_nombre(template: &str) -> &'static BeatsLargo {
+    let t = template.trim().to_lowercase();
+    let t = if t == "pythagoras" {
+        "pitagoras"
+    } else {
+        t.as_str()
+    };
+    // `familia_largo` devuelve `&'static`: no arrastra el borrow local.
+    familia_largo(t)
+}
+
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_CALCULO: [&str; 3] = [
+    "La idea antes que la cuenta",
+    "Una recta manda sobre la curva",
+    "Lo curvo se entiende en chiquito",
+];
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_COMPLEJO: [&str; 3] = [
+    "El plano que se deforma sin romperse",
+    "Ángulos que no cambian nunca",
+    "Una fórmula mueve toda la grilla",
+];
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_DINAMICA: [&str; 3] = [
+    "Una regla chiquita, un lío bárbaro",
+    "El sistema que se desboca solo",
+    "Flechitas que deciden el destino",
+];
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_SERIES: [&str; 3] = [
+    "Una suma que dibuja figuras",
+    "Piezas simples, figura mágica",
+    "Cada pieza pesa lo justo",
+];
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_FORMA: [&str; 3] = [
+    "La forma que se repite en cada escala",
+    "Una regla en chico y en grande",
+    "El pedazo explica el todo",
+];
+/// Títulos alternativos por familia (3 opciones cada una, `<= 80` chars).
+static TITULOS_UNIVERSAL: [&str; 3] = [
+    "Mirá el truco de cerca",
+    "El patrón que se repite",
+    "Una idea que queda para siempre",
+];
+
+/// Tres títulos alternativos para `template` (canónico o alias; desconocido
+/// → universal). Puros, deterministas (pineados por golden).
+pub fn titulos_para(template: &str) -> [&'static str; 3] {
+    let t = template.trim().to_lowercase();
+    let t = if t == "pythagoras" {
+        "pitagoras"
+    } else {
+        t.as_str()
+    };
+    match t {
+        "derivative-slope" | "integral-area" | "taylor-series" => TITULOS_CALCULO,
+        "conformal-map" | "mobius-transform" => TITULOS_COMPLEJO,
+        "logistic-bifurcation" | "gradient-field" => TITULOS_DINAMICA,
+        "euler" | "fourier" => TITULOS_SERIES,
+        "pitagoras" | "subspace" | "fractal" => TITULOS_FORMA,
+        _ => TITULOS_UNIVERSAL,
+    }
+}
+
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_CALCULO: [&str; 3] = [
+    "Parece magia, pero es una sola idea",
+    "Todo arranca quieto y ordenado",
+    "Movemos una cosa y todo acompaña",
+];
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_COMPLEJO: [&str; 3] = [
+    "Un plano de goma que no se rompe",
+    "Las curvas ceden, los ángulos no",
+    "Una fórmula y se mueve todo",
+];
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_DINAMICA: [&str; 3] = [
+    "Una reglita mueve un sistema entero",
+    "El caos también tiene patrón",
+    "Una flechita cambia el final",
+];
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_SERIES: [&str; 3] = [
+    "Sumar piezas simples arma figuras",
+    "Las piezas se ordenan por peso",
+    "De a una, la forma aparece",
+];
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_FORMA: [&str; 3] = [
+    "Chico y grande obedecen la misma regla",
+    "El dibujo se repite sin fin",
+    "Cada trozo cuenta la misma historia",
+];
+/// Ganchos alternativos por familia (3 opciones cada una).
+static GANCHOS_UNIVERSAL: [&str; 3] = [
+    "Parece magia, tiene truco cortito",
+    "Hay un patrón que se repite",
+    "Lo ves una vez y queda",
+];
+
+/// Tres ganchos alternativos para `template` (canónico o alias; desconocido
+/// → universal). Puros, deterministas (pineados por golden).
+pub fn ganchos_para(template: &str) -> [&'static str; 3] {
+    let t = template.trim().to_lowercase();
+    let t = if t == "pythagoras" {
+        "pitagoras"
+    } else {
+        t.as_str()
+    };
+    match t {
+        "derivative-slope" | "integral-area" | "taylor-series" => GANCHOS_CALCULO,
+        "conformal-map" | "mobius-transform" => GANCHOS_COMPLEJO,
+        "logistic-bifurcation" | "gradient-field" => GANCHOS_DINAMICA,
+        "euler" | "fourier" => GANCHOS_SERIES,
+        "pitagoras" | "subspace" | "fractal" => GANCHOS_FORMA,
+        _ => GANCHOS_UNIVERSAL,
+    }
+}
+
+/// Arma un guion largo de 60 s para `concepto` (arco hook→desarrollo→
+/// clímax→cierre con pregunta socrática).
+///
+/// Beats: hook (1 paso) → desarrollo (2 pasos: contexto + pregunta `Wait`) →
+/// clímax (3 pasos: respuesta + 2 clímax) → cierre (2 pasos). Textos en
+/// español rioplatense con voz en off `140..=175` palabras totales; la
+/// plantilla es la de [`crate::protocol::template_for_concept`] y pasa
+/// literal cualquiera de las 13 [`CANONICAL_TEMPLATES`]. El copy es el de la
+/// familia del concepto ([`familia_largo`]): 6 familias, mismo esqueleto.
+///
+/// Presupuestos intactos: 4 actos (`<= 5`), 8 pasos (`<= 8`), 48 frames
+/// (`<= 96`), 640×480×4×48 ≈ 56 MiB (`<= 64 MiB`), 60 s exactos
+/// (`0.1..=60 s`, `<= MAX_TIMELINE_DURATION_MS`). Pura, sin I/O, sin pánicos
+/// (y byte-idéntica por construcción: el output serializado va pineado por
+/// hash en `tests::long_script_golden_hash`).
+pub fn long_script(concepto: &str) -> Result<GuionTexto, GuionError> {
+    let norm = crate::protocol::normalize_concept(concepto);
+    let resuelta = crate::protocol::template_for_concept(&norm);
+    // Las 13 canónicas pasan literales; fuera de la lista (imposible hoy:
+    // `template_for_concept` solo devuelve canónicas) → fallback honesto.
+    let template = if CANONICAL_TEMPLATES.contains(&resuelta) {
+        resuelta.to_string()
+    } else {
+        "universal".to_string()
+    };
+    let copy = familia_largo(&template);
+    let mut actos: Vec<ActoTexto> = Vec::with_capacity(4);
+    let mut indice = 0usize;
+    // Reparto de los 8 pasos en 4 actos: 1 + 2 + 3 + 2.
+    for (titulo, cantidad) in [
+        ("Hook", 1usize),
+        ("Desarrollo", 2),
+        ("Clímax", 3),
+        ("Cierre", 2),
+    ] {
+        let mut pasos = Vec::with_capacity(cantidad);
+        for _ in 0..cantidad {
+            let (texto, voiceover) = copy.beats[indice];
+            let (run_ms, wait_after_ms) =
+                (PACING_LARGO_RUN_MS[indice], PACING_LARGO_WAIT_MS[indice]);
+            pasos.push(PasoTexto {
+                texto: texto.to_string(),
+                math_expr: None,
+                whiteboard_hint: copy.pizarra.to_string(),
+                template_hint: template.clone(),
+                params: BTreeMap::new(),
+                efecto: EFECTOS_LARGO[indice].to_string(),
+                frames: LONG_FRAMES_POR_PASO,
+                run_ms,
+                wait_after_ms,
+                voiceover: Some(voiceover.to_string()),
+            });
+            indice += 1;
+        }
+        actos.push(ActoTexto {
+            titulo: titulo.to_string(),
+            fondo: None,
+            limpiar: false,
+            pasos,
+        });
+    }
+    let guion = GuionTexto {
+        concepto: norm,
+        width: 640,
+        height: 480,
+        actos,
+    };
+    // Chequeo interno barato (sin `Guion::try_new` completo para no
+    // duplicar su costo): la voz debe caer en el rango largo.
+    if !(LONG_MIN_PALABRAS..=LONG_MAX_PALABRAS).contains(&guion.total_voiceover_words()) {
+        return Err(invalido(
+            "voiceover",
+            format!(
+                "el largo trae {} palabras (válido {LONG_MIN_PALABRAS}..={LONG_MAX_PALABRAS})",
+                guion.total_voiceover_words()
+            ),
+        ));
+    }
+    Ok(guion)
+}
+
+impl GuionTexto {
+    /// ¿El total de voz cae en el rango del guion largo
+    /// (`140..=175`)? Informativa: nunca es `Err`, solo `bool`. Pura.
+    pub fn validate_long_len(&self) -> bool {
+        (LONG_MIN_PALABRAS..=LONG_MAX_PALABRAS).contains(&self.total_voiceover_words())
+    }
+}
+
+impl Guion {
+    /// ¿El total de voz cae en el rango del guion largo
+    /// (`140..=175`)? Informativa: nunca es `Err`, solo `bool`. Pura.
+    pub fn validate_long_len(&self) -> bool {
+        (LONG_MIN_PALABRAS..=LONG_MAX_PALABRAS).contains(&self.total_voiceover_words())
+    }
+}
+
 /// Aplica la frontera del acto a la escena viva (puro, sin I/O):
 /// `Conservar` no toca nada; `Limpiar` restaura la base del acto.
 pub fn aplicar_frontera(escena: &mut Scene, acto: &Acto) -> Result<(), GuionError> {
@@ -1840,6 +2403,257 @@ mod tests {
             h = h.wrapping_mul(0x0000_0100_0000_01b3);
         }
         h
+    }
+
+    /// Pacing del largo: las duraciones por beat suman el total sin pasarse
+    /// del tope del timeline, y el beat-pregunta es un `Wait` con duración
+    /// y continuación propias.
+    #[test]
+    fn largo_pacing_suma_sesenta_sin_pasarse_del_tope() {
+        assert_eq!(PACING_LARGO_RUN_MS.len(), 8);
+        assert_eq!(PACING_LARGO_WAIT_MS.len(), 8);
+        assert_eq!(duracion_total_largo_ms(), LONG_TOTAL_MS);
+        assert_eq!(LONG_TOTAL_MS, 60_000);
+        assert!(duracion_total_largo_ms() <= MAX_TIMELINE_DURATION_MS);
+        // El beat-pregunta es espera pura: congela sin silencio posterior.
+        assert_eq!(PREGUNTA_LARGO_INDICE, 2);
+        assert_eq!(EFECTOS_LARGO[PREGUNTA_LARGO_INDICE], "wait");
+        assert_eq!(
+            PACING_LARGO_RUN_MS[PREGUNTA_LARGO_INDICE],
+            PREGUNTA_LARGO_RUN_MS
+        );
+        assert_eq!(PACING_LARGO_WAIT_MS[PREGUNTA_LARGO_INDICE], 0);
+        // Animados en 100..=60000, esperas en 1..=10000 (paridad playlist).
+        for (i, efecto) in EFECTOS_LARGO.iter().enumerate() {
+            if *efecto == "wait" {
+                assert!((1..=PLAYLIST_MAX_WAIT_MS).contains(&PACING_LARGO_RUN_MS[i]));
+            } else {
+                assert!((PASO_MIN_RUN_MS..=PASO_MAX_RUN_MS).contains(&PACING_LARGO_RUN_MS[i]));
+            }
+            assert!(PACING_LARGO_WAIT_MS[i] <= PLAYLIST_MAX_WAIT_MS);
+        }
+    }
+
+    #[test]
+    fn beat_pregunta_trae_duracion_y_continuacion() {
+        for template in CANONICAL_TEMPLATES {
+            let beat = beat_pregunta(template);
+            assert!(!beat.pregunta.is_empty(), "{template}");
+            assert_eq!(beat.espera_ms, PREGUNTA_LARGO_RUN_MS);
+            assert!(!beat.continuacion.is_empty(), "{template}");
+            // La continuación es la apertura del beat que responde.
+            let copy = familia_largo_por_nombre(template);
+            assert_eq!(beat.pregunta, copy.beats[PREGUNTA_LARGO_INDICE].0);
+            assert_eq!(beat.continuacion, copy.beats[PREGUNTA_LARGO_INDICE + 1].0);
+            assert!(
+                beat.pregunta.contains('?'),
+                "la pregunta pregunta: {template}"
+            );
+        }
+        // Alias y desconocido no rompen (universal honesto).
+        assert_eq!(
+            beat_pregunta("pythagoras").pregunta,
+            beat_pregunta("pitagoras").pregunta
+        );
+        assert!(!beat_pregunta("hollywood-3d").pregunta.is_empty());
+    }
+
+    #[test]
+    fn titulos_y_ganchos_tres_por_familia_y_distintos() {
+        let mut vistos: Vec<&str> = Vec::new();
+        for template in CANONICAL_TEMPLATES {
+            let titulos = titulos_para(template);
+            let ganchos = ganchos_para(template);
+            assert_eq!(titulos.len(), 3, "{template}");
+            assert_eq!(ganchos.len(), 3, "{template}");
+            for t in titulos {
+                assert!(!t.is_empty(), "{template}");
+                assert!(t.chars().count() <= TITULO_MAX_CHARS, "{t}");
+            }
+            for g in ganchos {
+                assert!(!g.is_empty(), "{template}");
+            }
+            assert!(
+                titulos[0] != titulos[1] && titulos[1] != titulos[2] && titulos[0] != titulos[2]
+            );
+            assert!(
+                ganchos[0] != ganchos[1] && ganchos[1] != ganchos[2] && ganchos[0] != ganchos[2]
+            );
+            vistos.extend(titulos);
+            vistos.extend(ganchos);
+        }
+        // 6 familias × 6 variantes = 36 textos todos distintos.
+        let mut unicos = vistos.clone();
+        unicos.sort_unstable();
+        unicos.dedup();
+        assert_eq!(unicos.len(), 36, "cada familia tiene su propio copy");
+        // Alias y desconocido: pitagoras y universal honestos.
+        assert_eq!(titulos_para("pythagoras"), titulos_para("pitagoras"));
+        assert_eq!(ganchos_para("hollywood-3d"), ganchos_para("universal"));
+    }
+
+    /// Golden de títulos/ganchos: copy puro y determinista, pineado por
+    /// hash FNV-1a 64 por plantilla canónica (igual que el corto).
+    #[test]
+    fn titulos_ganchos_golden_hash() {
+        let casos: [(&str, u64); 13] = [
+            ("derivative-slope", 0x2300253e34c2e606),
+            ("integral-area", 0x2300253e34c2e606),
+            ("taylor-series", 0x2300253e34c2e606),
+            ("conformal-map", 0xbb81565a0b0633c2),
+            ("pitagoras", 0x1ce1c0776019ce1c),
+            ("euler", 0x19e19c959d60e9b4),
+            ("fourier", 0x19e19c959d60e9b4),
+            ("logistic-bifurcation", 0x6f6f8aa5113a813),
+            ("gradient-field", 0x6f6f8aa5113a813),
+            ("mobius-transform", 0xbb81565a0b0633c2),
+            ("universal", 0x2140006cf5df60cb),
+            ("subspace", 0x1ce1c0776019ce1c),
+            ("fractal", 0x1ce1c0776019ce1c),
+        ];
+        for (template, esperado) in casos {
+            let json = serde_json::to_string(&(titulos_para(template), ganchos_para(template)))
+                .expect("serializa");
+            assert_eq!(
+                fnv1a64(json.as_bytes()),
+                esperado,
+                "golden roto para {template}: si el cambio es querido, re-pineá con justificación"
+            );
+        }
+    }
+
+    #[test]
+    fn long_script_arco_presupuestos_y_rango() {
+        for concepto in [
+            "serie de taylor del seno",
+            "integral del área bajo la curva",
+            "derivada como pendiente",
+            "mapeo conforme complejo",
+            "teorema de pitágoras",
+            "tarea sin matemática",
+            "logística y bifurcación",
+            "series de fourier",
+        ] {
+            let crudo = long_script(concepto).expect("largo válido");
+            // 4 actos / 8 pasos / 48 frames / 640×480 / 60 s.
+            assert_eq!(crudo.actos.len(), 4, "{concepto}");
+            let pasos: usize = crudo.actos.iter().map(|a| a.pasos.len()).sum();
+            assert_eq!(pasos, 8, "{concepto}");
+            assert_eq!(
+                crudo
+                    .actos
+                    .iter()
+                    .map(|a| a.pasos.len())
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3, 2],
+                "arco 1+2+3+2: {concepto}"
+            );
+            assert_eq!(crudo.actos[0].titulo, "Hook", "{concepto}");
+            assert_eq!(crudo.actos[1].titulo, "Desarrollo", "{concepto}");
+            assert_eq!(crudo.actos[2].titulo, "Clímax", "{concepto}");
+            assert_eq!(crudo.actos[3].titulo, "Cierre", "{concepto}");
+            assert!(crudo.validate_long_len(), "{concepto}");
+            let g = Guion::try_new(crudo).expect("el largo valida entero");
+            assert_eq!(g.total_pasos(), 8);
+            assert_eq!(g.total_frames(), 48);
+            assert_eq!(g.duracion_total_ms(), LONG_TOTAL_MS);
+            assert_eq!(g.duracion_total_ms(), duracion_total_largo_ms());
+            assert!(g.validate_long_len());
+            assert!(
+                (LONG_MIN_PALABRAS..=LONG_MAX_PALABRAS).contains(&g.total_voiceover_words()),
+                "{} palabras fuera de rango: {concepto}",
+                g.total_voiceover_words()
+            );
+            // Cada paso: voz <= 40 palabras, sin math que exceda 200 bytes.
+            for paso in g.actos.iter().flat_map(|a| a.pasos.iter()) {
+                let n = paso.voiceover.as_deref().map_or(0, cuenta_palabras_voz);
+                assert!(n <= VOICEOVER_MAX_PALABRAS, "{n} palabras en {concepto}");
+                assert!(paso
+                    .math_expr
+                    .as_deref()
+                    .is_none_or(|e| e.len() <= MATH_EXPR_MAX_BYTES));
+            }
+            // El beat 2 es la pregunta (`Wait` que congela, 0 frames propios).
+            let lista = g.a_playlist().expect("playlist del largo");
+            assert_eq!(lista.len(), 8);
+            assert!(lista.steps[PREGUNTA_LARGO_INDICE].is_wait());
+            assert_eq!(lista.total_duration_ms(), LONG_TOTAL_MS);
+        }
+    }
+
+    /// Regresión del copy genérico largo: los hooks varían por familia.
+    #[test]
+    fn long_script_varia_los_beats_por_familia() {
+        let familias = [
+            "derivada como pendiente",
+            "mapeo conforme complejo",
+            "logística y bifurcación",
+            "series de fourier",
+            "fractal de koch",
+            "tarea sin matemática",
+        ];
+        let mut hooks: Vec<(String, String)> = Vec::new();
+        for concepto in familias {
+            let g = long_script(concepto).expect("largo válido");
+            let hook = &g.actos[0].pasos[0];
+            assert!(!hook.texto.is_empty(), "{concepto}");
+            assert!(hook.voiceover.as_deref().is_some_and(|v| !v.is_empty()));
+            hooks.push((
+                hook.texto.clone(),
+                hook.voiceover.clone().unwrap_or_default(),
+            ));
+        }
+        for i in 0..hooks.len() {
+            for j in (i + 1)..hooks.len() {
+                assert_ne!(
+                    hooks[i], hooks[j],
+                    "el hook largo de la familia {i} debe diferir del de la {j}"
+                );
+            }
+        }
+    }
+
+    /// El largo también valida con errores honestos: una voz de 41 palabras
+    /// en un paso del largo es `Err` (no silencio parcial).
+    #[test]
+    fn long_script_con_voz_de_41_palabras_falla_honesto() {
+        let mut crudo = long_script("derivada como pendiente").expect("largo válido");
+        let voz41 = (0..41)
+            .map(|i| format!("palabra{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        crudo.actos[0].pasos[0].voiceover = Some(voz41);
+        assert!(Guion::try_new(crudo).is_err());
+    }
+
+    /// Golden byte-a-byte del largo: `long_script` es puro y determinista,
+    /// pineado por hash FNV-1a 64 (uno por cada una de las 13 canónicas).
+    #[test]
+    fn long_script_golden_hash() {
+        let casos: [(&str, u64); 13] = [
+            ("derivada como pendiente", 0x374c02adc4212f9),
+            ("integral del área", 0x8e48cee38cc76ef2),
+            ("serie de taylor del seno", 0x6d7b980139e4807d),
+            ("mapeo conforme complejo", 0x37b6f8f39997cdcc),
+            ("teorema de pitágoras", 0x73d19e17b6861b8f),
+            ("crecimiento exponencial exp(x)", 0x4d4ec1a770f4d3ef),
+            ("series de fourier", 0x368b26ce2d69ec05),
+            ("logística y bifurcación", 0x48da8dcc924abe0b),
+            ("campo gradiente", 0x73653bcea9bfbf59),
+            ("transformación de möbius", 0x836ca4d6b5ca3b37),
+            ("tarea sin matemática", 0xd0074b0e47bdfe91),
+            ("combinación lineal y subespacio", 0x640f397f433a4955),
+            ("fractal de koch", 0xcd9a84c037b1a1d1),
+        ];
+        for (concepto, esperado) in casos {
+            let g = long_script(concepto).expect("largo válido");
+            let json = serde_json::to_string(&g).expect("serializa");
+            assert_eq!(
+                fnv1a64(json.as_bytes()),
+                esperado,
+                "golden roto para {concepto}: si el cambio es querido, re-pineá con justificación"
+            );
+        }
     }
 
     #[test]

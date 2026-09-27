@@ -2818,6 +2818,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "grafito-lab"
+version = "1.2.1"
+dependencies = [
+ "grafito-geometry",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "grafito-mcp"
 version = "1.2.1"
 dependencies = [

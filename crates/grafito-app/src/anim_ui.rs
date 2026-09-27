@@ -177,6 +177,144 @@ pub fn easing_fn_for_name(name: &str) -> fn(f32) -> f32 {
     grafito_ui::animation::easing::by_name(name)
 }
 
+// ── Combo de plantillas por dominio (ola 52) ─────────────────────────────
+// El selector de plantilla de la UI itera estos grupos (dominio + ids):
+// mismo conjunto que `anim_native::NATIVE_TEMPLATES` (test pineado, por
+// conjunto para que el orden de presentación sea libre). Las 13 históricas
+// van en "Clásicas"; la ola en sus 9 dominios. Sin egui acá: el combo egui
+// vive en la capa de paneles y consume esta tabla pura.
+
+/// Un grupo del combo: dominio en español + ids kebab-case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrupoPlantillas {
+    /// Dominio en español para el encabezado del combo.
+    pub dominio: &'static str,
+    /// Ids del grupo (kebab-case, ver `NATIVE_TEMPLATES`).
+    pub ids: &'static [&'static str],
+}
+
+/// Grupos del combo de plantillas (10: clásicas + 9 de la ola).
+pub const PLANTILLAS_COMBO: &[GrupoPlantillas] = &[
+    GrupoPlantillas {
+        dominio: "Clásicas",
+        ids: &[
+            "derivative-slope",
+            "integral-area",
+            "taylor-series",
+            "conformal-map",
+            "pitagoras",
+            "euler",
+            "fourier",
+            "logistic-bifurcation",
+            "gradient-field",
+            "mobius-transform",
+            "universal",
+            "subspace",
+            "fractal",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Álgebra lineal",
+        ids: &[
+            "cambio-de-base",
+            "determinante-area",
+            "eigenvectores",
+            "matriz-transformacion",
+            "producto-cruz",
+            "vectores-combinacion-lineal",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Análisis I",
+        ids: &[
+            "chain-rule",
+            "epsilon-delta",
+            "improper-integral",
+            "ode-slope-field",
+            "riemann-sums",
+            "taylor-remainder",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Análisis II",
+        ids: &[
+            "double-integral",
+            "gradient-descent",
+            "green-stokes",
+            "jacobian",
+            "lagrange-multipliers",
+            "partial-derivatives",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Caos",
+        ids: &[
+            "chaos-bifurcacion-barrido",
+            "chaos-julia-morph",
+            "chaos-lorenz",
+            "chaos-mandelbrot-zoom",
+            "chaos-pendulo-doble",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Ecuaciones diferenciales",
+        ids: &[
+            "edo-calor-onda",
+            "edo-campo-direcciones",
+            "edo-convolucion",
+            "edo-fourier-epiciclos",
+            "edo-laplace",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Estadística y ML",
+        ids: &[
+            "backprop-flujo",
+            "descenso-gradiente-3d",
+            "distribuciones",
+            "limite-central",
+            "pca-rotacion",
+            "perceptron-mlp",
+            "regresion-lineal",
+            "teorema-bayes",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Superficies 3D",
+        ids: &[
+            "sup-campo-vectorial",
+            "sup-interseccion",
+            "sup-onda-3d",
+            "sup-paraboloide-tangente",
+            "sup-silla-descenso",
+            "sup-toro-rotante",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Politopos 4D",
+        ids: &[
+            "celda-24",
+            "estereografica",
+            "hipercubo-corte",
+            "simplex-nd",
+            "tesseract-xw",
+        ],
+    },
+    GrupoPlantillas {
+        dominio: "Grafos y redes",
+        ids: &[
+            "bfs-animado",
+            "camino-minimo",
+            "force-directed",
+            "moser-spindle-coloreo",
+            "unit-distance",
+        ],
+    },
+];
+
+/// Cantidad total de plantillas del combo (13 + 52 = 65).
+pub const PLANTILLAS_COMBO_TOTAL: usize = 65;
+
 // ── Retención diferida de texturas egui (fix use-after-free wgpu) ───────────
 // El render GPU va un frame atrás: destruir una textura gestionada por egui
 // (`TextureHandle` drop → `TexturesDelta::free` → `renderer.free_texture` →
@@ -985,5 +1123,34 @@ mod tests {
         assert!(ejemplos.contains(&"exportar mp4 720p"));
         assert!(ejemplos.contains(&"órbita"));
         assert!(ejemplos.contains(&"reintentar"));
+    }
+
+    // ── Ola 52: combo por dominio en sync con el nativo ─────────────────
+    #[test]
+    fn combo_65_en_sync_con_nativo_y_protocolo() {
+        use crate::anim_native::NATIVE_TEMPLATES;
+        use std::collections::BTreeSet;
+        // 10 grupos, 65 ids en total (13 clásicas + 52 de la ola).
+        assert_eq!(PLANTILLAS_COMBO.len(), 10);
+        let total: usize = PLANTILLAS_COMBO.iter().map(|g| g.ids.len()).sum();
+        assert_eq!(total, PLANTILLAS_COMBO_TOTAL);
+        assert_eq!(total, 65);
+        // Mismo conjunto que el nativo y el protocolo (orden libre).
+        let combo: BTreeSet<&&str> = PLANTILLAS_COMBO.iter().flat_map(|g| g.ids.iter()).collect();
+        assert_eq!(combo.len(), 65, "combo sin duplicados");
+        let nativo: BTreeSet<&&str> = NATIVE_TEMPLATES.iter().collect();
+        assert_eq!(nativo.len(), 65);
+        assert_eq!(combo, nativo, "combo = nativo por conjunto");
+        for id in grafito_anim::protocol::CANONICAL_TEMPLATES {
+            assert!(combo.contains(id), "{id} del protocolo en el combo");
+        }
+        // Dominios no vacíos, en español, sin ids con mayúsculas.
+        for g in PLANTILLAS_COMBO {
+            assert!(!g.dominio.is_empty(), "dominio con nombre");
+            assert!(!g.ids.is_empty(), "{} sin ids", g.dominio);
+            for id in g.ids {
+                assert_eq!(*id, id.to_lowercase(), "{id} kebab-case");
+            }
+        }
     }
 }

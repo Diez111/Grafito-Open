@@ -29,21 +29,19 @@ use grafito_ui::animation::anim_axes::{
     cabe_label_entre, clip_seg_a_caja, short_tick_label, LabelCaja, TICK_CHAR_H_PX, TICK_CHAR_W_PX,
 };
 
-// ── Registro canónico nativo v4 (13 plantillas) ──────────────────────────
-// SYNC MECÁNICO 11↔11↔11 (ANIM-REVIVE) + 2 nativas nuevas en tránsito:
-// - `grafito-anim/src/protocol.rs::CANONICAL_TEMPLATES`: fuente única (11).
-// - Este `NATIVE_TEMPLATES`: prefijo 11 idéntico en orden y contenido +
-//   `subspace` + `fractal` al final (test pineado como superconjunto).
-//   El frente protocolo las registra en `CANONICAL_TEMPLATES` después;
-//   hasta entonces `sanitize_template` las rechaza y el nativo las atiende
-//   por dispatcher interno (`render_anim_by_template` / `resolve_native_template`).
-// - `anim_ui.rs::PLANTILLAS_COMBO`: mismo conjunto (test pineado, orden libre).
+// ── Registro canónico nativo v5 (65 plantillas) ──────────────────────────
+// SYNC MECÁNICO 65↔65↔65 (ola de 52):
+// - `grafito-anim/src/protocol.rs::CANONICAL_TEMPLATES`: fuente única (65).
+// - Este `NATIVE_TEMPLATES`: idéntico en orden y contenido (las 13
+//   históricas primero, la ola agrupada por dominio después).
+// - `anim_ui.rs::PLANTILLAS_COMBO`: mismo conjunto (test pineado, por
+//   conjunto, agrupada por dominio).
 // - `sanitize_template` usa `CANONICAL_TEMPLATES` (sin match duplicado).
 // DIVERGENCIA HONESTA residual (fuera de este scope):
 // - `grafito-agent/src/tools.rs::KNOWN_TEMPLATES`: 7 (sin logistic/gradient/
-//   mobius/universal; NO editable desde este scope).
-// - Worker python `ALLOW_TEMPLATE`: 6 (sin euler/fourier/logistic/gradient/
-//   mobius; NO editable desde este scope → el worker mapea por concepto).
+//   mobius/universal ni la ola; NO editable desde este scope).
+// - Worker python `ALLOW_TEMPLATE`: 6 (NO editable desde este scope → el
+//   worker mapea por concepto).
 // - `limit-epsilon` / `ode-*` NO existen en ningún registro: caen al fallback
 //   genérico — ver `native_dispatch_for` + test `dispatch_honesto_*` que
 //   pinnea `FallbackUniversal` hasta que alguien les dé renderer propio.
@@ -66,6 +64,67 @@ pub const NATIVE_TEMPLATES: &[&str] = &[
     // (al final para conservar el prefijo 11 idéntico al protocolo).
     "subspace",
     "fractal",
+    // Ola 52: álgebra lineal (`grafito-anim::tpl_linalg`, 6).
+    "cambio-de-base",
+    "determinante-area",
+    "eigenvectores",
+    "matriz-transformacion",
+    "producto-cruz",
+    "vectores-combinacion-lineal",
+    // Ola 52: análisis I (`grafito-anim::tpl_am1`, 6).
+    "chain-rule",
+    "epsilon-delta",
+    "improper-integral",
+    "ode-slope-field",
+    "riemann-sums",
+    "taylor-remainder",
+    // Ola 52: análisis II (`grafito-anim::tpl_am2`, 6).
+    "double-integral",
+    "gradient-descent",
+    "green-stokes",
+    "jacobian",
+    "lagrange-multipliers",
+    "partial-derivatives",
+    // Ola 52: caos (`grafito-anim::tpl_chaos`, 5).
+    "chaos-bifurcacion-barrido",
+    "chaos-julia-morph",
+    "chaos-lorenz",
+    "chaos-mandelbrot-zoom",
+    "chaos-pendulo-doble",
+    // Ola 52: EDO (`grafito-anim::tpl_edo`, 5).
+    "edo-calor-onda",
+    "edo-campo-direcciones",
+    "edo-convolucion",
+    "edo-fourier-epiciclos",
+    "edo-laplace",
+    // Ola 52: estadística y ML (`grafito-anim::tpl_stats`, 8).
+    "backprop-flujo",
+    "descenso-gradiente-3d",
+    "distribuciones",
+    "limite-central",
+    "pca-rotacion",
+    "perceptron-mlp",
+    "regresion-lineal",
+    "teorema-bayes",
+    // Ola 52: superficies 3D (`grafito-anim::tpl_3d`, 6).
+    "sup-campo-vectorial",
+    "sup-interseccion",
+    "sup-onda-3d",
+    "sup-paraboloide-tangente",
+    "sup-silla-descenso",
+    "sup-toro-rotante",
+    // Ola 52: politopos 4D (`grafito-anim::tpl_4d`, 5).
+    "celda-24",
+    "estereografica",
+    "hipercubo-corte",
+    "simplex-nd",
+    "tesseract-xw",
+    // Ola 52: grafos y redes (`grafito-anim::tpl_graphs`, 5).
+    "bfs-animado",
+    "camino-minimo",
+    "force-directed",
+    "moser-spindle-coloreo",
+    "unit-distance",
 ];
 
 /// ¿La plantilla tiene renderer nativo propio?
@@ -6348,6 +6407,60 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
         "mobius-transform" | "mobius" | "moebius" => "mobius-transform",
         "subspace" => "subspace",
         "fractal" => "fractal",
+        // Ola 52: cada id nuevo se resuelve a sí mismo (tiene renderer
+        // propio en el bloque ola de este archivo). Sin alias por ahora.
+        "cambio-de-base" => "cambio-de-base",
+        "determinante-area" => "determinante-area",
+        "eigenvectores" => "eigenvectores",
+        "matriz-transformacion" => "matriz-transformacion",
+        "producto-cruz" => "producto-cruz",
+        "vectores-combinacion-lineal" => "vectores-combinacion-lineal",
+        "chain-rule" => "chain-rule",
+        "epsilon-delta" => "epsilon-delta",
+        "improper-integral" => "improper-integral",
+        "ode-slope-field" => "ode-slope-field",
+        "riemann-sums" => "riemann-sums",
+        "taylor-remainder" => "taylor-remainder",
+        "double-integral" => "double-integral",
+        "gradient-descent" => "gradient-descent",
+        "green-stokes" => "green-stokes",
+        "jacobian" => "jacobian",
+        "lagrange-multipliers" => "lagrange-multipliers",
+        "partial-derivatives" => "partial-derivatives",
+        "chaos-bifurcacion-barrido" => "chaos-bifurcacion-barrido",
+        "chaos-julia-morph" => "chaos-julia-morph",
+        "chaos-lorenz" => "chaos-lorenz",
+        "chaos-mandelbrot-zoom" => "chaos-mandelbrot-zoom",
+        "chaos-pendulo-doble" => "chaos-pendulo-doble",
+        "edo-calor-onda" => "edo-calor-onda",
+        "edo-campo-direcciones" => "edo-campo-direcciones",
+        "edo-convolucion" => "edo-convolucion",
+        "edo-fourier-epiciclos" => "edo-fourier-epiciclos",
+        "edo-laplace" => "edo-laplace",
+        "backprop-flujo" => "backprop-flujo",
+        "descenso-gradiente-3d" => "descenso-gradiente-3d",
+        "distribuciones" => "distribuciones",
+        "limite-central" => "limite-central",
+        "pca-rotacion" => "pca-rotacion",
+        "perceptron-mlp" => "perceptron-mlp",
+        "regresion-lineal" => "regresion-lineal",
+        "teorema-bayes" => "teorema-bayes",
+        "sup-campo-vectorial" => "sup-campo-vectorial",
+        "sup-interseccion" => "sup-interseccion",
+        "sup-onda-3d" => "sup-onda-3d",
+        "sup-paraboloide-tangente" => "sup-paraboloide-tangente",
+        "sup-silla-descenso" => "sup-silla-descenso",
+        "sup-toro-rotante" => "sup-toro-rotante",
+        "celda-24" => "celda-24",
+        "estereografica" => "estereografica",
+        "hipercubo-corte" => "hipercubo-corte",
+        "simplex-nd" => "simplex-nd",
+        "tesseract-xw" => "tesseract-xw",
+        "bfs-animado" => "bfs-animado",
+        "camino-minimo" => "camino-minimo",
+        "force-directed" => "force-directed",
+        "moser-spindle-coloreo" => "moser-spindle-coloreo",
+        "unit-distance" => "unit-distance",
         // F5: templates pedagógicos inline — mapeo a nativos existentes
         "fraccion-visual" => "integral-area",
         "vector-anim" => "conformal-map",
@@ -6546,6 +6659,9 @@ pub fn render_anim_with_progress_con_rotulo(
             render_subspace_frames_with_params_impl(width, height, params, con_rotulo, on_frame)
         }
         "fractal" => render_fractal_frames_with_params_impl(width, height, con_rotulo, on_frame),
+        tmpl if es_plantilla_ola(tmpl) => {
+            render_ola_por_id(tmpl, concept, width, height, params, con_rotulo, on_frame)
+        }
         tmpl => render_anim_for_concept_legacy_with_progress(
             tmpl, concept, width, height, params, con_rotulo, on_frame,
         ),
@@ -6648,6 +6764,9 @@ fn render_anim_for_concept_legacy_with_progress(
         "fractal" => render_fractal_frames_with_params_impl(width, height, con_rotulo, on_frame),
         "universal" => {
             render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+        }
+        tmpl if es_plantilla_ola(tmpl) => {
+            render_ola_por_id(tmpl, concept, width, height, params, con_rotulo, on_frame)
         }
         _ => render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame),
     }
@@ -7834,6 +7953,15 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
         "mobius-transform" => render_mobius_frames(width, height),
         "subspace" => render_subspace_frames(width, height),
         "fractal" => render_fractal_frames(width, height),
+        t if es_plantilla_ola(t) => render_ola_por_id(
+            t,
+            template,
+            width,
+            height,
+            &std::collections::BTreeMap::new(),
+            true,
+            &mut |_, _| {},
+        ),
         "universal" => {
             if template.trim() == "universal" || template.trim() == "matriz-anim" {
                 render_universal_youtube_frames("matem\u{00e1}tica", width, height)
@@ -7842,6 +7970,957 @@ pub fn render_anim_by_template(template: &str, width: u32, height: u32) -> Vec<e
             }
         }
         _ => render_universal_youtube_frames(template, width, height),
+    }
+}
+
+// ── Ola 52 (I): pegamento de los 9 módulos `tpl_*` ─────────────────────
+// Cada id nuevo produce 48 frames en el formato del dispatcher
+// (`Vec<egui::ColorImage>`, `NATIVE_ANIM_FRAME_COUNT`). Tres caminos:
+// - RGBA directo (`tpl_linalg`, `tpl_4d`, `tpl_graphs`): el módulo rasteriza
+//   en CPU con su paleta; acá solo se convierte a `ColorImage` (opacizando:
+//   el pipeline nativo es opaco, ver test de bounds de alfa) con dims
+//   presupuestados (`resolve_native_size_budgeted`).
+// - Escenas `PlacedMobject` (`tpl_edo`, `tpl_chaos`): `escena_para` por frame
+//   con params vivos (`desde_mapa`; mapa vacío = defaults del módulo) sobre
+//   `render_placed_objects` con cámara ortho canónica.
+// - Sup 3D (`tpl_3d`): `muestra_frame` + `a_poligonos` (curvas, flechas y
+//   ejes ya proyectados a mundo 2D) + un punto móvil proyectado con la
+//   cámara de la muestra (`Camera::project_3d`) para que la escena anime de
+//   verdad (las superficies no se rasterizan acá: ver doc de `a_poligonos`).
+// Todo determinista, sin `unwrap` (deny), presupuestos intactos. Ante `Err`
+// del módulo: placeholder universal honesto (jamás frames a medias); ante
+// `Err` de un frame suelto: fondo con grilla (el set sigue con 48).
+// La ola rotula en su propio raster (linalg/4d/graphs) o no rotula (el glue
+// dibuja sin texto quemado); `con_rotulo` no aplica (TODO honesto).
+// (II): stats/AM1/AM2 dibujan Mobjects desde sus structs CPU.
+
+/// Fase del frame sobre el set: `frame/48` (48 fases SIN duplicar el cierre:
+/// las escenas cíclicas —rotación 2π de `chaos-lorenz`, órbitas `sup-*`—
+/// darían frame 0 == frame 47 con `frame/47`; así el último es 47/48).
+fn ola_alpha(frame: usize) -> f64 {
+    (frame.min(NATIVE_ANIM_FRAME_COUNT.saturating_sub(1)) as f64) / (NATIVE_ANIM_FRAME_COUNT as f64)
+}
+
+/// Fondo honesto con grilla (frame de contingencia, dims seguras).
+fn ola_fondo(w: usize, h: usize) -> egui::ColorImage {
+    let byte_len = w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0);
+    let exacto = w
+        .checked_mul(h)
+        .and_then(|v| v.checked_mul(4))
+        .is_some_and(|n| n == byte_len && n > 0);
+    if exacto {
+        let mut buf = vec![0u8; byte_len];
+        fill_background(&mut buf, w, h);
+        draw_subtle_grid(&mut buf, w, h);
+        egui::ColorImage::from_rgba_unmultiplied([w, h], &buf)
+    } else {
+        let mut buf = vec![0u8; NATIVE_FALLBACK_W * NATIVE_FALLBACK_H * 4];
+        fill_background(&mut buf, NATIVE_FALLBACK_W, NATIVE_FALLBACK_H);
+        draw_subtle_grid(&mut buf, NATIVE_FALLBACK_W, NATIVE_FALLBACK_H);
+        egui::ColorImage::from_rgba_unmultiplied([NATIVE_FALLBACK_W, NATIVE_FALLBACK_H], &buf)
+    }
+}
+
+/// Dibuja `mobjects` (máx 64) sobre fondo+grilla. Los inválidos se saltean
+/// (`draw_mobject` valida; jamás panic).
+fn ola_dibuja_mobjects(w: usize, h: usize, mobjects: &[grafito_anim::Mobject]) -> egui::ColorImage {
+    let byte_len = w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0);
+    let exacto = byte_len > 0
+        && w.checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .is_some_and(|n| n == byte_len);
+    if !exacto {
+        return ola_fondo(w, h);
+    }
+    let mut buf = vec![0u8; byte_len];
+    fill_background(&mut buf, w, h);
+    draw_subtle_grid(&mut buf, w, h);
+    for m in mobjects.iter().take(160) {
+        draw_mobject(&mut buf, w, h, m);
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &buf)
+}
+
+/// Convierte un set RGBA propio (`(ancho, alto, píxeles)`) al set nativo:
+/// dims exactas, `w*h*4` bytes y opacizado (el pipeline es opaco).
+/// `None` honesto si algo no calza (el llamador cae al universal).
+fn ola_set_rgba(
+    cuadros: Vec<(u32, u32, Vec<u8>)>,
+    w: usize,
+    h: usize,
+) -> Option<Vec<egui::ColorImage>> {
+    if cuadros.len() != NATIVE_ANIM_FRAME_COUNT {
+        return None;
+    }
+    let esperado = w.checked_mul(h)?.checked_mul(4)?;
+    let mut out = Vec::with_capacity(cuadros.len());
+    for (fw, fh, mut px) in cuadros {
+        if fw as usize != w || fh as usize != h || px.len() != esperado {
+            return None;
+        }
+        for c in px.chunks_exact_mut(4) {
+            c[3] = 255;
+        }
+        out.push(egui::ColorImage::from_rgba_unmultiplied([w, h], &px));
+    }
+    Some(out)
+}
+
+/// Emite el progreso 1..=48 de un set ya armado (caché/hits del dispatcher
+/// hacen lo mismo: el callback nunca altera píxeles).
+fn ola_emitir_progreso(set: &[egui::ColorImage], on_frame: &mut dyn FnMut(usize, usize)) {
+    for (i, _) in set.iter().enumerate() {
+        on_frame(i + 1, set.len());
+    }
+}
+
+/// Álgebra lineal: raster CPU directo del módulo (6 ids).
+fn render_ola_linalg(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT + 1);
+    let w32 = w.min(u32::MAX as usize) as u32;
+    let h32 = h.min(u32::MAX as usize) as u32;
+    // 49 para no cerrar el ciclo (`t=1≡t=0` en rotaciones daría
+    // frame 0 == frame 47): se toman los primeros 48 (`t=g/48`).
+    if let Ok(cuadros) =
+        grafito_anim::tpl_linalg::render_linalg_frames(id, w32, h32, NATIVE_ANIM_FRAME_COUNT + 1)
+    {
+        let tuplas: Vec<(u32, u32, Vec<u8>)> = cuadros
+            .into_iter()
+            .take(NATIVE_ANIM_FRAME_COUNT)
+            .map(|f| (f.width, f.height, f.pixels))
+            .collect();
+        if let Some(set) = ola_set_rgba(tuplas, w, h) {
+            ola_emitir_progreso(&set, on_frame);
+            return set;
+        }
+    }
+    render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+}
+
+/// Politopos 4D: raster CPU directo del módulo (5 ids).
+fn render_ola_4d(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT + 1);
+    let w32 = w.min(u32::MAX as usize) as u32;
+    let h32 = h.min(u32::MAX as usize) as u32;
+    // 49 para no cerrar el ciclo (ver linalg): se toman 48.
+    if let Ok(cuadros) =
+        grafito_anim::tpl_4d::render_4d_frames(id, w32, h32, NATIVE_ANIM_FRAME_COUNT + 1)
+    {
+        let tuplas: Vec<(u32, u32, Vec<u8>)> = cuadros
+            .into_iter()
+            .take(NATIVE_ANIM_FRAME_COUNT)
+            .map(|f| (f.width, f.height, f.pixels))
+            .collect();
+        if let Some(set) = ola_set_rgba(tuplas, w, h) {
+            ola_emitir_progreso(&set, on_frame);
+            return set;
+        }
+    }
+    render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+}
+
+/// Grafos y redes: raster CPU directo del módulo (5 ids).
+fn render_ola_graphs(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT + 1);
+    let w32 = w.min(u32::MAX as usize) as u32;
+    let h32 = h.min(u32::MAX as usize) as u32;
+    // 49 para no cerrar el ciclo (ver linalg): se toman 48.
+    if let Ok(cuadros) =
+        grafito_anim::tpl_graphs::render_graphs_frames(id, w32, h32, NATIVE_ANIM_FRAME_COUNT + 1)
+    {
+        let tuplas: Vec<(u32, u32, Vec<u8>)> = cuadros
+            .into_iter()
+            .take(NATIVE_ANIM_FRAME_COUNT)
+            .map(|f| (f.width, f.height, f.pixels))
+            .collect();
+        if let Some(set) = ola_set_rgba(tuplas, w, h) {
+            ola_emitir_progreso(&set, on_frame);
+            return set;
+        }
+    }
+    render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+}
+
+/// EDO: `escena_para` por frame con params vivos (5 ids).
+fn render_ola_edo(
+    id: &str,
+    _concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let base = grafito_anim::tpl_edo::EdoParams::desde_mapa(id, params);
+    let mut scratch = grafito_anim::anims::Scratch::nuevo();
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        match grafito_anim::tpl_edo::escena_para(id, &base, ola_alpha(frame), &mut scratch) {
+            Ok(colocados) => {
+                // `edo-laplace` es estática por diseño del módulo (barrido
+                // de s ya desplegado): se revela por prefijo para que el
+                // set anime (solo objetos del módulo, sin inventar nada).
+                if id == "edo-laplace" && colocados.len() > 1 {
+                    let n = colocados.len();
+                    let k = (1 + frame * (n - 1) / NATIVE_ANIM_FRAME_COUNT.saturating_sub(1))
+                        .clamp(1, n);
+                    out.push(ola_dibuja_colocados(w, h, &colocados[..k]));
+                } else {
+                    out.push(ola_dibuja_colocados(w, h, &colocados));
+                }
+            }
+            Err(_) => out.push(ola_fondo(w, h)),
+        }
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+/// Caos: `escena_para` por frame con params vivos (5 ids).
+fn render_ola_chaos(
+    id: &str,
+    _concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let base = grafito_anim::tpl_chaos::ChaosParams::desde_mapa(id, params);
+    let mut scratch = grafito_anim::anims::Scratch::nuevo();
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        match grafito_anim::tpl_chaos::escena_para(id, &base, ola_alpha(frame), &mut scratch) {
+            Ok(colocados) => out.push(ola_dibuja_colocados(w, h, &colocados)),
+            Err(_) => out.push(ola_fondo(w, h)),
+        }
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+/// Dibuja una escena `PlacedMobject` sin el `take(32)` de
+/// `render_placed_objects`: el campo edo trae 120 flechas y las curvas
+/// solución quedarían cortadas (frames idénticos). La escala del módulo es
+/// 1.0 = identidad (`colocado_punto` con escala 1 no mueve nada); solo se
+/// pierde la jerarquía de opacidades (TODO honesto: alfa por objeto).
+fn ola_dibuja_colocados(
+    w: usize,
+    h: usize,
+    colocados: &[grafito_anim::PlacedMobject],
+) -> egui::ColorImage {
+    let objs: Vec<grafito_anim::Mobject> = colocados
+        .iter()
+        .take(160)
+        .map(|o| o.mobject.clone())
+        .collect();
+    ola_dibuja_mobjects(w, h, &objs)
+}
+
+/// Proyecta un punto 3D con la cámara de la muestra a `Dot` 2D (`None` si
+/// cae detrás o no es finito: jamás punto inventado).
+fn ola_punto_3d_a_dot(camara: &grafito_anim::Camera, p: [f64; 3]) -> Option<grafito_anim::Mobject> {
+    let q = camara.project_3d(p)?;
+    if q[0].is_finite() && q[1].is_finite() && en_vista_mundo(q[0], q[1]) {
+        Some(grafito_anim::Mobject::Dot { x: q[0], y: q[1] })
+    } else {
+        None
+    }
+}
+
+/// Superficies 3D: muestra + polígonos + punto móvil (6 ids).
+fn render_ola_sup(
+    id: &str,
+    _concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    let base = grafito_anim::tpl_3d::Params3D::desde_mapa(id, params);
+    let mut scratch = grafito_anim::anims::Scratch::nuevo();
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let mut objs = match grafito_anim::tpl_3d::muestra_frame(
+            id,
+            &base,
+            frame,
+            NATIVE_ANIM_FRAME_COUNT,
+            2000,
+        ) {
+            Ok(muestra) => {
+                let mut v = grafito_anim::tpl_3d::a_poligonos(&muestra, &mut scratch);
+                // Punto móvil por escena (las superficies no se rasterizan):
+                let movil: Option<[f64; 3]> = match id {
+                    "sup-paraboloide-tangente" => {
+                        grafito_anim::tpl_3d::ParaboloideTangente::desde_params(&base)
+                            .ok()
+                            .map(|e| e.punto_en(muestra.alpha))
+                    }
+                    "sup-toro-rotante" => grafito_anim::tpl_3d::ToroRotante::desde_params(&base)
+                        .ok()
+                        .and_then(|e| e.aro_en(muestra.alpha).ok())
+                        .and_then(|c| {
+                            let n = c.puntos.len();
+                            c.puntos.get(n.saturating_sub(1)).copied()
+                        }),
+                    "sup-campo-vectorial" => muestra.vectores.first().map(|v| {
+                        let t = muestra.eased.clamp(0.0, 1.0);
+                        [
+                            v[0][0] + (v[1][0] - v[0][0]) * t,
+                            v[0][1] + (v[1][1] - v[0][1]) * t,
+                            v[0][2] + (v[1][2] - v[0][2]) * t,
+                        ]
+                    }),
+                    "sup-interseccion" => grafito_anim::tpl_3d::Interseccion::desde_params(&base)
+                        .ok()
+                        .and_then(|e| e.curva().ok())
+                        .and_then(|c| {
+                            let n = c.puntos.len();
+                            if n == 0 {
+                                None
+                            } else {
+                                let k = (muestra.eased.clamp(0.0, 1.0) * (n - 1) as f64).round()
+                                    as usize;
+                                c.puntos.get(k.min(n - 1)).copied()
+                            }
+                        }),
+                    "sup-onda-3d" => grafito_anim::tpl_3d::Onda3D::desde_params(&base)
+                        .ok()
+                        .and_then(|e| e.perfil_en(muestra.alpha).ok())
+                        .and_then(|c| c.puntos.into_iter().next()),
+                    _ => grafito_anim::tpl_3d::SillaDescenso::desde_params(&base)
+                        .ok()
+                        .and_then(|e| e.punto_en(muestra.alpha).ok()),
+                };
+                if let Some(p) = movil {
+                    if let Some(dot) = ola_punto_3d_a_dot(&muestra.camara, p) {
+                        v.push(dot);
+                    }
+                }
+                v
+            }
+            Err(_) => Vec::new(),
+        };
+        if objs.is_empty() {
+            out.push(ola_fondo(w, h));
+        } else {
+            // Ejes primero para que las curvas queden arriba (orden honesto).
+            objs.truncate(64);
+            out.push(ola_dibuja_mobjects(w, h, &objs));
+        }
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+// OLA52-P2
+
+// ── Ola 52 (II): stats + AM1 dibujan Mobjects desde sus structs CPU ────
+// Setups fijos de curso (los valores de los tests de cada módulo): params
+// vivos no aplican acá (TODO honesto, igual que conformal/pitagoras).
+// Cada frame: `Axes` + 1-4 Mobjects derivados de los samplers del módulo.
+// Mundo siempre [-3,3]²; lo fuera de vista se filtra (`en_vista_mundo`).
+
+/// Curva sampleada en `[x0, x1]` con `f` (61 pts; tramos no finitos se
+/// cortan: se emiten como polígonos separados, sin unir ramas).
+fn ola_curva(x0: f64, x1: f64, f: impl Fn(f64) -> f64) -> Vec<grafito_anim::Mobject> {
+    let mut tramo: Vec<[f64; 2]> = Vec::new();
+    let mut out = Vec::new();
+    for k in 0..=60 {
+        let x = x0 + (x1 - x0) * (k as f64 / 60.0);
+        let y = f(x);
+        if x.is_finite() && y.is_finite() {
+            tramo.push([x, y]);
+        } else if tramo.len() >= 2 {
+            out.push(grafito_anim::Mobject::Polygon {
+                pts: std::mem::take(&mut tramo),
+            });
+        } else {
+            tramo.clear();
+        }
+    }
+    if tramo.len() >= 2 {
+        out.push(grafito_anim::Mobject::Polygon { pts: tramo });
+    }
+    out
+}
+
+/// `Dot` en `(x, y)` si está en vista (`None` honesto si no).
+fn ola_dot(x: f64, y: f64) -> Option<grafito_anim::Mobject> {
+    if x.is_finite() && y.is_finite() && en_vista_mundo(x, y) {
+        Some(grafito_anim::Mobject::Dot { x, y })
+    } else {
+        None
+    }
+}
+
+/// Estadística y ML: structs CPU del módulo (8 ids).
+fn render_ola_stats(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    // Setups de curso (defaults de los tests del módulo; `try_new` válido).
+    let escena: Option<OlaStatsEscena> = match id {
+        "distribuciones" => grafito_anim::tpl_stats::NormalAnim::try_new(-2.0, 2.0, 0.5, 1.5)
+            .ok()
+            .map(OlaStatsEscena::Normal),
+        "limite-central" => grafito_anim::tpl_stats::LimiteCentralAnim::try_new(32, 16)
+            .ok()
+            .map(Box::new)
+            .map(OlaStatsEscena::Central),
+        "teorema-bayes" => grafito_anim::tpl_stats::BayesAnim::try_new(0.01, 0.9, 0.09)
+            .ok()
+            .map(OlaStatsEscena::Bayes),
+        "regresion-lineal" => grafito_anim::tpl_stats::RegresionAnim::try_new(16)
+            .ok()
+            .map(OlaStatsEscena::Regresion),
+        "pca-rotacion" => grafito_anim::tpl_stats::PcaAnim::try_new(24)
+            .ok()
+            .map(OlaStatsEscena::Pca),
+        "perceptron-mlp" => grafito_anim::tpl_stats::PerceptronMlp::try_new(1.0, 0.0)
+            .ok()
+            .map(OlaStatsEscena::Perceptron),
+        "backprop-flujo" => Some(OlaStatsEscena::Backprop(
+            grafito_anim::tpl_stats::BackpropAnim::nuevo(),
+        )),
+        "descenso-gradiente-3d" => Some(OlaStatsEscena::Descenso(
+            grafito_anim::tpl_stats::DescensoAnim::nuevo(),
+        )),
+        _ => None,
+    };
+    let Some(escena) = escena else {
+        return render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame);
+    };
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let a = ola_alpha(frame);
+        let mut objs = vec![grafito_anim::Mobject::Axes];
+        match &escena {
+            OlaStatsEscena::Normal(anim) => {
+                let mut buf = [[0.0; 2]; grafito_anim::tpl_stats::STATS_CURVA_PTS];
+                if anim.curva_en(a, &mut buf).is_ok() {
+                    objs.push(grafito_anim::Mobject::Polygon { pts: buf.to_vec() });
+                    let mu = anim.mu_en(a);
+                    if let Some(d) = ola_dot(mu, anim.pdf_en(mu, a)) {
+                        objs.push(d);
+                    }
+                }
+            }
+            OlaStatsEscena::Central(anim) => {
+                let mut hist = [0.0f32; 16];
+                if anim.hist_en(a, &mut hist).is_ok() {
+                    for (i, v) in hist.iter().enumerate() {
+                        let hv = (*v).max(0.0) as f64;
+                        if hv > 0.0 {
+                            let x = -3.0 + 6.0 * (i as f64 + 0.5) / 16.0;
+                            objs.push(grafito_anim::Mobject::Rectangle {
+                                cx: x,
+                                cy: hv / 2.0,
+                                w: 6.0 / 16.0 * 0.75,
+                                h: hv,
+                            });
+                        }
+                    }
+                }
+            }
+            OlaStatsEscena::Bayes(anim) => {
+                if let Ok(m) = anim.grupo_en(a) {
+                    objs.push(m);
+                }
+            }
+            OlaStatsEscena::Regresion(anim) => {
+                if let Ok(nube) = anim.nube() {
+                    objs.push(nube);
+                }
+                if let Ok(recta) = anim.linea_en(a) {
+                    objs.push(recta);
+                }
+            }
+            OlaStatsEscena::Pca(anim) => {
+                if let Ok(nube) = anim.nube_en(a) {
+                    objs.push(nube);
+                }
+                let c = anim.media();
+                for d in anim.ejes_en(a) {
+                    objs.push(grafito_anim::Mobject::Line {
+                        from: c,
+                        to: [c[0] + d[0] * 2.5, c[1] + d[1] * 2.5],
+                    });
+                }
+            }
+            OlaStatsEscena::Perceptron(anim) => {
+                if let Ok((m, v)) = anim.mobjects_en(a) {
+                    objs.push(m);
+                    // `v = [h1, h2, y]`: la salida como punto sobre el eje.
+                    if let Some(d) = ola_dot(v[2], 0.0) {
+                        objs.push(d);
+                    }
+                }
+            }
+            OlaStatsEscena::Backprop(anim) => {
+                let fwd = anim.forward();
+                for (i, y) in fwd.iter().enumerate() {
+                    if let Some(d) = ola_dot(-2.4 + i as f64 * 1.2, *y) {
+                        objs.push(d);
+                    }
+                }
+                // Gradientes como barras verticales (4) + pulso viajero.
+                let gv = anim.grad_visible_en(a);
+                for (i, g) in anim.grads().iter().enumerate() {
+                    let x = -1.8 + i as f64 * 1.2;
+                    let y1 = gv * *g;
+                    if y1.is_finite() && y1.abs() > 1e-9 {
+                        objs.push(grafito_anim::Mobject::Line {
+                            from: [x, 0.0],
+                            to: [x, y1],
+                        });
+                    }
+                }
+                let xp = -2.4 + 4.8 * a.clamp(0.0, 1.0);
+                if let Some(d) = ola_dot(xp, 0.0) {
+                    objs.push(d);
+                }
+            }
+            OlaStatsEscena::Descenso(anim) => {
+                if let Ok(traza) = anim.traza() {
+                    objs.push(traza);
+                }
+                let p = anim.pos_en(a);
+                if let Some(d) = ola_dot(p[0], p[1]) {
+                    objs.push(d);
+                }
+            }
+        }
+        objs.truncate(160);
+        out.push(ola_dibuja_mobjects(w, h, &objs));
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+/// Escena stats armada (setups fijos de curso, ver `render_ola_stats`).
+enum OlaStatsEscena {
+    Normal(grafito_anim::tpl_stats::NormalAnim),
+    // `Box`: el histograma trae buffers grandes (2 KiB) y el enum salta el
+    // lint de variantes desparejas (una alloc por set, despreciable).
+    Central(Box<grafito_anim::tpl_stats::LimiteCentralAnim>),
+    Bayes(grafito_anim::tpl_stats::BayesAnim),
+    Regresion(grafito_anim::tpl_stats::RegresionAnim),
+    Pca(grafito_anim::tpl_stats::PcaAnim),
+    Perceptron(grafito_anim::tpl_stats::PerceptronMlp),
+    Backprop(grafito_anim::tpl_stats::BackpropAnim),
+    Descenso(grafito_anim::tpl_stats::DescensoAnim),
+}
+
+/// Análisis I: specs + samplers puros del módulo (6 ids, defaults de tests).
+fn render_ola_am1(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    use grafito_anim::tpl_am1 as am1;
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    // ¿El id es de este grupo? Si no, fallback honesto (el dispatcher solo
+    // llama con ids del grupo, pero la guarda es barata).
+    if !am1::TEMPLATE_IDS.contains(&id) {
+        return render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame);
+    }
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let a = ola_alpha(frame);
+        let mut objs = vec![grafito_anim::Mobject::Axes];
+        match id {
+            "riemann-sums" => {
+                // Setup de curso: x² en [0,2], n 2→128, punto medio.
+                if let Ok(spec) = am1::RiemannSums::try_new(
+                    0.0,
+                    2.0,
+                    2,
+                    128,
+                    NATIVE_ANIM_FRAME_COUNT,
+                    am1::RiemannRegla::PuntoMedio,
+                    am1::RiemannFuncion::Cuadratica,
+                ) {
+                    let n = spec.n_en(frame);
+                    for i in 0..n {
+                        if let Some((x0, x1, hh)) = spec.rect_en(frame, i) {
+                            if hh.is_finite() && hh > 0.0 {
+                                objs.push(grafito_anim::Mobject::Polygon {
+                                    pts: vec![[x0, 0.0], [x1, 0.0], [x1, hh], [x0, hh], [x0, 0.0]],
+                                });
+                            }
+                        }
+                    }
+                    objs.extend(ola_curva(0.0, 2.0, |x| x * x));
+                }
+            }
+            "epsilon-delta" => {
+                // Setup de curso: recta m=2 por (1,2), ε 1→0.01.
+                if let Ok(spec) =
+                    am1::EpsilonDelta::try_new(1.0, 2.0, 2.0, 1.0, 0.01, NATIVE_ANIM_FRAME_COUNT)
+                {
+                    let (eps, del) = (spec.epsilon_en(frame), spec.delta_en(frame));
+                    if eps.is_finite() && del.is_finite() && eps > 0.0 && del > 0.0 {
+                        // Banda ε × ventana δ (mismos centros del setup).
+                        objs.push(grafito_anim::Mobject::Rectangle {
+                            cx: 1.0,
+                            cy: 2.0,
+                            w: 2.0 * del,
+                            h: 2.0 * eps,
+                        });
+                    }
+                    objs.extend(ola_curva(-1.0, 3.0, |x| spec.eval(x)));
+                    if let Some(d) = ola_dot(1.0, 2.0) {
+                        objs.push(d);
+                    }
+                }
+            }
+            "chain-rule" => {
+                // Setup de curso: centro 0, span 1.5.
+                if let Ok(spec) = am1::ChainRule::try_new(0.0, 1.5, NATIVE_ANIM_FRAME_COUNT) {
+                    objs.extend(ola_curva(-1.5, 1.5, am1::ChainRule::interior_en));
+                    objs.extend(ola_curva(-1.5, 1.5, am1::ChainRule::total_en));
+                    let s = spec.sonda_en(frame);
+                    let y = am1::ChainRule::total_en(s);
+                    if let Some(d) = ola_dot(s, y) {
+                        objs.push(d);
+                    }
+                    let m = am1::ChainRule::derivada_total_en(s);
+                    if m.is_finite() && y.is_finite() {
+                        objs.push(grafito_anim::Mobject::Line {
+                            from: [s - 0.4, y - m * 0.4],
+                            to: [s + 0.4, y + m * 0.4],
+                        });
+                    }
+                }
+            }
+            "taylor-remainder" => {
+                // Setup de curso: Maclaurin de sin en x=1, órdenes 1→7.
+                if let Ok(spec) = am1::TaylorRemainder::try_new(1.0, 1, 7, NATIVE_ANIM_FRAME_COUNT)
+                {
+                    objs.extend(ola_curva(-3.5, 3.5, |x| x.sin()));
+                    let ap = spec.aprox_en(frame);
+                    let resto = spec.resto_en(frame);
+                    if let Some(d) = ola_dot(1.0, ap) {
+                        objs.push(d);
+                    }
+                    if ap.is_finite() && resto.is_finite() && resto > 0.0 {
+                        objs.push(grafito_anim::Mobject::Line {
+                            from: [1.0, ap - resto],
+                            to: [1.0, ap + resto],
+                        });
+                    }
+                }
+            }
+            "improper-integral" => {
+                // Setup de curso: ∫₁ᵇ dx/x² con b→∞ geométrico.
+                if let Ok(spec) =
+                    am1::ImproperIntegral::try_new(2.0, 1.0, 1000.0, NATIVE_ANIM_FRAME_COUNT)
+                {
+                    let b = spec.b_en(frame);
+                    if b.is_finite() && b > 1.0 {
+                        objs.extend(ola_curva(1.0, b.min(3.0), |x| 1.0 / (x * x)));
+                        let yb = 1.0 / (b * b);
+                        if let Some(d) = ola_dot(b, yb) {
+                            objs.push(d);
+                        }
+                    }
+                }
+            }
+            _ => {
+                // `ode-slope-field`: campo decaimiento + Euler revelado.
+                if let Ok(grilla) = am1::SlopeFieldSpec::try_new(-3.0, 3.0, -3.0, 3.0, 8, 8) {
+                    for i in 0..8 {
+                        for j in 0..8 {
+                            if let Some((x, y, ux, uy)) =
+                                grilla.segmento_en(am1::Campo::Decaimiento, i, j)
+                            {
+                                objs.push(grafito_anim::Mobject::Line {
+                                    from: [x, y],
+                                    to: [x + ux * 0.35, y + uy * 0.35],
+                                });
+                            }
+                        }
+                    }
+                }
+                if let Ok(euler) =
+                    am1::EulerIntro::try_new(am1::Campo::Decaimiento, 0.0, 2.0, 0.05, 48)
+                {
+                    let kmax = (a * 48.0).round().clamp(0.0, 48.0) as usize;
+                    let mut pts = Vec::new();
+                    for k in 0..=kmax.min(48) {
+                        if let Some((x, y)) = euler.punto_en(k) {
+                            pts.push([x, y]);
+                        }
+                    }
+                    if pts.len() >= 2 {
+                        objs.push(grafito_anim::Mobject::Polygon { pts });
+                    }
+                    objs.extend(ola_curva(0.0, 2.4, |x| {
+                        am1::Campo::Decaimiento
+                            .exacta(0.0, 2.0, x)
+                            .unwrap_or(f64::NAN)
+                    }));
+                }
+            }
+        }
+        objs.truncate(160);
+        out.push(ola_dibuja_mobjects(w, h, &objs));
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+// OLA52-P3
+
+// ── Ola 52 (III): AM2 dibuja geometría `Cuadro*` + dispatcher ──────────
+// Setups fijos de curso (defaults de los tests del módulo).
+
+/// Análisis II: geometría `Cuadro*` del módulo (6 ids).
+fn render_ola_am2(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    use grafito_anim::tpl_am2 as am2;
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT);
+    if !am2::TEMPLATE_IDS.contains(&id) {
+        return render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame);
+    }
+    let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
+    for frame in 0..NATIVE_ANIM_FRAME_COUNT {
+        let a = ola_alpha(frame);
+        let mut objs = vec![grafito_anim::Mobject::Axes];
+        match id {
+            "partial-derivatives" => {
+                // Vista lateral (x,z) del corte y=cte con su tangente.
+                if let Ok(esc) = am2::Parciales::try_new(0.0, 0.0, -1.0, 1.0) {
+                    let c = esc.cuadro(frame);
+                    if let Some(d) = ola_dot(c.pos[0], c.pos[2]) {
+                        objs.push(d);
+                    }
+                    if c.fx.is_finite() {
+                        objs.push(grafito_anim::Mobject::Line {
+                            from: [c.pos[0] - 0.5, c.pos[2] - c.fx * 0.5],
+                            to: [c.pos[0] + 0.5, c.pos[2] + c.fx * 0.5],
+                        });
+                    }
+                    if let Ok(corte) = esc.corte_x(24) {
+                        let pts: Vec<[f64; 2]> = corte.iter().map(|p| [p[0], p[2]]).collect();
+                        if pts.len() >= 2 {
+                            objs.push(grafito_anim::Mobject::Polygon { pts });
+                        }
+                    }
+                }
+            }
+            "gradient-descent" => {
+                if let Ok(esc) = am2::Descenso::try_new(-2.2, 1.6, 0.15, am2::AM2_FRAMES) {
+                    objs.push(grafito_anim::Mobject::Polygon {
+                        pts: esc.trayectoria().to_vec(),
+                    });
+                    if let Some(c) = esc.pos_en(a) {
+                        if let Some(d) = ola_dot(c.pos[0], c.pos[1]) {
+                            objs.push(d);
+                        }
+                    }
+                }
+            }
+            "lagrange-multipliers" => {
+                if let Ok(esc) = am2::Lagrange::try_new(-2.0, 2.0) {
+                    let c = esc.cuadro(frame);
+                    objs.push(grafito_anim::Mobject::Circle {
+                        cx: 0.0,
+                        cy: 0.0,
+                        r: 1.0,
+                    });
+                    // Recta x+y=c (centro + dirección perpendicular ×4).
+                    let (cx, cy) = (c.nivel / 2.0, c.nivel / 2.0);
+                    let inv = std::f64::consts::FRAC_1_SQRT_2 * 4.0;
+                    objs.push(grafito_anim::Mobject::Line {
+                        from: [cx - inv, cy + inv],
+                        to: [cx + inv, cy - inv],
+                    });
+                    let s = std::f64::consts::FRAC_1_SQRT_2;
+                    if c.toco_max {
+                        if let Some(d) = ola_dot(s, s) {
+                            objs.push(d);
+                        }
+                    }
+                    if c.toco_min {
+                        if let Some(d) = ola_dot(-s, -s) {
+                            objs.push(d);
+                        }
+                    }
+                }
+            }
+            "double-integral" => {
+                if let Ok(esc) = am2::DobleIntegral::try_new(-1.0, 1.0) {
+                    let c = esc.cuadro(frame);
+                    // Rebanada A(x)/3 (escala documentada: A∈[16/3,22/3]).
+                    let mut pts = Vec::new();
+                    for k in 0..=40 {
+                        let x = -1.0 + (c.frente_x + 1.0).max(0.0) * (k as f64 / 40.0);
+                        if let Some(v) = am2::DobleIntegral::rebanada_en(x) {
+                            pts.push([x, v / 3.0]);
+                        }
+                    }
+                    if pts.len() >= 2 {
+                        objs.push(grafito_anim::Mobject::Polygon { pts });
+                    }
+                    if let Some(v) = am2::DobleIntegral::rebanada_en(c.frente_x) {
+                        objs.push(grafito_anim::Mobject::Line {
+                            from: [c.frente_x, 0.0],
+                            to: [c.frente_x, v / 3.0],
+                        });
+                    }
+                }
+            }
+            "green-stokes" => {
+                if let Ok(esc) = am2::GreenStokes::try_new(1.5) {
+                    let r = esc.radio();
+                    objs.push(grafito_anim::Mobject::Circle {
+                        cx: 0.0,
+                        cy: 0.0,
+                        r,
+                    });
+                    let p = esc.punto_en(a);
+                    if let Some(d) = ola_dot(p[0], p[1]) {
+                        objs.push(d);
+                    }
+                    objs.push(grafito_anim::Mobject::Line {
+                        from: [0.0, 0.0],
+                        to: p,
+                    });
+                    // Arco revelado hasta θ=2π·alpha.
+                    let mut arco = Vec::new();
+                    for k in 0..=32 {
+                        let th = a * 2.0 * std::f64::consts::PI * (k as f64 / 32.0);
+                        arco.push([r * th.cos(), r * th.sin()]);
+                    }
+                    objs.push(grafito_anim::Mobject::Polygon { pts: arco });
+                }
+            }
+            _ => {
+                // `jacobian`: anillo r∈[0.5,2] revelado por ángulo.
+                if let Ok(esc) = am2::Jacobiano::try_new(0.5, 2.0) {
+                    let (r0, r1) = (0.5, 2.0);
+                    objs.push(grafito_anim::Mobject::Circle {
+                        cx: 0.0,
+                        cy: 0.0,
+                        r: r0,
+                    });
+                    objs.push(grafito_anim::Mobject::Circle {
+                        cx: 0.0,
+                        cy: 0.0,
+                        r: r1,
+                    });
+                    let th = a * 2.0 * std::f64::consts::PI;
+                    let mut sector = Vec::new();
+                    for k in 0..=24 {
+                        let t = th * (k as f64 / 24.0);
+                        sector.push([r1 * t.cos(), r1 * t.sin()]);
+                    }
+                    for k in (0..=24).rev() {
+                        let t = th * (k as f64 / 24.0);
+                        sector.push([r0 * t.cos(), r0 * t.sin()]);
+                    }
+                    if th > 0.0 {
+                        objs.push(grafito_anim::Mobject::Polygon { pts: sector });
+                    }
+                    if let Some(p) = am2::polar_a_xy(r1, th) {
+                        if let Some(d) = ola_dot(p[0], p[1]) {
+                            objs.push(d);
+                        }
+                    }
+                    let _ = esc;
+                }
+            }
+        }
+        objs.truncate(160);
+        out.push(ola_dibuja_mobjects(w, h, &objs));
+        on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
+    }
+    out
+}
+
+/// ¿El id canónico es de la ola 52 (tiene renderer propio acá)?
+fn es_plantilla_ola(id: &str) -> bool {
+    grafito_anim::tpl_linalg::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_am1::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_am2::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_chaos::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_edo::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_stats::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_3d::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_4d::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_graphs::TEMPLATE_IDS.contains(&id)
+}
+
+/// Dispatcher único de la ola (los 3 dispatchers históricos delegan acá
+/// por guardas de grupo; un solo lugar que cambiar si un módulo evoluciona).
+fn render_ola_por_id(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    params: &std::collections::BTreeMap<String, f64>,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    if grafito_anim::tpl_linalg::TEMPLATE_IDS.contains(&id) {
+        render_ola_linalg(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_4d::TEMPLATE_IDS.contains(&id) {
+        render_ola_4d(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_graphs::TEMPLATE_IDS.contains(&id) {
+        render_ola_graphs(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_edo::TEMPLATE_IDS.contains(&id) {
+        render_ola_edo(id, concept, width, height, params, on_frame)
+    } else if grafito_anim::tpl_chaos::TEMPLATE_IDS.contains(&id) {
+        render_ola_chaos(id, concept, width, height, params, on_frame)
+    } else if grafito_anim::tpl_3d::TEMPLATE_IDS.contains(&id) {
+        render_ola_sup(id, concept, width, height, params, on_frame)
+    } else if grafito_anim::tpl_stats::TEMPLATE_IDS.contains(&id) {
+        render_ola_stats(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_am1::TEMPLATE_IDS.contains(&id) {
+        render_ola_am1(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_am2::TEMPLATE_IDS.contains(&id) {
+        render_ola_am2(id, concept, width, height, con_rotulo, on_frame)
+    } else {
+        render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
     }
 }
 
@@ -9557,6 +10636,28 @@ mod tests {
         // cabe en la franja 0..40; las etiquetas de dato (S= abajo) y las
         // barras de progreso quedan fuera.
         for tmpl in NATIVE_TEMPLATES {
+            // Ola 52: el flag no aplica (los raster CPU rotulan en su
+            // propio módulo; el glue dibuja sin texto quemado) → chat y
+            // export son el MISMO set, determinista. Se pinnea la
+            // identidad en vez de la diferencia (TODO honesto: rótulo por
+            // modo para la ola).
+            if super::es_plantilla_ola(tmpl) {
+                let chat = render_anim_with_progress(
+                    tmpl,
+                    "concepto libre",
+                    96,
+                    72,
+                    &empty,
+                    &mut |_, _| {},
+                );
+                let export = render_anim_for_export(tmpl, "concepto libre", 96, 72, &empty);
+                assert_eq!(chat.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 chat");
+                assert_eq!(export.len(), NATIVE_ANIM_FRAME_COUNT, "{tmpl}: 48 export");
+                for (i, (a, b)) in chat.iter().zip(export.iter()).enumerate() {
+                    assert_eq!(a.pixels, b.pixels, "{tmpl} frame {i}: ola sin distinción");
+                }
+                continue;
+            }
             let chat =
                 render_anim_with_progress(tmpl, "concepto libre", 96, 72, &empty, &mut |_, _| {});
             let export = render_anim_for_export(tmpl, "concepto libre", 96, 72, &empty);
@@ -10431,8 +11532,8 @@ mod tests {
 
     // ── v3: registro + divergencia honesta ──────────────────────────────
     #[test]
-    fn native_templates_son_trece_y_despachan() {
-        assert_eq!(NATIVE_TEMPLATES.len(), 13, "registro canónico = 13");
+    fn native_templates_son_65_y_despachan() {
+        assert_eq!(NATIVE_TEMPLATES.len(), 65, "registro canónico = 65");
         for tmpl in NATIVE_TEMPLATES {
             assert!(is_known_native_template(tmpl), "{tmpl} conocido");
             let f = render_timed(tmpl, 64, 64, || render_anim_by_template(tmpl, 64, 64));
@@ -10468,11 +11569,47 @@ mod tests {
     // ── v4 sync mecánico + dispatch honesto (ANIM-REVIVE) ────────────────
     #[test]
     fn registros_nativo_protocolo_sync_once() {
-        // Nativo y protocolo sincronizados: 13 canónicas en ambos, mismo
-        // orden (las 11 históricas primero, `subspace` + `fractal` al final).
-        assert_eq!(NATIVE_TEMPLATES.len(), 13);
-        assert_eq!(CANONICAL_TEMPLATES.len(), 13);
+        // Nativo y protocolo sincronizados: 65 canónicas en ambos, mismo
+        // orden (las 13 históricas primero, la ola de 52 después).
+        assert_eq!(NATIVE_TEMPLATES.len(), 65);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
         assert_eq!(NATIVE_TEMPLATES, CANONICAL_TEMPLATES);
+    }
+
+    // ── ola 52: resolución directa y cobertura por grupo ─────────────────
+    #[test]
+    fn ola_52_resuelven_directo_y_despachan() {
+        // Cada id nuevo se resuelve a sí mismo (renderer propio) y el
+        // dispatcher lo declara `Direct` (no fallback silencioso).
+        let mut vistos = std::collections::BTreeSet::new();
+        for ids in [
+            grafito_anim::tpl_linalg::TEMPLATE_IDS,
+            grafito_anim::tpl_am1::TEMPLATE_IDS,
+            grafito_anim::tpl_am2::TEMPLATE_IDS,
+            grafito_anim::tpl_chaos::TEMPLATE_IDS,
+            grafito_anim::tpl_edo::TEMPLATE_IDS,
+            grafito_anim::tpl_stats::TEMPLATE_IDS,
+            grafito_anim::tpl_3d::TEMPLATE_IDS,
+            grafito_anim::tpl_4d::TEMPLATE_IDS,
+            grafito_anim::tpl_graphs::TEMPLATE_IDS,
+        ] {
+            for id in ids {
+                assert!(vistos.insert(*id), "{id} duplicada entre módulos");
+                assert!(es_plantilla_ola(id), "{id} es de la ola");
+                assert!(is_known_native_template(id), "{id} conocido");
+                assert_eq!(super::resolve_native_template(id, "x"), *id, "{id}");
+                match native_dispatch_for(id, "concepto libre") {
+                    NativeDispatch::Direct { canonical } => assert_eq!(canonical, *id),
+                    other => panic!("{id} debería ser Direct, got {other:?}"),
+                }
+            }
+        }
+        assert_eq!(vistos.len(), 52, "la ola son 52 ids");
+        // Y siguen sin renderer los históricos sin dueño: fallback intacto.
+        for tmpl in ["limit-epsilon", "ode-system", "ode", "typo-total"] {
+            assert!(!es_plantilla_ola(tmpl), "{tmpl} no es de la ola");
+            assert!(!is_known_native_template(tmpl), "{tmpl} sin renderer");
+        }
     }
 
     // ── subspace + fractal (frente piel-ui, 2 plantillas nuevas) ──────────

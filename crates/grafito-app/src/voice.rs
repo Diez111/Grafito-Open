@@ -4,9 +4,21 @@
 //! `O_EXCL` + `kill+wait` anti-zombie, misma disciplina que el ffmpeg-sidecar
 //! de `super`): la UI jamás llama acá desde `Ui::`, solo lee el `JoinHandle`.
 //!
+//! Cerebro puro (sin I/O, sin spawns, testeado acá mismo):
+//! - alineación palabra↔tiempo ([`estima_tiempos_palabras`]): el CLI de
+//!   `piper` no expone timestamps (solo el ONNX parcheado con alignments
+//!   experimentales —nº de samples por fonema— los da); sin ellos se estima
+//!   por chars con WPM configurable.
+//! - ducking ([`curva_ducking`]): ganancia por tramos que baja la música
+//!   bajo la voz (ataque/release en ms, rampas lineales por endpoints).
+//! - comandos ffmpeg como strings ([`arma_comando_mux`]/[`arma_comando_duck`]):
+//!   se construyen, se testean y JAMÁS se ejecutan desde este módulo
+//!   (el worker que sí ejecuta vive en `mux_audio_inner` y amigos, fuera de
+//!   estas fns puras).
+//!
 //! Contrato del núcleo (ya commiteado, se usa sin redefinir):
 //! - `grafito_anim::captions::{CaptionTrack, CaptionSegment}` con
-//!   `to_srt()`/`to_ass()` (cota 256 KiB interna).
+//!   `to_srt()`/`to_ass()`/`to_vtt()` (cota 256 KiB interna).
 //! - `grafito_anim::AudioTrack { offset_ms: 0..=60000, gain: 0..=2 }`
 //!   (declarativo; el mux es este módulo).
 //!
@@ -15,7 +27,7 @@
 //! errores son honestos (`PiperMissing` / `VoiceMissing`), jamás silencio.
 
 use grafito_anim::captions::{CaptionTrack, CAPTION_MAX_OUTPUT_BYTES};
-use grafito_anim::protocol::{MAX_AUDIO_GAIN, MAX_AUDIO_OFFSET_MS};
+use grafito_anim::protocol::{MAX_AUDIO_GAIN, MAX_AUDIO_OFFSET_MS, MAX_AUDIO_PATH_CHARS};
 use grafito_assistant::CancellationToken;
 use std::path::{Path, PathBuf};
 
@@ -808,6 +820,576 @@ pub fn write_ass_temp(track: &CaptionTrack, dir: &Path) -> Result<PathBuf, Sidec
     Ok(destino)
 }
 
+// ── Alineación palabra↔tiempo (cerebro puro, sin piper) ─────────────────
+// El CLI `piper --model voz --output_file wav` NO expone timestamps de
+// palabra: los alignments son experimentales y solo vía ONNX parcheado
+// (`piper.patch_voice_with_alignment`: nº de samples de audio por fonema).
+// Sin ellos la vía honesta es estimar: peso por chars (la palabra larga
+// dura más) calibrado a la duración real del wav, con WPM configurable como
+// fallback cuando aún no hay audio (`total_ms == 0`).
+// Todo puro, acotado y testeado abajo; jamás spawnea nada.
+
+/// WPM por defecto del habla (español neutro narrado, ~150).
+pub const DEFAULT_WPM: u32 = 150;
+/// WPM mínimo aceptado (habla muy lenta).
+pub const WPM_MIN: u32 = 40;
+/// WPM máximo aceptado (habla muy rápida).
+pub const WPM_MAX: u32 = 400;
+/// Palabras máximas por alineación (paridad con el karaoke: 5000 del
+/// `KaraokeTrack`, acá 2000 porque la voz de un clip de 60 s a 400 WPM da
+/// 400 palabras y sobra margen).
+pub const ALIGN_MAX_PALABRAS: usize = 2000;
+/// Duración total máxima aceptada en ms (10 min: un long-form entero).
+pub const ALIGN_MAX_TOTAL_MS: u32 = 600_000;
+
+/// Error tipado de la alineación (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AlignError {
+    /// Texto vacío o solo espacios.
+    TextoVacio,
+    /// WPM fuera de `40..=400`.
+    WpmInvalido { got: u32, min: u32, max: u32 },
+    /// Duración total imposible (`< 1 ms por palabra` o `> 10 min`).
+    TotalInvalido(String),
+    /// Más de 2000 palabras.
+    DemasiadasPalabras { got: usize, max: usize },
+}
+
+impl std::fmt::Display for AlignError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TextoVacio => write!(f, "texto vacío: pasame algo para alinear"),
+            Self::WpmInvalido { got, min, max } => {
+                write!(f, "wpm {got} fuera de {min}..={max}: usá un habla normal")
+            }
+            Self::TotalInvalido(detalle) => write!(f, "duración inválida: {detalle}"),
+            Self::DemasiadasPalabras { got, max } => {
+                write!(f, "{got} palabras exceden el tope de {max}: partí el texto")
+            }
+        }
+    }
+}
+
+impl std::error::Error for AlignError {}
+
+/// Valida el WPM (`40..=400`). Pura.
+fn valida_wpm(wpm: u32) -> Result<(), AlignError> {
+    if (WPM_MIN..=WPM_MAX).contains(&wpm) {
+        Ok(())
+    } else {
+        Err(AlignError::WpmInvalido {
+            got: wpm,
+            min: WPM_MIN,
+            max: WPM_MAX,
+        })
+    }
+}
+
+/// Duración estimada en ms (`palabras * 60000 / wpm`, techo). Pura.
+pub fn duracion_estimada_ms(texto: &str, wpm: u32) -> Result<u64, AlignError> {
+    valida_wpm(wpm)?;
+    let palabras = texto.split_whitespace().count();
+    if palabras == 0 {
+        return Err(AlignError::TextoVacio);
+    }
+    if palabras > ALIGN_MAX_PALABRAS {
+        return Err(AlignError::DemasiadasPalabras {
+            got: palabras,
+            max: ALIGN_MAX_PALABRAS,
+        });
+    }
+    let total = (palabras as u64)
+        .checked_mul(60_000)
+        .and_then(|n| n.checked_add(u64::from(wpm) - 1))
+        .map(|n| n / u64::from(wpm));
+    match total {
+        Some(ms) if ms <= u64::from(ALIGN_MAX_TOTAL_MS) => Ok(ms),
+        _ => Err(AlignError::TotalInvalido(format!(
+            "el estimado de {palabras} palabras a {wpm} wpm excede 10 min: partí el texto"
+        ))),
+    }
+}
+
+/// Alinea cada palabra a `(texto, inicio_ms, fin_ms)` cubriendo `total_ms`.
+///
+/// Peso por chars (a más letras, más ms) con resto mayor: se reserva 1 ms
+/// por palabra y el resto se reparte por peso con largest-remainder
+/// determinista (empate → la primera palabra), así la suma es EXACTA y cada
+/// palabra dura `>= 1 ms`. Si `total_ms == 0` se usa
+/// [`duracion_estimada_ms`] con `wpm` (útil antes de sintetizar).
+/// Pura, sin I/O, sin spawns.
+pub fn estima_tiempos_palabras(
+    texto: &str,
+    total_ms: u32,
+    wpm: u32,
+) -> Result<Vec<(String, u32, u32)>, AlignError> {
+    valida_wpm(wpm)?;
+    let normalizado: Vec<&str> = texto.split_whitespace().filter(|w| !w.is_empty()).collect();
+    if normalizado.is_empty() {
+        return Err(AlignError::TextoVacio);
+    }
+    if normalizado.len() > ALIGN_MAX_PALABRAS {
+        return Err(AlignError::DemasiadasPalabras {
+            got: normalizado.len(),
+            max: ALIGN_MAX_PALABRAS,
+        });
+    }
+    let n = normalizado.len() as u64;
+    let total_u64 = if total_ms == 0 {
+        duracion_estimada_ms(texto, wpm)?
+    } else {
+        if total_ms > ALIGN_MAX_TOTAL_MS {
+            return Err(AlignError::TotalInvalido(format!(
+                "{total_ms} ms excede 10 min: partí el audio"
+            )));
+        }
+        u64::from(total_ms)
+    };
+    if total_u64 < n {
+        return Err(AlignError::TotalInvalido(format!(
+            "{total_u64} ms muy corto para {} palabras: dale al menos 1 ms por palabra",
+            normalizado.len()
+        )));
+    }
+    // Peso = nº de chars (mínimo 1, siempre > 0 acá).
+    let pesos: Vec<u64> = normalizado
+        .iter()
+        .map(|w| w.chars().count().max(1) as u64)
+        .collect();
+    let peso_total: u64 = pesos.iter().sum();
+    // 1 ms base por palabra + resto ponderado (largest-remainder exacto).
+    let resto = total_u64 - n;
+    let mut tramos: Vec<u64> = Vec::with_capacity(pesos.len());
+    let mut fracciones: Vec<(u64, usize)> = Vec::with_capacity(pesos.len());
+    let mut asignado: u64 = 0;
+    for (k, peso) in pesos.iter().enumerate() {
+        let num = resto.saturating_mul(*peso);
+        let base = num / peso_total;
+        fracciones.push((num % peso_total, k));
+        tramos.push(1 + base);
+        asignado = asignado.saturating_add(1 + base);
+    }
+    // Lo que falta (siempre `< nº de palabras`) va a las fracciones mayores.
+    let mut faltante = total_u64.saturating_sub(asignado) as usize;
+    fracciones.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    for (_, k) in fracciones {
+        if faltante == 0 {
+            break;
+        }
+        tramos[k] = tramos[k].saturating_add(1);
+        faltante = faltante.saturating_sub(1);
+    }
+    let mut cursor: u64 = 0;
+    let mut out = Vec::with_capacity(normalizado.len());
+    for (palabra, tramo) in normalizado.iter().zip(tramos.iter()) {
+        let fin = cursor.saturating_add(*tramo);
+        out.push((
+            (*palabra).to_string(),
+            cursor.min(u64::from(u32::MAX)) as u32,
+            fin.min(u64::from(u32::MAX)) as u32,
+        ));
+        cursor = fin;
+    }
+    Ok(out)
+}
+
+// ── Ducking (curva de ganancia por tramos, pura) ─────────────────────────
+// Baja la música bajo la voz: fuera de la voz suena `base_gain`, sobre la
+// voz `duck_gain`, con rampas de `ataque_ms` (entrada) y `release_ms`
+// (salida) expresadas como tramos con `gain_ini`/`gain_fin` (rampa lineal
+// entre endpoints; el llamador lo mapea a `volume` o a `sidechaincompress`).
+// Todo puro y testeado; jamás toca audio real.
+
+/// Intervalos de voz máximos por curva (paridad con subtítulos: 2000).
+pub const DUCK_MAX_INTERVALOS: usize = 2000;
+/// Tramos máximos de salida (4 por intervalo + 1 de cola: imposible
+/// cruzarlo, es defensa en profundidad).
+pub const DUCK_MAX_TRAMOS: usize = 8192;
+/// Rampa máxima de ataque/release en ms (5 s: más es fundido, no ducking).
+pub const DUCK_MAX_RAMPA_MS: u32 = 5000;
+
+/// Parámetros del ducking (todo validado en español).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DuckParams {
+    /// Ganancia de la música sin voz (`0..=2`).
+    pub base_gain: f32,
+    /// Ganancia de la música bajo la voz (`0..=base_gain`).
+    pub duck_gain: f32,
+    /// Rampa de entrada en ms (`0..=5000`, se recorta al hueco disponible).
+    pub ataque_ms: u32,
+    /// Rampa de salida en ms (`0..=5000`, se recorta al hueco disponible).
+    pub release_ms: u32,
+}
+
+impl DuckParams {
+    /// Constructor validado.
+    pub fn try_new(
+        base_gain: f32,
+        duck_gain: f32,
+        ataque_ms: u32,
+        release_ms: u32,
+    ) -> Result<Self, DuckError> {
+        let p = Self {
+            base_gain,
+            duck_gain,
+            ataque_ms,
+            release_ms,
+        };
+        p.validate()?;
+        Ok(p)
+    }
+
+    /// Validación estricta (todo `Err` en español, sin pánicos).
+    pub fn validate(&self) -> Result<(), DuckError> {
+        if !self.base_gain.is_finite() || !(0.0..=MAX_AUDIO_GAIN).contains(&self.base_gain) {
+            return Err(DuckError::Rango(format!(
+                "base {} fuera de 0.0..={MAX_AUDIO_GAIN}",
+                self.base_gain
+            )));
+        }
+        if !self.duck_gain.is_finite() || !(0.0..=MAX_AUDIO_GAIN).contains(&self.duck_gain) {
+            return Err(DuckError::Rango(format!(
+                "duck {} fuera de 0.0..={MAX_AUDIO_GAIN}",
+                self.duck_gain
+            )));
+        }
+        if self.duck_gain > self.base_gain {
+            return Err(DuckError::Rango(format!(
+                "duck {} mayor que la base {}: el ducking baja, no sube",
+                self.duck_gain, self.base_gain
+            )));
+        }
+        if self.ataque_ms > DUCK_MAX_RAMPA_MS {
+            return Err(DuckError::Rango(format!(
+                "ataque {} ms fuera de 0..={DUCK_MAX_RAMPA_MS}",
+                self.ataque_ms
+            )));
+        }
+        if self.release_ms > DUCK_MAX_RAMPA_MS {
+            return Err(DuckError::Rango(format!(
+                "release {} ms fuera de 0..={DUCK_MAX_RAMPA_MS}",
+                self.release_ms
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// Un tramo de ganancia: `[inicio_ms, fin_ms)` con rampa lineal
+/// `gain_ini → gain_fin` (`ini == fin` = ganancia constante). Puro.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DuckTramo {
+    /// Inicio en ms.
+    pub inicio_ms: u32,
+    /// Fin en ms (`> inicio_ms`).
+    pub fin_ms: u32,
+    /// Ganancia al inicio (`0..=2`).
+    pub gain_ini: f32,
+    /// Ganancia al fin (`0..=2`).
+    pub gain_fin: f32,
+}
+
+impl DuckTramo {
+    /// Tramo de ganancia constante.
+    pub fn constante(inicio_ms: u32, fin_ms: u32, gain: f32) -> Self {
+        Self {
+            inicio_ms,
+            fin_ms,
+            gain_ini: gain,
+            gain_fin: gain,
+        }
+    }
+
+    /// Tramo con rampa.
+    pub fn rampa(inicio_ms: u32, fin_ms: u32, gain_ini: f32, gain_fin: f32) -> Self {
+        Self {
+            inicio_ms,
+            fin_ms,
+            gain_ini,
+            gain_fin,
+        }
+    }
+
+    /// ¿Ganancia constante?
+    pub fn es_constante(self) -> bool {
+        self.gain_ini == self.gain_fin
+    }
+}
+
+/// Error tipado del ducking (mensajes en español, sin panics).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DuckError {
+    /// Parámetro fuera de rango.
+    Rango(String),
+    /// Intervalo de voz mal formado o fuera del total.
+    Ventana(String),
+    /// Intervalos desordenados o solapados.
+    Solape { indice: usize },
+    /// Demasiados intervalos o tramos.
+    Demasiados { got: usize, max: usize },
+}
+
+impl std::fmt::Display for DuckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rango(detalle) => write!(f, "ducking fuera de rango: {detalle}"),
+            Self::Ventana(detalle) => write!(f, "intervalo de voz inválido: {detalle}"),
+            Self::Solape { indice } => write!(
+                f,
+                "intervalo {indice} desordenado o solapado: ordená por inicio sin solapar"
+            ),
+            Self::Demasiados { got, max } => {
+                write!(
+                    f,
+                    "{got} intervalos exceden el tope de {max}: partí la mezcla"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for DuckError {}
+
+/// Calcula la curva de ganancia que baja la música bajo la voz.
+///
+/// `voz` = intervalos `(inicio, fin)` de habla en ms (ordenados, sin
+/// solapar, dentro de `total_ms`); `total_ms > 0`. La salida cubre
+/// `[0, total_ms)` sin huecos ni solapes: base fuera, duck sobre la voz,
+/// rampas de ataque/release recortadas al hueco disponible (si dos voces se
+/// pisan en el release, el release se trunca: nunca invade al vecino).
+/// Sin voz sale un solo tramo base. Pura, acotada a [`DUCK_MAX_TRAMOS`].
+pub fn curva_ducking(
+    voz: &[(u32, u32)],
+    total_ms: u32,
+    params: &DuckParams,
+) -> Result<Vec<DuckTramo>, DuckError> {
+    params.validate()?;
+    if total_ms == 0 {
+        return Err(DuckError::Rango(
+            "total 0 ms: pasame la duración de la mezcla".to_string(),
+        ));
+    }
+    if voz.len() > DUCK_MAX_INTERVALOS {
+        return Err(DuckError::Demasiados {
+            got: voz.len(),
+            max: DUCK_MAX_INTERVALOS,
+        });
+    }
+    let mut previo_fin: Option<u32> = None;
+    for (indice, (a, b)) in voz.iter().enumerate() {
+        if a >= b {
+            return Err(DuckError::Ventana(format!(
+                "ventana {a}..{b} inválida: el inicio debe ser menor que el fin"
+            )));
+        }
+        if *b > total_ms {
+            return Err(DuckError::Ventana(format!(
+                "fin {b} ms fuera del total {total_ms} ms"
+            )));
+        }
+        if let Some(previo) = previo_fin {
+            if *a < previo {
+                return Err(DuckError::Solape { indice });
+            }
+        }
+        previo_fin = Some(*b);
+    }
+    let mut tramos: Vec<DuckTramo> = Vec::new();
+    let mut cursor: u32 = 0;
+    for (k, (a, b)) in voz.iter().enumerate() {
+        // Ataque recortado al hueco desde el cursor (nunca pisa al vecino).
+        let ini_rampa = a.saturating_sub(params.ataque_ms).max(cursor);
+        if ini_rampa > cursor {
+            tramos.push(DuckTramo::constante(cursor, ini_rampa, params.base_gain));
+        }
+        if ini_rampa < *a {
+            tramos.push(DuckTramo::rampa(
+                ini_rampa,
+                *a,
+                params.base_gain,
+                params.duck_gain,
+            ));
+        }
+        tramos.push(DuckTramo::constante(*a, *b, params.duck_gain));
+        cursor = *b;
+        // Release recortado al próximo inicio (o al total).
+        let siguiente = voz.get(k + 1).map_or(total_ms, |(na, _)| *na);
+        let fin_rel = b
+            .saturating_add(params.release_ms)
+            .min(siguiente)
+            .min(total_ms);
+        if fin_rel > *b {
+            tramos.push(DuckTramo::rampa(
+                *b,
+                fin_rel,
+                params.duck_gain,
+                params.base_gain,
+            ));
+            cursor = fin_rel;
+        }
+    }
+    if cursor < total_ms {
+        tramos.push(DuckTramo::constante(cursor, total_ms, params.base_gain));
+    }
+    if tramos.len() > DUCK_MAX_TRAMOS {
+        return Err(DuckError::Demasiados {
+            got: tramos.len(),
+            max: DUCK_MAX_TRAMOS,
+        });
+    }
+    Ok(tramos)
+}
+
+// ── Constructores de comandos ffmpeg (strings, jamás ejecutados) ─────────
+// Estas fns ARMAN el argv como string citado para log/preview/tests y NUNCA
+// lo ejecutan: no hay `Command`, no hay `spawn`, no hay shell. El worker que
+// sí ejecuta (`mux_audio_inner`, `burn_captions_inner`) no las usa: duplica
+// el argv a propósito para que un bug acá no cambie lo que corre.
+
+/// Umbral por defecto del `sidechaincompress` (voz que dispara el ducking;
+/// guía FFmpegLab de ducking: 0.001–0.01 para voz).
+pub const DUCK_THRESHOLD_DEFAULT: f64 = 0.003;
+/// Ratio por defecto del `sidechaincompress` (ducking agresivo 10–20).
+pub const DUCK_RATIO_DEFAULT: f64 = 20.0;
+/// Comando máximo en chars (defensa: 3 rutas de 512 + filtros entran cómodas).
+pub const MUX_MAX_CMD_CHARS: usize = 8192;
+
+/// Cita un argv para shell POSIX (`'...'`; `'` interno → `'\''`). Pura.
+pub fn cita_shell(arg: &str) -> String {
+    if arg.is_empty() {
+        return "''".to_string();
+    }
+    let mut out = String::with_capacity(arg.len() + 2);
+    out.push('\'');
+    let mut primero = true;
+    for pedazo in arg.split('\'') {
+        if !primero {
+            out.push_str("'\\''");
+        }
+        primero = false;
+        out.push_str(pedazo);
+    }
+    out.push('\'');
+    out
+}
+
+/// Valida una ruta del builder (no vacía, sin NUL, `<= 512` chars). Pura.
+fn valida_ruta_mux(nombre: &str, ruta: &str) -> Result<(), MuxError> {
+    if ruta.is_empty() {
+        return Err(MuxError::Io(format!("{nombre} vacía: pasame una ruta")));
+    }
+    if ruta.contains('\0') {
+        return Err(MuxError::Io(format!(
+            "{nombre} con NUL: usá una ruta válida"
+        )));
+    }
+    if ruta.chars().count() > MAX_AUDIO_PATH_CHARS {
+        return Err(MuxError::Io(format!(
+            "{nombre} de {} chars (válido ..={MAX_AUDIO_PATH_CHARS})",
+            ruta.chars().count()
+        )));
+    }
+    Ok(())
+}
+
+/// Acota el comando armado (`<= 8192` chars). Pura.
+fn acota_comando(cmd: String) -> Result<String, MuxError> {
+    if cmd.chars().count() > MUX_MAX_CMD_CHARS {
+        return Err(MuxError::Io(format!(
+            "comando de {} chars excede {MUX_MAX_CMD_CHARS}: acortá las rutas",
+            cmd.chars().count()
+        )));
+    }
+    Ok(cmd)
+}
+
+/// Arma (sin ejecutar) el comando de mux A/V del worker:
+///
+/// `ffmpeg -i video -itsoffset {offset_s} -i audio -af volume={gain}
+/// -c:v copy -c:a aac -b:a 128k -shortest -movflags +faststart -f mp4 out`
+///
+/// Mismo argv que [`mux_audio_into`]: si este string y el worker divergen,
+/// el test `mux_builder_espeja_al_worker` lo canta. Rutas citadas POSIX.
+/// Pura: construye el string y lo devuelve, jamás lo corre.
+pub fn arma_comando_mux(
+    video: &str,
+    audio: &str,
+    offset_ms: u32,
+    gain: f32,
+    salida: &str,
+) -> Result<String, MuxError> {
+    if offset_ms > MAX_AUDIO_OFFSET_MS {
+        return Err(MuxError::Rango(format!(
+            "offset {offset_ms} ms fuera de 0..={MAX_AUDIO_OFFSET_MS}"
+        )));
+    }
+    if !gain.is_finite() || !(0.0..=MAX_AUDIO_GAIN).contains(&gain) {
+        return Err(MuxError::Rango(format!(
+            "gain {gain} fuera de 0.0..={MAX_AUDIO_GAIN}"
+        )));
+    }
+    valida_ruta_mux("video", video)?;
+    valida_ruta_mux("audio", audio)?;
+    valida_ruta_mux("salida", salida)?;
+    // Segundos con decimales honestos (`500` → `0.5`, `0` → `0`): paridad
+    // exacta con `mux_audio_inner`.
+    let offset_s = format!("{}", f64::from(offset_ms) / 1000.0);
+    let cmd = format!(
+        "ffmpeg -i {} -itsoffset {offset_s} -i {} -af volume={gain} \
+         -c:v copy -c:a aac -b:a 128k -shortest -movflags +faststart -f mp4 {}",
+        cita_shell(video),
+        cita_shell(audio),
+        cita_shell(salida),
+    );
+    acota_comando(cmd)
+}
+
+/// Arma (sin ejecutar) el comando de ducking música↔voz con
+/// `sidechaincompress` (filtro estándar de FFmpeg para ducking automático:
+///
+/// `ffmpeg -i musica -i voz -filter_complex
+/// "[1:a]asplit=2[sc][mix];[0:a][sc]sidechaincompress=
+/// threshold={u}:ratio={r}:attack=5:release=150[bg];
+/// [bg][mix]amix=inputs=2:duration=longest[a]"
+/// -map "[a]" -c:a aac -b:a 128k -shortest out`
+///
+/// La voz se divide en dos (`asplit`): una rama dispara el compresor y la
+/// otra se mezcla intacta con la música comprimida (`amix`). Pura: jamás
+/// ejecuta nada.
+pub fn arma_comando_duck(
+    musica: &str,
+    voz: &str,
+    salida: &str,
+    threshold: f64,
+    ratio: f64,
+) -> Result<String, MuxError> {
+    valida_ruta_mux("musica", musica)?;
+    valida_ruta_mux("voz", voz)?;
+    valida_ruta_mux("salida", salida)?;
+    if !threshold.is_finite() || !(0.0 < threshold && threshold <= 1.0) {
+        return Err(MuxError::Rango(format!(
+            "threshold {threshold} fuera de 0.0..=1.0: probá {DUCK_THRESHOLD_DEFAULT}"
+        )));
+    }
+    if !ratio.is_finite() || !(1.0..=20.0).contains(&ratio) {
+        return Err(MuxError::Rango(format!(
+            "ratio {ratio} fuera de 1.0..=20.0: probá {DUCK_RATIO_DEFAULT}"
+        )));
+    }
+    let filtro = format!(
+        "[1:a]asplit=2[sc][mix];[0:a][sc]sidechaincompress=threshold={threshold}:ratio={ratio}:attack=5:release=150[bg];[bg][mix]amix=inputs=2:duration=longest[a]"
+    );
+    let cmd = format!(
+        "ffmpeg -i {} -i {} -filter_complex {} -map {} -c:a aac -b:a 128k -shortest {}",
+        cita_shell(musica),
+        cita_shell(voz),
+        cita_shell(&filtro),
+        cita_shell("[a]"),
+        cita_shell(salida),
+    );
+    acota_comando(cmd)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1244,5 +1826,224 @@ mod tests {
         assert!(matches!(err, SidecarError::Caption(_)));
         assert!(!base.join("otro.srt").exists());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn estima_duracion_por_wpm() {
+        // 2 palabras a 60 wpm = 2 s exactos.
+        assert_eq!(duracion_estimada_ms("hola mundo", 60).unwrap(), 2000);
+        // Techo: 1 palabra a 150 wpm = 400 ms.
+        assert_eq!(duracion_estimada_ms("hola", 150).unwrap(), 400);
+        // 120 palabras a 120 wpm = 60 s.
+        let texto = (0..120).map(|_| "palabra").collect::<Vec<_>>().join(" ");
+        assert_eq!(duracion_estimada_ms(&texto, 120).unwrap(), 60_000);
+        assert!(duracion_estimada_ms("", 150).is_err());
+        assert!(duracion_estimada_ms("hola", 0).is_err());
+        assert!(duracion_estimada_ms("hola", 39).is_err());
+        assert!(duracion_estimada_ms("hola", 401).is_err());
+    }
+
+    #[test]
+    fn estima_tiempos_cubre_el_total_con_peso_por_chars() {
+        let tramo = estima_tiempos_palabras("hola mundo cruel", 3000, 150).unwrap();
+        assert_eq!(tramo.len(), 3);
+        // Contiguo desde 0 y suma exacta.
+        assert_eq!(tramo[0].1, 0);
+        assert_eq!(tramo[2].2, 3000);
+        for w in tramo.windows(2) {
+            assert_eq!(w[0].2, w[1].1, "sin huecos ni solapes");
+            assert!(w[0].1 < w[0].2, "al menos 1 ms");
+        }
+        let suma: u32 = tramo.iter().map(|(_, i, f)| f - i).sum();
+        assert_eq!(suma, 3000);
+        // Peso por chars: "cruel" (5) dura >= que "hola" (4).
+        assert!(tramo[2].2 - tramo[2].1 >= tramo[0].2 - tramo[0].1);
+        // `total_ms == 0` calibra por WPM (2 palabras a 60 wpm = 2000 ms).
+        let auto = estima_tiempos_palabras("hola mundo", 0, 60).unwrap();
+        assert_eq!(auto.last().unwrap().2, 2000);
+        // Bordes honestos.
+        assert!(estima_tiempos_palabras("", 1000, 150).is_err());
+        assert!(estima_tiempos_palabras("una dos tres", 2, 150).is_err());
+        assert!(estima_tiempos_palabras("hola", 1000, 0).is_err());
+        assert!(estima_tiempos_palabras("hola", 600_001, 150).is_err());
+        let largo = (0..2001).map(|_| "x").collect::<Vec<_>>().join(" ");
+        assert!(estima_tiempos_palabras(&largo, 60_000, 150).is_err());
+    }
+
+    #[test]
+    fn curva_ducking_baja_la_musica_bajo_la_voz() {
+        let params = DuckParams::try_new(1.0, 0.3, 100, 200).unwrap();
+        let tramos = curva_ducking(&[(1000, 2000)], 4000, &params).unwrap();
+        assert_eq!(
+            tramos,
+            vec![
+                DuckTramo::constante(0, 900, 1.0),
+                DuckTramo::rampa(900, 1000, 1.0, 0.3),
+                DuckTramo::constante(1000, 2000, 0.3),
+                DuckTramo::rampa(2000, 2200, 0.3, 1.0),
+                DuckTramo::constante(2200, 4000, 1.0),
+            ]
+        );
+        // Cobertura total sin huecos ni solapes, ganancias en rango.
+        assert_eq!(tramos.first().unwrap().inicio_ms, 0);
+        assert_eq!(tramos.last().unwrap().fin_ms, 4000);
+        for w in tramos.windows(2) {
+            assert_eq!(w[0].fin_ms, w[1].inicio_ms);
+        }
+        for t in &tramos {
+            assert!(t.inicio_ms < t.fin_ms);
+            assert!((0.3..=1.0).contains(&t.gain_ini));
+            assert!((0.3..=1.0).contains(&t.gain_fin));
+        }
+        // Sin voz: un solo tramo base.
+        assert_eq!(
+            curva_ducking(&[], 4000, &params).unwrap(),
+            vec![DuckTramo::constante(0, 4000, 1.0)]
+        );
+        // Ataque/release se recortan al hueco (voz pegada al 0 y al total).
+        let borde = curva_ducking(&[(0, 4000)], 4000, &params).unwrap();
+        assert_eq!(borde, vec![DuckTramo::constante(0, 4000, 0.3)]);
+        // Release truncado por la voz vecina (no la invade).
+        let dos = curva_ducking(&[(1000, 2000), (2100, 3000)], 4000, &params).unwrap();
+        for w in dos.windows(2) {
+            assert_eq!(w[0].fin_ms, w[1].inicio_ms);
+        }
+        assert_eq!(dos.last().unwrap().fin_ms, 4000);
+        // Errores honestos.
+        assert!(matches!(
+            curva_ducking(&[(2000, 1000)], 4000, &params),
+            Err(DuckError::Ventana(_))
+        ));
+        assert!(matches!(
+            curva_ducking(&[(0, 4001)], 4000, &params),
+            Err(DuckError::Ventana(_))
+        ));
+        assert!(matches!(
+            curva_ducking(&[(0, 2000), (1500, 3000)], 4000, &params),
+            Err(DuckError::Solape { .. })
+        ));
+        assert!(matches!(
+            curva_ducking(&[(0, 1000)], 0, &params),
+            Err(DuckError::Rango(_))
+        ));
+        assert!(DuckParams::try_new(0.3, 1.0, 100, 200).is_err());
+        assert!(DuckParams::try_new(1.0, 0.3, 5001, 200).is_err());
+        assert!(DuckParams::try_new(f32::NAN, 0.3, 100, 200).is_err());
+    }
+
+    #[test]
+    fn cita_shell_cita_posix() {
+        assert_eq!(cita_shell("simple.mp4"), "'simple.mp4'");
+        assert_eq!(cita_shell("mi video.mp4"), "'mi video.mp4'");
+        assert_eq!(cita_shell(""), "''");
+        assert_eq!(cita_shell("it's.mp4"), "'it'\\''s.mp4'");
+    }
+
+    #[test]
+    fn mux_builder_espeja_al_worker_sin_ejecutar() {
+        // Determinista: misma entrada, mismo string.
+        let a = arma_comando_mux("clip.mp4", "voz.wav", 500, 1.5, "con-voz.mp4").unwrap();
+        let b = arma_comando_mux("clip.mp4", "voz.wav", 500, 1.5, "con-voz.mp4").unwrap();
+        assert_eq!(a, b);
+        // Mismo argv que `mux_audio_inner`: itsoffset entre los dos -i.
+        for aguja in [
+            "-itsoffset",
+            "0.5",
+            "-af",
+            "volume=1.5",
+            "-c:v",
+            "copy",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "128k",
+            "-shortest",
+            "+faststart",
+        ] {
+            assert!(a.contains(aguja), "{aguja} en: {a}");
+        }
+        let tokens: Vec<&str> = a.split_whitespace().collect();
+        let mut pos_i = Vec::new();
+        let mut pos_offset = None;
+        for (k, t) in tokens.iter().enumerate() {
+            if *t == "-i" {
+                pos_i.push(k);
+            }
+            if *t == "-itsoffset" {
+                pos_offset = Some(k);
+            }
+        }
+        assert_eq!(pos_i.len(), 2, "dos -i exactos, fue: {a}");
+        let pos_offset = pos_offset.expect("itsoffset en el comando");
+        assert!(pos_i[0] < pos_offset && pos_offset < pos_i[1]);
+        // Rutas con espacios y comillas van citadas (un shell las ve como 1 argv).
+        let raro = arma_comando_mux("mi clip.mp4", "it's.wav", 0, 1.0, "sal'e.mp4").unwrap();
+        assert!(raro.contains("'mi clip.mp4'"));
+        assert!(raro.contains("'it'\\''s.wav'"));
+        // Rangos del contrato AudioTrack + rutas honestas.
+        assert!(matches!(
+            arma_comando_mux("v.mp4", "a.wav", 60_001, 1.0, "o.mp4"),
+            Err(MuxError::Rango(_))
+        ));
+        assert!(matches!(
+            arma_comando_mux("v.mp4", "a.wav", 0, 2.5, "o.mp4"),
+            Err(MuxError::Rango(_))
+        ));
+        assert!(matches!(
+            arma_comando_mux("", "a.wav", 0, 1.0, "o.mp4"),
+            Err(MuxError::Io(_))
+        ));
+        assert!(matches!(
+            arma_comando_mux("v.mp4", "a\0.wav", 0, 1.0, "o.mp4"),
+            Err(MuxError::Io(_))
+        ));
+        // Puro: no crea ni toca ningún archivo (rutas inexistentes igual arman).
+        let cmd = arma_comando_mux(
+            "/definitivamente/no/existe/v.mp4",
+            "/definitivamente/no/existe/a.wav",
+            0,
+            1.0,
+            "/definitivamente/no/existe/o.mp4",
+        )
+        .unwrap();
+        assert!(!Path::new("/definitivamente/no/existe/o.mp4").exists());
+        assert!(cmd.starts_with("ffmpeg "));
+    }
+
+    #[test]
+    fn duck_builder_sidechain_sin_ejecutar() {
+        let cmd = arma_comando_duck(
+            "musica.mp3",
+            "voz.wav",
+            "mezcla.mp3",
+            DUCK_THRESHOLD_DEFAULT,
+            DUCK_RATIO_DEFAULT,
+        )
+        .unwrap();
+        for aguja in [
+            "sidechaincompress",
+            "threshold=0.003",
+            "ratio=20",
+            "asplit",
+            "amix",
+        ] {
+            assert!(cmd.contains(aguja), "{aguja} en: {cmd}");
+        }
+        // La voz alimenta al compresor Y a la mezcla (asplit=2 con [sc] y [mix]).
+        assert!(cmd.contains("[sc]"));
+        assert!(cmd.contains("[mix]"));
+        assert!(matches!(
+            arma_comando_duck("m.mp3", "v.wav", "o.mp3", 0.0, 20.0),
+            Err(MuxError::Rango(_))
+        ));
+        assert!(matches!(
+            arma_comando_duck("m.mp3", "v.wav", "o.mp3", 0.003, 21.0),
+            Err(MuxError::Rango(_))
+        ));
+        assert!(matches!(
+            arma_comando_duck("", "v.wav", "o.mp3", 0.003, 20.0),
+            Err(MuxError::Io(_))
+        ));
+        assert!(!Path::new("/definitivamente/no/existe/mezcla.mp3").exists());
     }
 }
