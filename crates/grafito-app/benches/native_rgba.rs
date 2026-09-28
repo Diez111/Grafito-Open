@@ -51,7 +51,7 @@ fn mide_plantilla(template: &str) {
 }
 
 #[test]
-fn plantillas_son_65() {
+fn plantillas_son_69() {
     assert_eq!(
         NATIVE_TEMPLATES,
         &[
@@ -120,6 +120,10 @@ fn plantillas_son_65() {
             "force-directed",
             "moser-spindle-coloreo",
             "unit-distance",
+            "matriz-inversa-nucleo",
+            "matriz-no-cuadrada",
+            "producto-punto-dualidad",
+            "sup-laplace-3d",
         ]
     );
 }

@@ -381,6 +381,35 @@ fn clamp01(t: f64) -> f64 {
     }
 }
 
+/// Rampa de altura 0..1 para gradiente de superficies (azul profundo →
+/// azul → cian → ámbar → rojo, estilo canal educativo). Pura.
+pub fn rampa_altura(t: f64) -> [u8; 3] {
+    const PARADAS: [([u8; 3], f64); 5] = [
+        ([13, 25, 66], 0.0),
+        ([30, 90, 180], 0.35),
+        ([20, 180, 180], 0.6),
+        ([250, 200, 60], 0.8),
+        ([235, 60, 50], 1.0),
+    ];
+    let t = clamp01(t);
+    let mut k = 0;
+    while k + 1 < PARADAS.len() && t > PARADAS[k + 1].1 {
+        k += 1;
+    }
+    let (c0, t0) = PARADAS[k];
+    let (c1, t1) = PARADAS[(k + 1).min(PARADAS.len() - 1)];
+    let f = if t1 > t0 {
+        ((t - t0) / (t1 - t0)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    [
+        (f64::from(c0[0]) + (f64::from(c1[0]) - f64::from(c0[0])) * f) as u8,
+        (f64::from(c0[1]) + (f64::from(c1[1]) - f64::from(c0[1])) * f) as u8,
+        (f64::from(c0[2]) + (f64::from(c1[2]) - f64::from(c0[2])) * f) as u8,
+    ]
+}
+
 /// Fracción cruda del frame (`frame < total`; `total == 1` → 0.0). Pura.
 pub fn alpha_en(frame: usize, total: usize) -> SceneResult<f64> {
     valida_frames(total)?;
@@ -1092,7 +1121,7 @@ impl SillaDescenso {
         })
     }
 
-/// Punto del descenso en `alpha` (crudo; índice eased sobre el sendero).
+    /// Punto del descenso en `alpha` (crudo; índice eased sobre el sendero).
     pub fn punto_en(self, alpha: f64) -> SceneResult<[f64; 3]> {
         let s = self.sendero()?;
         let e = smooth(clamp01(alpha));
@@ -1327,6 +1356,103 @@ pub fn muestra_frame(
 /// no acotados; la salida reserva lo justo). Nunca inventa puntos.
 pub fn a_poligonos(muestra: &Muestra3D, scratch: &mut Scratch) -> Vec<Mobject> {
     let mut out = Vec::new();
+    // Relleno con gradiente por cara (altura × lambert): sin esto las
+    // superficies salían solo en wireframe tenue ("solo líneas"). El fill
+    // reemplaza al wireframe (no se dibujan ambos: saturarían el tope de
+    // 64 objetos del frente y taparían curvas/ejes). Paso adaptativo a la
+    // cantidad de superficies: ≤32 tris con 1, ≤18 con 2+ (pintor
+    // lejos-primero dentro de cada superficie).
+    let luz = [0.4472, 0.7155, 0.5367];
+    let por_lado: usize = if muestra.superficies.len() <= 1 { 4 } else { 3 };
+    for sup in &muestra.superficies {
+        let cols = sup.nu.saturating_add(1);
+        let filas = sup.nv.saturating_add(1);
+        if cols < 2 || filas < 2 || sup.puntos.len() < cols.saturating_mul(filas) {
+            continue;
+        }
+        let mut zmin = f64::INFINITY;
+        let mut zmax = f64::NEG_INFINITY;
+        for p in &sup.puntos {
+            if p[2].is_finite() {
+                zmin = zmin.min(p[2]);
+                zmax = zmax.max(p[2]);
+            }
+        }
+        if zmin > zmax {
+            continue;
+        }
+        let rango = (zmax - zmin).max(1e-9);
+        let lado = sup.nu.max(sup.nv);
+        let paso = lado.div_ceil(por_lado).max(1);
+        let normal_en =
+            |idx: usize| -> [f64; 3] { sup.normales.get(idx).copied().unwrap_or([0.0, 0.0, 1.0]) };
+        // (profundidad, triángulo): se ordena lejos-primero al final.
+        let mut tris: Vec<(f64, Mobject)> = Vec::new();
+        let mut iu = 0;
+        while iu < sup.nu {
+            let i2 = (iu + paso).min(sup.nu);
+            let mut jv = 0;
+            while jv < sup.nv {
+                let j2 = (jv + paso).min(sup.nv);
+                let p00 = sup.puntos[jv * cols + iu];
+                let p10 = sup.puntos[jv * cols + i2];
+                let p01 = sup.puntos[j2 * cols + iu];
+                let p11 = sup.puntos[j2 * cols + i2];
+                let n00 = normal_en(jv * cols + iu);
+                let n10 = normal_en(jv * cols + i2);
+                let n01 = normal_en(j2 * cols + iu);
+                let n11 = normal_en(j2 * cols + i2);
+                let zmed = (p00[2] + p10[2] + p01[2] + p11[2]) / 4.0;
+                let t = ((zmed - zmin) / rango).clamp(0.0, 1.0);
+                let lambert = (n00[0] * luz[0] + n00[1] * luz[1] + n00[2] * luz[2])
+                    .abs()
+                    .max((n10[0] * luz[0] + n10[1] * luz[1] + n10[2] * luz[2]).abs())
+                    .max((n01[0] * luz[0] + n01[1] * luz[1] + n01[2] * luz[2]).abs())
+                    .max((n11[0] * luz[0] + n11[1] * luz[1] + n11[2] * luz[2]).abs())
+                    .clamp(0.0, 1.0);
+                let base = rampa_altura(t);
+                let k = 0.35 + 0.65 * lambert;
+                let color = [
+                    (f64::from(base[0]) * k).clamp(0.0, 255.0) as u8,
+                    (f64::from(base[1]) * k).clamp(0.0, 255.0) as u8,
+                    (f64::from(base[2]) * k).clamp(0.0, 255.0) as u8,
+                    255,
+                ];
+                let q00 = muestra.camara.project_3d(p00);
+                let q10 = muestra.camara.project_3d(p10);
+                let q01 = muestra.camara.project_3d(p01);
+                let q11 = muestra.camara.project_3d(p11);
+                if let (Some(a), Some(b), Some(c), Some(d)) = (q00, q10, q01, q11) {
+                    if [a, b, c, d]
+                        .iter()
+                        .all(|p| p[0].is_finite() && p[1].is_finite())
+                    {
+                        let prof = [p00, p10, p01, p11]
+                            .iter()
+                            .filter_map(|p| muestra.camara.depth_of(*p))
+                            .fold(0.0f64, f64::max);
+                        tris.push((prof, Mobject::Tri { a, b, c, color }));
+                        tris.push((
+                            prof,
+                            Mobject::Tri {
+                                a: b,
+                                b: d,
+                                c,
+                                color,
+                            },
+                        ));
+                    }
+                }
+                jv += paso;
+            }
+            iu += paso;
+        }
+        // Pintor: lejos primero (mayor profundidad primero).
+        tris.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap_or(std::cmp::Ordering::Equal));
+        for (_, tri) in tris {
+            out.push(tri);
+        }
+    }
     for curva in &muestra.curvas {
         for tramo in curva.proyecta(muestra.camara) {
             if tramo.len() < 2 || tramo.len() > crate::scene::MAX_MOBJECT_POINTS {
@@ -1630,6 +1756,38 @@ mod tpl_3d_tests {
         assert!(Laplace3D::try_new(1, 1.0).is_err());
         assert!(Laplace3D::try_new(16, 0.0).is_err());
         assert!(Laplace3D::try_new(16, 100.0).is_err());
+    }
+
+    #[test]
+    fn relleno_con_gradiente_cubre_y_no_satura_el_tope() {
+        // Sin fill las escenas sup-* salían con solo ejes y el gate de
+        // contenido las vetaba en 480×360.
+        use crate::anims::Scratch;
+        use crate::scene::Mobject;
+        let p = Params3D::por_defecto("sup-laplace-3d");
+        let m = debe(muestra_frame("sup-laplace-3d", &p, 24, 48, 8000));
+        let mut scratch = Scratch::nuevo();
+        let objs = a_poligonos(&m, &mut scratch);
+        let tris = objs
+            .iter()
+            .filter(|o| matches!(o, Mobject::Tri { .. }))
+            .count();
+        assert!(tris >= 8, "el fill aporta caras: {tris}");
+        assert!(
+            objs.len() <= 64,
+            "no saturar el tope del frente: {}",
+            objs.len()
+        );
+        for o in &objs {
+            assert!(o.validate().is_ok(), "tri válido: {o:?}");
+        }
+        // Rampa monótona en luminancia (azul→rojo legible).
+        let c0 = rampa_altura(0.0);
+        let c1 = rampa_altura(1.0);
+        let lum = |c: [u8; 3]| 0.3 * f64::from(c[0]) + 0.6 * f64::from(c[1]);
+        assert!(lum(c1) > lum(c0), "la rampa sube con la altura");
+        assert_eq!(rampa_altura(0.0), [13, 25, 66]);
+        assert_eq!(rampa_altura(1.0), [235, 60, 50]);
     }
 
     #[test]

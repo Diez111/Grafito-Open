@@ -1485,7 +1485,11 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         // El plano va al campo 2D (dibuja un campo real, no combinaciones).
         return "gradient-field";
     }
-    if c.contains("vector") && !c.contains("conforme") && !c.contains("complej") && !c.contains("campo") {
+    if c.contains("vector")
+        && !c.contains("conforme")
+        && !c.contains("complej")
+        && !c.contains("campo")
+    {
         // Sin token conforme/complejo: combinaciones lineales honestas
         // (antes `universal` mudo; el caso conforme lo resolvió arriba).
         return "vectores-combinacion-lineal";
@@ -1631,7 +1635,8 @@ pub fn template_for_concept(concept: &str) -> &'static str {
     {
         return "sup-campo-vectorial";
     }
-    if (c.contains("intersecci") && (c.contains("esfera") || c.contains("plano") || c.contains("superficie")))
+    if (c.contains("intersecci")
+        && (c.contains("esfera") || c.contains("plano") || c.contains("superficie")))
         || (c.contains("esfera") && c.contains("plano"))
     {
         return "sup-interseccion";

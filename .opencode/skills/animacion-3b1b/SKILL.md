@@ -1,11 +1,11 @@
-# Animación estilo 3b1b — catálogo nativo (65 templates)
+# Animación estilo 3b1b — catálogo nativo (69 templates)
 
 > Puente nativo 100% Rust (`grafito-anim` + ffmpeg-sidecar, `engines/python`
 > eliminado). Sin `ffmpeg` en PATH → `FfmpegMissing` honesto, nunca video fingido.
 > Fuente de verdad: `crates/grafito-anim/src/tpl_*.rs` (`TEMPLATE_IDS`),
 > `protocol.rs::CANONICAL_TEMPLATES`, `grafito-app/src/anim_native.rs::NATIVE_TEMPLATES`.
 
-Total: **65 = 13 canónicas + 52 nuevas** (verificado 2026-09-27).
+Total: **69 = 13 canónicas + 52 + 3 extra + Laplace 3D** (verificado 2026-09-28).
 
 ## 1. Canónicas — cálculo/compleja/dinámica (13)
 

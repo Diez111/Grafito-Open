@@ -608,8 +608,10 @@ pub(crate) fn mensaje_grilla_vacia(template: &str) -> String {
     };
     format!(
         "La animación de ‘{pedido}’ salió vacía (solo fondo y grilla, sin curva). \
-         Pedí algo con contenido dibujable: integral (área bajo la curva), \
-         tangente/derivada, Taylor, Pitágoras, subspace o fractal."
+         Pedí algo con contenido dibujable: cálculo (derivada, integral, Taylor, \
+         Pitágoras, Riemann, límites), álgebra lineal (matrices, vectores, eigen), EDO \
+         (Laplace, Fourier, calor/onda), probabilidad (Bayes, CLT, regresión, \
+         redes), 3D/4D (superficies, hipercubo), grafos, caos o fractales."
     )
 }
 
@@ -1624,12 +1626,13 @@ mod tests {
         let err = verificar_frames_con_contenido(&vacios, "universal")
             .expect_err("el placeholder no es lista");
         for pista in [
+            "derivada",
             "integral",
-            "tangente",
             "Taylor",
             "Pitágoras",
-            "subspace",
-            "fractal",
+            "Laplace",
+            "Bayes",
+            "grafos",
         ] {
             assert!(err.contains(pista), "sugiere {pista}: {err}");
         }

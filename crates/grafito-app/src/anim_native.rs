@@ -3299,6 +3299,18 @@ fn draw_mobject_con_profundidad(
             );
             true
         }
+        M::Tri { a, b, c, color } => {
+            draw_triangle_filled_con_color(
+                buf,
+                w,
+                h,
+                to_pixel(w, h, a[0], a[1]),
+                to_pixel(w, h, b[0], b[1]),
+                to_pixel(w, h, c[0], c[1]),
+                *color,
+            );
+            true
+        }
         M::Arrow { from, to } => draw_arrow_world(buf, w, h, *from, *to, TANGENT_BLUE),
         M::Polygon { pts } => {
             if pts.len() < 2 {
@@ -4460,6 +4472,38 @@ fn draw_curva_mundo(
         }
     }
     pintados
+}
+
+/// Triángulo relleno con color explícito (superficies 3D con gradiente:
+/// el color ya viene calculado por cara). tiny-skia con antialias;
+/// no-op honesto si el buffer no calza o el triángulo degenera.
+fn draw_triangle_filled_con_color(
+    buf: &mut [u8],
+    w: usize,
+    h: usize,
+    a: (usize, usize),
+    b: (usize, usize),
+    c: (usize, usize),
+    color: [u8; 4],
+) {
+    let Some(mut px) = sk_view(buf, w, h) else {
+        return;
+    };
+    let mut builder = tiny_skia::PathBuilder::new();
+    builder.move_to(a.0 as f32 + 0.5, a.1 as f32 + 0.5);
+    builder.line_to(b.0 as f32 + 0.5, b.1 as f32 + 0.5);
+    builder.line_to(c.0 as f32 + 0.5, c.1 as f32 + 0.5);
+    builder.close();
+    let Some(path) = builder.finish() else {
+        return;
+    };
+    px.fill_path(
+        &path,
+        &sk_paint(color),
+        tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(),
+        None,
+    );
 }
 
 fn draw_line(
@@ -10480,10 +10524,7 @@ mod tests {
             detect_template_for_concept("teorema del límite central"),
             "limite-central"
         );
-        assert_eq!(
-            detect_template_for_concept("serie de fourier"),
-            "fourier"
-        );
+        assert_eq!(detect_template_for_concept("serie de fourier"), "fourier");
         assert_eq!(
             detect_template_for_concept("campana de gauss"),
             "distribuciones"

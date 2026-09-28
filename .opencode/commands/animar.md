@@ -1,5 +1,5 @@
 ---
-description: Anima un concepto con una plantilla del catálogo nativo (65 templates).
+description: Anima un concepto con una plantilla del catálogo nativo (69 templates).
 agent: build
 ---
 

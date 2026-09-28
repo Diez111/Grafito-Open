@@ -554,7 +554,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("\"dark_mode\":true"), "dark_mode se serializa");
+        assert!(
+            json.contains("\"dark_mode\":true"),
+            "dark_mode se serializa"
+        );
         let back: AppConfig = serde_json::from_str(&json).unwrap();
         assert!(back.dark_mode, "dark_mode sobrevive al roundtrip");
     }

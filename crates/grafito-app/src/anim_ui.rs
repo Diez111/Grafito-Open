@@ -144,10 +144,16 @@ pub fn animation_concept_from_request(text: &str) -> Result<String, String> {
     }
     let alfanum: usize = sustantivo.chars().filter(|c| c.is_alphanumeric()).count();
     if alfanum < 3 {
-        return Err(format!(
-            "no pude inferir qué animar desde «{}»: decime el concepto (derivada, integral, Pitágoras, …) y, si querés un barrido paramétrico, la expresión y el rango, por ejemplo «barrido de f(x)=x^2+p·x con p en [-2,2]»",
-            trimmed.chars().take(120).collect::<String>()
-        ));
+        // Concepto corto pero con significado ("3d", "edo"...): si el
+        // clasificador lo resuelve a una plantilla real se acepta (decide
+        // el contenido, no el largo). Si cae a `universal`, se pide
+        // concepto como antes.
+        if crate::anim_native::detect_template_for_concept(&resto) == "universal" {
+            return Err(format!(
+                "no pude inferir qué animar desde «{}»: decime el concepto (derivada, integral, matrices, Laplace, 3D, …) y, si querés un barrido paramétrico, la expresión y el rango, por ejemplo «barrido de f(x)=x^2+p·x con p en [-2,2]»",
+                trimmed.chars().take(120).collect::<String>()
+            ));
+        }
     }
     Ok(trimmed.to_string())
 }
@@ -222,6 +228,9 @@ pub const PLANTILLAS_COMBO: &[GrupoPlantillas] = &[
             "matriz-transformacion",
             "producto-cruz",
             "vectores-combinacion-lineal",
+            "matriz-inversa-nucleo",
+            "matriz-no-cuadrada",
+            "producto-punto-dualidad",
         ],
     },
     GrupoPlantillas {
@@ -284,6 +293,7 @@ pub const PLANTILLAS_COMBO: &[GrupoPlantillas] = &[
         ids: &[
             "sup-campo-vectorial",
             "sup-interseccion",
+            "sup-laplace-3d",
             "sup-onda-3d",
             "sup-paraboloide-tangente",
             "sup-silla-descenso",
@@ -313,7 +323,7 @@ pub const PLANTILLAS_COMBO: &[GrupoPlantillas] = &[
 ];
 
 /// Cantidad total de plantillas del combo (13 + 52 = 65).
-pub const PLANTILLAS_COMBO_TOTAL: usize = 65;
+pub const PLANTILLAS_COMBO_TOTAL: usize = 69;
 
 // ── Retención diferida de texturas egui (fix use-after-free wgpu) ───────────
 // El render GPU va un frame atrás: destruir una textura gestionada por egui
@@ -730,6 +740,21 @@ mod tests {
     }
 
     #[test]
+    fn concepto_corto_con_plantilla_pasa() {
+        // Regresión del reporte real: "HACE UNA ANIMACION 3D" moría en el
+        // filtro de largo aunque "3d" resuelve a sup-paraboloide-tangente.
+        let ok = animation_concept_from_request("HACE UNA ANIMACION 3D").unwrap();
+        assert!(ok.contains("3D"));
+        assert_eq!(
+            crate::anim_native::detect_template_for_concept(&ok),
+            "sup-paraboloide-tangente"
+        );
+        // Vacío real sigue fallando honesto.
+        assert!(animation_concept_from_request("animalo").is_err());
+        assert!(animation_concept_from_request("zz con animación").is_err());
+    }
+
+    #[test]
     fn referencia_sin_ids_literales() {
         let frase = animation_reference_sentence();
         assert!(frase.contains("deslizador"));
@@ -1127,19 +1152,19 @@ mod tests {
 
     // ── Ola 52: combo por dominio en sync con el nativo ─────────────────
     #[test]
-    fn combo_65_en_sync_con_nativo_y_protocolo() {
+    fn combo_69_en_sync_con_nativo_y_protocolo() {
         use crate::anim_native::NATIVE_TEMPLATES;
         use std::collections::BTreeSet;
-        // 10 grupos, 65 ids en total (13 clásicas + 52 de la ola).
+        // 10 grupos, 69 ids en total (13 clásicas + 52 de la ola + 3 extra + laplace 3d).
         assert_eq!(PLANTILLAS_COMBO.len(), 10);
         let total: usize = PLANTILLAS_COMBO.iter().map(|g| g.ids.len()).sum();
         assert_eq!(total, PLANTILLAS_COMBO_TOTAL);
-        assert_eq!(total, 65);
+        assert_eq!(total, 69);
         // Mismo conjunto que el nativo y el protocolo (orden libre).
         let combo: BTreeSet<&&str> = PLANTILLAS_COMBO.iter().flat_map(|g| g.ids.iter()).collect();
-        assert_eq!(combo.len(), 65, "combo sin duplicados");
+        assert_eq!(combo.len(), 69, "combo sin duplicados");
         let nativo: BTreeSet<&&str> = NATIVE_TEMPLATES.iter().collect();
-        assert_eq!(nativo.len(), 65);
+        assert_eq!(nativo.len(), 69);
         assert_eq!(combo, nativo, "combo = nativo por conjunto");
         for id in grafito_anim::protocol::CANONICAL_TEMPLATES {
             assert!(combo.contains(id), "{id} del protocolo en el combo");

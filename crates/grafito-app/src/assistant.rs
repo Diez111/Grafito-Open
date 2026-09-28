@@ -443,8 +443,15 @@ pub(crate) fn ia_disponible_para_anim(
 /// con `Err` honesto). Capado por chars para no pasar el budget.
 pub(crate) fn prompt_spec_anim_ia(pedido: &str) -> String {
     let recortado: String = pedido.chars().take(500).collect();
+    let catalogo = grafito_anim::protocol::catalogo_plantillas_para_ia();
     format!(
-        "Devolvé SOLO una línea JSON para animar en Grafito: integral {{\"expr\": \"x^2\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} o taylor {{\"expr\": \"sin(x)\", \"plantilla\": \"taylor-series\", \"centro\": 0, \"orden\": 3}}. La plantilla debe matchear la intención del pedido, jamás copies el ejemplo. Pedido: {recortado}"
+        "Devolvé SOLO una línea JSON para animar en Grafito con esta forma: \
+         {{\"expr\": \"x^2\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} \
+         (taylor: {{\"expr\": \"sin(x)\", \"plantilla\": \"taylor-series\", \"centro\": 0, \"orden\": 3}}). \
+         Elegí `plantilla` del catálogo, tiene que matchear la intención del pedido, jamás copies el ejemplo; \
+         `expr` es la función principal o el concepto en palabras si no hay fórmula; `p0/p1` un rango \
+         honesto (solo lo usan integral/tangente). Catálogo: {catalogo}. \
+         Pedido: {recortado}"
     )
 }
 
@@ -493,10 +500,17 @@ pub(crate) fn resolver_turno_anim_ia(ia_disponible: bool, salida: PedidoSpecIa) 
             // debe citar plantilla+función+orden/rango; veto → error
             // honesto, jamás prosa mentirosa con frames reales.
             let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
+            // Taylor cita orden; integral/tangente citan rango; la ola cita
+            // plantilla+expresión (el rango p0/p1 no significa nada ahí).
             let (orden, rango) = if es_taylor {
                 (Some(spec.orden), None)
-            } else {
+            } else if matches!(
+                spec.plantilla.trim().to_lowercase().as_str(),
+                "integral-area" | "derivative-slope"
+            ) {
                 (None, Some((spec.p0, spec.p1)))
+            } else {
+                (None, None)
             };
             match verificar_prosa_vs_spec(&prosa, &spec.plantilla, &spec.expr, orden, rango) {
                 Ok(()) => DesenlaceAnimIa::RenderIa { spec, prosa },
@@ -540,10 +554,20 @@ pub(crate) fn prosa_para_spec_anim_ia(spec: &SpecAnimIa) -> String {
                 spec.expr, spec.p0, spec.p1,
             )
         }
-        _ => {
+        "integral-area" => {
             format!(
                 "te muestro la integral con f(x)={} en [{},{}].\n\n{referencia}",
                 spec.expr, spec.p0, spec.p1,
+            )
+        }
+        _ => {
+            // Plantillas de la ola (la IA elige por catálogo): prosa
+            // genérica que nombra keyword+expresión; la puerta
+            // `verificar_prosa_vs_spec` la valida igual que las clásicas.
+            format!(
+                "te muestro {} de {}.\n\n{referencia}",
+                keyword_plantilla_anim(&spec.plantilla),
+                spec.expr,
             )
         }
     }
@@ -601,7 +625,8 @@ pub(crate) fn aviso_fallback_canonico(spec: &SpecAnimIa) -> String {
 /// Punto único para que prosa, aviso y verificación nombren lo mismo:
 /// `integral-area`→"la integral", `derivative-slope`→"la tangente",
 /// `taylor-series`→"Taylor", `subspace`→"el span", `fractal`→"el fractal",
-/// resto→"la animación".
+/// el resto por dominio (prefijos/grupos de la ola 52+extra), fallback
+/// "la animación".
 pub(crate) fn keyword_plantilla_anim(plantilla: &str) -> &'static str {
     match plantilla.trim().to_lowercase().as_str() {
         "integral-area" => "la integral",
@@ -609,6 +634,78 @@ pub(crate) fn keyword_plantilla_anim(plantilla: &str) -> &'static str {
         "taylor-series" => "Taylor",
         "subspace" => "el span",
         "fractal" => "el fractal",
+        p if p.starts_with("edo-") => "la EDO",
+        p if p.starts_with("sup-") => "la superficie",
+        p if p.starts_with("chaos-") => "el caos",
+        p if [
+            "tesseract-xw",
+            "hipercubo-corte",
+            "celda-24",
+            "estereografica",
+            "simplex-nd",
+        ]
+        .contains(&p) =>
+        {
+            "el politopo"
+        }
+        p if [
+            "bfs-animado",
+            "camino-minimo",
+            "force-directed",
+            "moser-spindle-coloreo",
+            "unit-distance",
+        ]
+        .contains(&p) =>
+        {
+            "el grafo"
+        }
+        p if [
+            "distribuciones",
+            "limite-central",
+            "teorema-bayes",
+            "regresion-lineal",
+            "pca-rotacion",
+            "perceptron-mlp",
+            "backprop-flujo",
+            "descenso-gradiente-3d",
+        ]
+        .contains(&p) =>
+        {
+            "el modelo"
+        }
+        p if [
+            "riemann-sums",
+            "epsilon-delta",
+            "chain-rule",
+            "taylor-remainder",
+            "improper-integral",
+            "ode-slope-field",
+            "partial-derivatives",
+            "gradient-descent",
+            "lagrange-multipliers",
+            "double-integral",
+            "green-stokes",
+            "jacobian",
+        ]
+        .contains(&p) =>
+        {
+            "el concepto"
+        }
+        p if [
+            "matriz-transformacion",
+            "determinante-area",
+            "eigenvectores",
+            "cambio-de-base",
+            "producto-cruz",
+            "vectores-combinacion-lineal",
+            "matriz-inversa-nucleo",
+            "matriz-no-cuadrada",
+            "producto-punto-dualidad",
+        ]
+        .contains(&p) =>
+        {
+            "la matriz"
+        }
         _ => "la animación",
     }
 }
@@ -1155,6 +1252,12 @@ pub(crate) fn validar_spec_anim_ia(spec: &SpecAnimIa) -> Result<(), String> {
             }
             Err(error) => Err(format!("el SPEC de la IA no valida: {error}")),
         }
+    } else if grafito_anim::protocol::CANONICAL_TEMPLATES.contains(&plantilla.as_str()) {
+        // Plantillas de la ola (la IA elige por catálogo): membresía
+        // canónica + función sana (ya validada arriba: no vacía, ≤2000,
+        // rango y param finitos). El renderer nativo valida sus params
+        // propios al renderizar; no se finge inferencia paramétrica.
+        Ok(())
     } else {
         let sintetico = format!(
             "barrido de f(x)={} con {} en [{},{}] con animación",
@@ -1266,7 +1369,7 @@ pub(crate) fn parsear_spec_anim_ia(
         .map(|texto| texto.to_lowercase())
         .ok_or_else(|| {
             format!(
-                "el SPEC de la IA vino sin plantilla para {pedido_original:?}: pedí integral, tangente o taylor explícita."
+                "el SPEC de la IA vino sin plantilla para {pedido_original:?}: elegí una del catálogo (integral-area, taylor-series, edo-laplace, matriz-transformacion, ...)."
             )
         })?;
     let param = valor
@@ -1428,6 +1531,36 @@ pub(crate) fn render_media_desde_spec_ia(
                 .to_string(),
         );
     }
+    // Plantillas nativas con renderer propio (la IA elige por catálogo):
+    // despacho directo al motor nativo en vez de la vía paramétrica.
+    // integral/tangente/taylor quedan afuera: tienen flujo dedicado.
+    let normalizada = spec.plantilla.trim().to_lowercase();
+    if normalizada != "integral-area"
+        && normalizada != "derivative-slope"
+        && crate::anim_native::NATIVE_TEMPLATES.contains(&normalizada.as_str())
+    {
+        let mut saw_cancel = false;
+        let frames = crate::anim_native::render_anim_with_progress(
+            &normalizada,
+            &spec.expr,
+            crate::anim_native::CHAT_CANON_W,
+            crate::anim_native::CHAT_CANON_H,
+            &std::collections::BTreeMap::new(),
+            &mut |_, _| {
+                if cancel.is_cancelled() {
+                    saw_cancel = true;
+                }
+            },
+        );
+        if cancel.is_cancelled() || saw_cancel {
+            return Err("La generación se canceló antes de completarse.".to_string());
+        }
+        if frames.is_empty() {
+            return Err(crate::anim_native::error_sin_fotogramas("el motor nativo"));
+        }
+        let title = titulo_curado(&spec.plantilla, &spec.expr, None);
+        return Ok(grafito_ui::assistant::AssistantMedia { title, frames });
+    }
     let anim = anim_desde_spec_ia(spec)?;
     let mut saw_cancel = false;
     let frames = crate::anim_native::render_parametric_frames_with_progress(&anim, &mut |_, _| {
@@ -1560,6 +1693,232 @@ pub(crate) fn titulo_curado_localized(
         "fractal" => match locale {
             grafito_ui::i18n::Locale::En => "Fractal — Koch snowflake".to_string(),
             _ => "Fractal — copo de Koch".to_string(),
+        },
+        // Ola 52+extra: títulos curados ES/EN por plantilla (misma forma
+        // que subspace/fractal). Sin esto todo caía al genérico "Animación".
+        "matriz-transformacion" => match locale {
+            grafito_ui::i18n::Locale::En => "Matrix as transformation".to_string(),
+            _ => "Matriz como transformación".to_string(),
+        },
+        "determinante-area" => match locale {
+            grafito_ui::i18n::Locale::En => "Determinant as area".to_string(),
+            _ => "Determinante como área".to_string(),
+        },
+        "eigenvectores" => match locale {
+            grafito_ui::i18n::Locale::En => "Eigenvectors and eigenvalues".to_string(),
+            _ => "Vectores y valores propios".to_string(),
+        },
+        "cambio-de-base" => match locale {
+            grafito_ui::i18n::Locale::En => "Change of basis".to_string(),
+            _ => "Cambio de base".to_string(),
+        },
+        "producto-cruz" => match locale {
+            grafito_ui::i18n::Locale::En => "Cross product".to_string(),
+            _ => "Producto cruz".to_string(),
+        },
+        "vectores-combinacion-lineal" => match locale {
+            grafito_ui::i18n::Locale::En => "Linear combination of vectors".to_string(),
+            _ => "Combinación lineal de vectores".to_string(),
+        },
+        "matriz-inversa-nucleo" => match locale {
+            grafito_ui::i18n::Locale::En => "Inverse matrix and kernel".to_string(),
+            _ => "Matriz inversa y núcleo".to_string(),
+        },
+        "matriz-no-cuadrada" => match locale {
+            grafito_ui::i18n::Locale::En => "Non-square matrix".to_string(),
+            _ => "Matriz no cuadrada".to_string(),
+        },
+        "producto-punto-dualidad" => match locale {
+            grafito_ui::i18n::Locale::En => "Dot product and duality".to_string(),
+            _ => "Producto punto y dualidad".to_string(),
+        },
+        "riemann-sums" => match locale {
+            grafito_ui::i18n::Locale::En => "Riemann sums".to_string(),
+            _ => "Sumas de Riemann".to_string(),
+        },
+        "epsilon-delta" => match locale {
+            grafito_ui::i18n::Locale::En => "Epsilon and delta".to_string(),
+            _ => "Épsilon y delta".to_string(),
+        },
+        "chain-rule" => match locale {
+            grafito_ui::i18n::Locale::En => "Chain rule".to_string(),
+            _ => "Regla de la cadena".to_string(),
+        },
+        "taylor-remainder" => match locale {
+            grafito_ui::i18n::Locale::En => "Taylor remainder".to_string(),
+            _ => "Resto de Taylor".to_string(),
+        },
+        "improper-integral" => match locale {
+            grafito_ui::i18n::Locale::En => "Improper integral".to_string(),
+            _ => "Integral impropia".to_string(),
+        },
+        "ode-slope-field" => match locale {
+            grafito_ui::i18n::Locale::En => "Slope field".to_string(),
+            _ => "Campo de pendientes".to_string(),
+        },
+        "partial-derivatives" => match locale {
+            grafito_ui::i18n::Locale::En => "Partial derivatives".to_string(),
+            _ => "Derivadas parciales".to_string(),
+        },
+        "gradient-descent" => match locale {
+            grafito_ui::i18n::Locale::En => "Gradient descent".to_string(),
+            _ => "Descenso por gradiente".to_string(),
+        },
+        "lagrange-multipliers" => match locale {
+            grafito_ui::i18n::Locale::En => "Lagrange multipliers".to_string(),
+            _ => "Multiplicadores de Lagrange".to_string(),
+        },
+        "double-integral" => match locale {
+            grafito_ui::i18n::Locale::En => "Double integral".to_string(),
+            _ => "Integral doble".to_string(),
+        },
+        "green-stokes" => match locale {
+            grafito_ui::i18n::Locale::En => "Green and Stokes".to_string(),
+            _ => "Green y Stokes".to_string(),
+        },
+        "jacobian" => match locale {
+            grafito_ui::i18n::Locale::En => "Jacobian".to_string(),
+            _ => "Jacobiano".to_string(),
+        },
+        "edo-campo-direcciones" => match locale {
+            grafito_ui::i18n::Locale::En => "Direction field".to_string(),
+            _ => "Campo de direcciones".to_string(),
+        },
+        "edo-convolucion" => match locale {
+            grafito_ui::i18n::Locale::En => "Convolution".to_string(),
+            _ => "Convolución".to_string(),
+        },
+        "edo-laplace" => match locale {
+            grafito_ui::i18n::Locale::En => "Laplace transform".to_string(),
+            _ => "Transformada de Laplace".to_string(),
+        },
+        "edo-fourier-epiciclos" => match locale {
+            grafito_ui::i18n::Locale::En => "Fourier epicycles".to_string(),
+            _ => "Epiciclos de Fourier".to_string(),
+        },
+        "edo-calor-onda" => match locale {
+            grafito_ui::i18n::Locale::En => "Heat and wave".to_string(),
+            _ => "Calor y onda".to_string(),
+        },
+        "distribuciones" => match locale {
+            grafito_ui::i18n::Locale::En => "Distributions".to_string(),
+            _ => "Distribuciones".to_string(),
+        },
+        "limite-central" => match locale {
+            grafito_ui::i18n::Locale::En => "Central limit theorem".to_string(),
+            _ => "Teorema central del límite".to_string(),
+        },
+        "teorema-bayes" => match locale {
+            grafito_ui::i18n::Locale::En => "Bayes' theorem".to_string(),
+            _ => "Teorema de Bayes".to_string(),
+        },
+        "regresion-lineal" => match locale {
+            grafito_ui::i18n::Locale::En => "Linear regression".to_string(),
+            _ => "Regresión lineal".to_string(),
+        },
+        "pca-rotacion" => match locale {
+            grafito_ui::i18n::Locale::En => "PCA rotation".to_string(),
+            _ => "Rotación PCA".to_string(),
+        },
+        "perceptron-mlp" => match locale {
+            grafito_ui::i18n::Locale::En => "Multilayer perceptron".to_string(),
+            _ => "Perceptrón multicapa".to_string(),
+        },
+        "backprop-flujo" => match locale {
+            grafito_ui::i18n::Locale::En => "Backpropagation".to_string(),
+            _ => "Backpropagation".to_string(),
+        },
+        "descenso-gradiente-3d" => match locale {
+            grafito_ui::i18n::Locale::En => "3D gradient descent".to_string(),
+            _ => "Descenso en 3D".to_string(),
+        },
+        "sup-paraboloide-tangente" => match locale {
+            grafito_ui::i18n::Locale::En => "Paraboloid and tangent plane".to_string(),
+            _ => "Paraboloide y plano tangente".to_string(),
+        },
+        "sup-toro-rotante" => match locale {
+            grafito_ui::i18n::Locale::En => "Rotating torus".to_string(),
+            _ => "Toro rotante".to_string(),
+        },
+        "sup-campo-vectorial" => match locale {
+            grafito_ui::i18n::Locale::En => "3D vector field".to_string(),
+            _ => "Campo vectorial 3D".to_string(),
+        },
+        "sup-interseccion" => match locale {
+            grafito_ui::i18n::Locale::En => "Sphere and plane".to_string(),
+            _ => "Esfera y plano".to_string(),
+        },
+        "sup-onda-3d" => match locale {
+            grafito_ui::i18n::Locale::En => "3D wave".to_string(),
+            _ => "Onda 3D".to_string(),
+        },
+        "sup-silla-descenso" => match locale {
+            grafito_ui::i18n::Locale::En => "Saddle and descent".to_string(),
+            _ => "Silla y descenso".to_string(),
+        },
+        "sup-laplace-3d" => match locale {
+            grafito_ui::i18n::Locale::En => "Laplace in 3D".to_string(),
+            _ => "Laplace en 3D".to_string(),
+        },
+        "tesseract-xw" => match locale {
+            grafito_ui::i18n::Locale::En => "Rotating tesseract".to_string(),
+            _ => "Tesseract rotando".to_string(),
+        },
+        "celda-24" => match locale {
+            grafito_ui::i18n::Locale::En => "24-cell".to_string(),
+            _ => "Celda-24".to_string(),
+        },
+        "hipercubo-corte" => match locale {
+            grafito_ui::i18n::Locale::En => "Hypercube slice".to_string(),
+            _ => "Corte del hipercubo".to_string(),
+        },
+        "estereografica" => match locale {
+            grafito_ui::i18n::Locale::En => "Stereographic projection".to_string(),
+            _ => "Proyección estereográfica".to_string(),
+        },
+        "simplex-nd" => match locale {
+            grafito_ui::i18n::Locale::En => "ND simplex".to_string(),
+            _ => "Simplex ND".to_string(),
+        },
+        "moser-spindle-coloreo" => match locale {
+            grafito_ui::i18n::Locale::En => "Colored Moser spindle".to_string(),
+            _ => "Huso de Moser coloreado".to_string(),
+        },
+        "bfs-animado" => match locale {
+            grafito_ui::i18n::Locale::En => "Animated BFS".to_string(),
+            _ => "BFS animado".to_string(),
+        },
+        "force-directed" => match locale {
+            grafito_ui::i18n::Locale::En => "Force-directed graph".to_string(),
+            _ => "Grafo dirigido por fuerzas".to_string(),
+        },
+        "unit-distance" => match locale {
+            grafito_ui::i18n::Locale::En => "Unit distance".to_string(),
+            _ => "Distancia unidad".to_string(),
+        },
+        "camino-minimo" => match locale {
+            grafito_ui::i18n::Locale::En => "Shortest path".to_string(),
+            _ => "Camino mínimo".to_string(),
+        },
+        "chaos-lorenz" => match locale {
+            grafito_ui::i18n::Locale::En => "Lorenz attractor".to_string(),
+            _ => "Atractor de Lorenz".to_string(),
+        },
+        "chaos-mandelbrot-zoom" => match locale {
+            grafito_ui::i18n::Locale::En => "Mandelbrot zoom".to_string(),
+            _ => "Zoom de Mandelbrot".to_string(),
+        },
+        "chaos-julia-morph" => match locale {
+            grafito_ui::i18n::Locale::En => "Morphing Julia set".to_string(),
+            _ => "Julia morphing".to_string(),
+        },
+        "chaos-bifurcacion-barrido" => match locale {
+            grafito_ui::i18n::Locale::En => "Bifurcation sweep".to_string(),
+            _ => "Barrido de bifurcación".to_string(),
+        },
+        "chaos-pendulo-doble" => match locale {
+            grafito_ui::i18n::Locale::En => "Double pendulum".to_string(),
+            _ => "Péndulo doble".to_string(),
         },
         _ => titulo_desde_concepto_localized(concept, locale),
     }
@@ -6987,8 +7346,13 @@ impl GrafitoApp {
                         let es_taylor = spec.plantilla.trim().to_lowercase() == "taylor-series";
                         let (orden, rango) = if es_taylor {
                             (Some(spec.orden), None)
-                        } else {
+                        } else if matches!(
+                            spec.plantilla.trim().to_lowercase().as_str(),
+                            "integral-area" | "derivative-slope"
+                        ) {
                             (None, Some((spec.p0, spec.p1)))
+                        } else {
+                            (None, None)
                         };
                         if let Err(veto) = verificar_prosa_vs_spec(
                             &prosa,
@@ -11508,6 +11872,32 @@ mod tests {
     }
 
     #[test]
+    fn ia_elige_laplace_del_catalogo_punta_a_punta() {
+        // La IA entiende el pedido y elige del catálogo (no keywords):
+        // parsea → valida → prosa → puerta → resolver, todo en verde.
+        let texto_ia = r#"{"expr": "e^(-t)", "p0": 0, "p1": 5, "plantilla": "edo-laplace"}"#;
+        let spec = parsear_spec_anim_ia(texto_ia, "animación de laplace").expect("parsea");
+        assert_eq!(spec.plantilla, "edo-laplace");
+        validar_spec_anim_ia(&spec).expect("valida por membresía canónica");
+        let prosa = prosa_para_spec_anim_ia(&spec);
+        assert!(prosa.contains("EDO"), "{prosa}");
+        verificar_prosa_vs_spec(&prosa, &spec.plantilla, &spec.expr, None, None)
+            .expect("la puerta pasa sin rango");
+        match resolver_turno_anim_ia(true, PedidoSpecIa::Exito(spec)) {
+            DesenlaceAnimIa::RenderIa { spec, .. } => {
+                assert_eq!(spec.plantilla, "edo-laplace");
+            }
+            otro => panic!("debe renderizar IA, fue {otro:?}"),
+        }
+        // Y el render nativo produce frames reales (no vacío).
+        let texto_ia2 = r#"{"expr": "e^(-t)", "p0": 0, "p1": 5, "plantilla": "edo-laplace"}"#;
+        let spec2 = parsear_spec_anim_ia(texto_ia2, "animación de laplace").expect("parsea 2");
+        let media =
+            render_media_desde_spec_ia(&spec2, &CancellationToken::default()).expect("renderiza");
+        assert!(!media.frames.is_empty(), "laplace produce frames");
+    }
+
+    #[test]
     fn r6a_punto_unico_offline_explicito_no_miente() {
         // Offline-explícito usa la f REAL del pedido, jamás canónica muda.
         let (prosa_i, aviso_i) =
@@ -12454,6 +12844,67 @@ mod tests {
         );
         // Vacío: honesto, jamás título en blanco.
         assert_eq!(titulo_curado("universal", "   ", None), "Animación");
+    }
+
+    #[test]
+    fn titulos_curados_ola_nombran_cada_dominio() {
+        // La ola ya no cae al genérico "Animación": cada plantilla nueva
+        // tiene título curado ES/EN.
+        for (plantilla, es, en) in [
+            (
+                "edo-laplace",
+                "Transformada de Laplace",
+                "Laplace transform",
+            ),
+            (
+                "matriz-transformacion",
+                "Matriz como transformación",
+                "Matrix as transformation",
+            ),
+            ("riemann-sums", "Sumas de Riemann", "Riemann sums"),
+            (
+                "limite-central",
+                "Teorema central del límite",
+                "Central limit theorem",
+            ),
+            ("teorema-bayes", "Teorema de Bayes", "Bayes' theorem"),
+            (
+                "sup-paraboloide-tangente",
+                "Paraboloide y plano tangente",
+                "Paraboloid and tangent plane",
+            ),
+            ("sup-interseccion", "Esfera y plano", "Sphere and plane"),
+            ("sup-laplace-3d", "Laplace en 3D", "Laplace in 3D"),
+            ("tesseract-xw", "Tesseract rotando", "Rotating tesseract"),
+            (
+                "moser-spindle-coloreo",
+                "Huso de Moser coloreado",
+                "Colored Moser spindle",
+            ),
+            ("chaos-lorenz", "Atractor de Lorenz", "Lorenz attractor"),
+            (
+                "perceptron-mlp",
+                "Perceptrón multicapa",
+                "Multilayer perceptron",
+            ),
+            ("jacobian", "Jacobiano", "Jacobian"),
+        ] {
+            assert_eq!(
+                titulo_curado(plantilla, "cualquier concepto", None),
+                es,
+                "{plantilla}"
+            );
+            assert_eq!(
+                titulo_curado_localized(
+                    plantilla,
+                    "any concept",
+                    None,
+                    grafito_ui::i18n::Locale::En
+                ),
+                en,
+                "{plantilla} EN"
+            );
+        }
     }
 
     #[test]

@@ -7338,7 +7338,7 @@ mod anim_export_subspace_fractal_tests {
         }
         assert!(grafito_anim::protocol::CANONICAL_TEMPLATES.contains(&"subspace"));
         assert!(grafito_anim::protocol::CANONICAL_TEMPLATES.contains(&"fractal"));
-        assert_eq!(grafito_anim::protocol::CANONICAL_TEMPLATES.len(), 65);
+        assert_eq!(grafito_anim::protocol::CANONICAL_TEMPLATES.len(), 69);
         assert!(is_known_native_template("subspace"));
         assert!(is_known_native_template("fractal"));
     }

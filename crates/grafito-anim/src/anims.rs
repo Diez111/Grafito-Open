@@ -311,6 +311,11 @@ fn caja_de(m: &Mobject) -> Option<([f64; 2], [f64; 2])> {
                 mete(caja, *from);
                 mete(caja, *to);
             }
+            Mobject::Tri { a, b, c, .. } => {
+                mete(caja, *a);
+                mete(caja, *b);
+                mete(caja, *c);
+            }
             Mobject::Circle { cx, cy, r } => {
                 mete(caja, [*cx - *r, *cy - *r]);
                 mete(caja, [*cx + *r, *cy + *r]);

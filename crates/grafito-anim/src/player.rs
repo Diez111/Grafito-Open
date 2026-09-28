@@ -237,6 +237,7 @@ pub fn centroide_de(m: &Mobject) -> [f64; 2] {
         Mobject::Line { from, to } | Mobject::Arrow { from, to } => {
             [(from[0] + to[0]) / 2.0, (from[1] + to[1]) / 2.0]
         }
+        Mobject::Tri { a, b, c, .. } => [(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0],
         Mobject::Polygon { pts } => {
             if pts.is_empty() {
                 return [0.0, 0.0];
@@ -311,6 +312,9 @@ pub const PLAYER_MAX_TOTAL_BYTES: usize = 64 * 1024 * 1024;
 pub fn estimate_mobject_bytes(m: &Mobject) -> usize {
     match m {
         Mobject::Polygon { pts } => pts.len().saturating_mul(std::mem::size_of::<[f64; 2]>()),
+        Mobject::Tri { .. } => 3usize
+            .saturating_mul(std::mem::size_of::<[f64; 2]>())
+            .saturating_add(std::mem::size_of::<[u8; 4]>()),
         Mobject::FunctionGraph { expr } => expr.len(),
         Mobject::Tex { svg } => svg.len(),
         Mobject::VectorField { func, .. } => func.len(),
@@ -632,6 +636,14 @@ fn puntos_trazables(m: &Mobject) -> Option<(Vec<[f64; 2]>, bool)> {
             }
         }
         Mobject::Line { from, to } | Mobject::Arrow { from, to } => Some((vec![*from, *to], false)),
+        Mobject::Tri { a, b, c, .. } => {
+            let pts = [*a, *b, *c];
+            if pts.iter().all(|p| p[0].is_finite() && p[1].is_finite()) {
+                Some((vec![*a, *b, *c], true))
+            } else {
+                None
+            }
+        }
         Mobject::Circle { cx, cy, r } => Some((anillo_muestreado(*cx, *cy, *r, *r, 24), true)),
         Mobject::Square { cx, cy, side } => {
             let h = side / 2.0;
@@ -1747,6 +1759,7 @@ impl Animation for TransformMatchingShapes {
 fn polilinea_de(m: &Mobject) -> Vec<[f64; 2]> {
     match m {
         Mobject::Polygon { pts } => pts.clone(),
+        Mobject::Tri { a, b, c, .. } => vec![*a, *b, *c],
         Mobject::Dot { x, y } => vec![[*x, *y]],
         Mobject::Line { from, to } | Mobject::Arrow { from, to } => vec![*from, *to],
         Mobject::Circle { cx, cy, r } => {

@@ -518,6 +518,18 @@ pub enum Mobject {
         /// 1..=4096 puntos finitos (2 si abierta, 3 si cerrada —lo valida el morph—).
         pts: Vec<[f64; 2]>,
     },
+    /// Triángulo relleno en mundo (wireframe con gradiente: el renderer lo
+    /// pinta con scanline en el color dado; 3 vértices finitos).
+    Tri {
+        /// Vértices en mundo.
+        a: [f64; 2],
+        /// Vértices en mundo.
+        b: [f64; 2],
+        /// Vértices en mundo.
+        c: [f64; 2],
+        /// Color RGBA (el renderer lo usa opaco).
+        color: [u8; 4],
+    },
     /// Punto marcado en mundo.
     Dot { x: f64, y: f64 },
     /// Campo de flechas `nx × ny` (1..=64 por lado).
@@ -614,6 +626,17 @@ impl Mobject {
                         donde: "Dot",
                         detalle: "coordenada no finita".to_string(),
                     });
+                }
+                Ok(())
+            }
+            Self::Tri { a, b, c, .. } => {
+                for (i, p) in [a, b, c].iter().enumerate() {
+                    if !p[0].is_finite() || !p[1].is_finite() {
+                        return Err(SceneError::MobjectInvalido {
+                            donde: "Tri",
+                            detalle: format!("vértice no finito en el índice {i}"),
+                        });
+                    }
                 }
                 Ok(())
             }
