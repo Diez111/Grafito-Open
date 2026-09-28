@@ -8128,6 +8128,38 @@ fn ola_dibuja_mobjects(w: usize, h: usize, mobjects: &[grafito_anim::Mobject]) -
     egui::ColorImage::from_rgba_unmultiplied([w, h], &buf)
 }
 
+/// Variante 3D: SIN grilla 2D de fondo (chocaba con la escena: fondo plano
+/// + ejes 3D con ticks rotulados). Máximo 24 rótulos.
+fn ola_dibuja_mobjects_3d(
+    w: usize,
+    h: usize,
+    mobjects: &[grafito_anim::Mobject],
+    ticks: &[grafito_anim::scene::surfaces3d::TickEtiqueta],
+) -> egui::ColorImage {
+    let byte_len = w.checked_mul(h).and_then(|v| v.checked_mul(4)).unwrap_or(0);
+    let exacto = byte_len > 0
+        && w.checked_mul(h)
+            .and_then(|v| v.checked_mul(4))
+            .is_some_and(|n| n == byte_len);
+    if !exacto {
+        return ola_fondo(w, h);
+    }
+    let mut buf = vec![0u8; byte_len];
+    fill_background(&mut buf, w, h);
+    for m in mobjects.iter().take(160) {
+        draw_mobject(&mut buf, w, h, m);
+    }
+    for tick in ticks.iter().take(24) {
+        if let Some(pos) = tick.pos {
+            if pos[0].is_finite() && pos[1].is_finite() {
+                let (px, py) = to_pixel(w, h, pos[0], pos[1]);
+                draw_rotulo_con_scrim(&mut buf, w, h, px, py, &tick.texto);
+            }
+        }
+    }
+    egui::ColorImage::from_rgba_unmultiplied([w, h], &buf)
+}
+
 /// Convierte un set RGBA propio (`(ancho, alto, píxeles)`) al set nativo:
 /// dims exactas, `w*h*4` bytes y opacizado (el pipeline es opaco).
 /// `None` honesto si algo no calza (el llamador cae al universal).
@@ -8379,7 +8411,7 @@ fn render_ola_sup(
     let mut scratch = grafito_anim::anims::Scratch::nuevo();
     let mut out = Vec::with_capacity(NATIVE_ANIM_FRAME_COUNT);
     for frame in 0..NATIVE_ANIM_FRAME_COUNT {
-        let mut objs = match grafito_anim::tpl_3d::muestra_frame(
+        let (mut objs, ticks) = match grafito_anim::tpl_3d::muestra_frame(
             id,
             &base,
             frame,
@@ -8439,16 +8471,17 @@ fn render_ola_sup(
                         v.push(dot);
                     }
                 }
-                v
+                (v, muestra.ejes.etiquetas(muestra.camara))
             }
-            Err(_) => Vec::new(),
+            Err(_) => (Vec::new(), Vec::new()),
         };
         if objs.is_empty() {
             out.push(ola_fondo(w, h));
         } else {
             // Ejes primero para que las curvas queden arriba (orden honesto).
             objs.truncate(64);
-            out.push(ola_dibuja_mobjects(w, h, &objs));
+            // Escena 3D: sin grilla 2D de fondo + ticks rotulados de los ejes.
+            out.push(ola_dibuja_mobjects_3d(w, h, &objs, &ticks));
         }
         on_frame(frame + 1, NATIVE_ANIM_FRAME_COUNT);
     }

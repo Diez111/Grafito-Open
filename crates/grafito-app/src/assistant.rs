@@ -828,9 +828,9 @@ pub(crate) fn prosa_turno_generica(plantilla: &str, concepto: &str) -> String {
     }
     let titulo = titulo_curado(plantilla, concepto, None);
     format!(
-        "te muestro {} con {}.\n\n{}",
-        keyword_plantilla_anim(plantilla),
+        "te muestro {} ({}).\n\n{}",
         titulo,
+        keyword_plantilla_anim(plantilla),
         crate::anim_ui::animation_reference_sentence(),
     )
 }
