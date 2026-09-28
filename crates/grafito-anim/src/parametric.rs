@@ -954,6 +954,13 @@ fn cut_expr_rhs(rhs: &str) -> String {
         ";",
         "\n",
     ];
+    // Comillas internas = contaminación con prosa (la IA a veces devuelve
+    // `"x^2", punto móvil...`): la matemática jamás trae comillas, así que
+    // cortan la expresión acá y no llegan al evaluador.
+    let mut s = s;
+    if let Some(p) = s.find(['"', '\'']) {
+        s.truncate(p);
+    }
     let low = s.to_lowercase();
     let mut best: Option<usize> = None;
     for cut in cuts {
@@ -2738,6 +2745,18 @@ mod subspace_fractal_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tangente_descarta_prosa_pegada_con_comillas() {
+        // Caso real: la IA devolvió `"x^2", punto móvil recorriendo la
+        // curva, recta secante` y el extractor lo tragaba entero → error
+        // "no se puede evaluar" en vez de animar x^2.
+        let pedido = "tangente movil de f(x)=\"x^2\", punto móvil recorriendo la curva, recta secante en [-1.5,1.5] con animación";
+        match infer_tangent_anim(pedido).expect("x^2 contamina igual valida") {
+            TangentPedido::Explicita(anim) => assert_eq!(anim.expr_a, "x^2"),
+            otro => panic!("debió ser explícita x^2, fue {otro:?}"),
+        }
+    }
 
     #[test]
     fn frame_count_acota_sin_panico() {

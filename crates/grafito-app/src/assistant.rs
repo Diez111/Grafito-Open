@@ -449,7 +449,7 @@ pub(crate) fn prompt_spec_anim_ia(pedido: &str) -> String {
          {{\"expr\": \"x^2\", \"p0\": 0, \"p1\": 2, \"plantilla\": \"integral-area\"}} \
          (taylor: {{\"expr\": \"sin(x)\", \"plantilla\": \"taylor-series\", \"centro\": 0, \"orden\": 3}}). \
          Elegí `plantilla` del catálogo, tiene que matchear la intención del pedido, jamás copies el ejemplo; \
-         `expr` es la función principal o el concepto en palabras si no hay fórmula; `p0/p1` un rango \
+         `expr` es SOLO fórmula matemática pelada (sin palabras, sin comillas, sin descripciones, ej `x^2`); si el pedido no trae fórmula usá la canónica `x^2`; `p0/p1` un rango \
          honesto (solo lo usan integral/tangente). Catálogo: {catalogo}. \
          Pedido: {recortado}"
     )
@@ -1289,6 +1289,38 @@ fn transporte_si_contenido_vacio(texto: &str) -> Option<PedidoSpecIa> {
     }
 }
 
+/// Sanea el `expr` del SPEC: la IA a veces pega prosa
+/// (`"x^2", punto móvil recorriendo la curva` → `x^2`).
+/// Recorta comilla interna y `, ` cuya cola no sea matemática (`max(x, 0)`
+/// se conserva porque su cola es matemática). Vacío tras sanear → original
+/// (el error honesto lo decide abajo, jamás se inventa otra función).
+pub(crate) fn sanear_expr_spec_ia(expr: &str) -> String {
+    let mut s = expr
+        .trim()
+        .trim_matches(|c| c == '`' || c == '"' || c == '\'' || c == '«' || c == '»')
+        .to_string();
+    if let Some(p) = s.find(['"', '\'']) {
+        s.truncate(p);
+    }
+    if let Some(p) = s.find(", ") {
+        let cola = s.get(p + 2..).unwrap_or("");
+        let matematica = !cola.is_empty()
+            && cola.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '+' | '-' | '*' | '/' | '^' | '(' | ')' | '.' | ' ')
+            });
+        if !matematica {
+            s.truncate(p);
+        }
+    }
+    let s = s.trim().to_string();
+    if s.is_empty() {
+        expr.trim().to_string()
+    } else {
+        s
+    }
+}
+
 /// W-B — parsea el JSON del SPEC venido de la IA y lo valida con `infer_*`.
 ///
 /// Acepta `{"expr_a"|"expr", "range":[p0,p1] o "p0"/"p1",
@@ -1328,6 +1360,11 @@ pub(crate) fn parsear_spec_anim_ia(
         .map(str::trim)
         .filter(|texto| !texto.is_empty())
         .ok_or_else(|| "el SPEC de la IA vino sin función: pedí una explícita.".to_string())?;
+    // Sanea prosa pegada por la IA (`"x^2", punto móvil...` → `x^2`): el
+    // extractor ya corta comillas internas, pero el gate de ida y vuelta
+    // (`got == spec.expr`) exige el expr limpio desde acá.
+    let expr_sano = sanear_expr_spec_ia(expr);
+    let expr = expr_sano.as_str();
     if expr.chars().count() > 2000 {
         return Err("el SPEC de la IA trae una función muy larga: pedila más corta.".into());
     }
@@ -9678,14 +9715,15 @@ mod tests {
         prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
         prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
         remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
-        should_fallback_agent_spark_to_deepseek, should_fallback_remote_spark_to_deepseek,
-        socratic_guard_context, spec_canonico_para_fallback, split_playlist_request,
-        stage_assistant_parameter, titulo_curado, titulo_curado_localized,
-        transporte_si_contenido_vacio, validar_pedido_narrado, validar_spec_anim_ia,
-        validate_assistant_command, verificar_prosa_de_turno, verificar_prosa_vs_spec,
-        verified_remote_proposals, wants_exercise_request, AgentChannelMsg, AnimIaRender,
-        AssistantAgentJob, AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation,
-        AssistantModelJob, AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
+        sanear_expr_spec_ia, should_fallback_agent_spark_to_deepseek,
+        should_fallback_remote_spark_to_deepseek, socratic_guard_context,
+        spec_canonico_para_fallback, split_playlist_request, stage_assistant_parameter,
+        titulo_curado, titulo_curado_localized, transporte_si_contenido_vacio,
+        validar_pedido_narrado, validar_spec_anim_ia, validate_assistant_command,
+        verificar_prosa_de_turno, verificar_prosa_vs_spec, verified_remote_proposals,
+        wants_exercise_request, AgentChannelMsg, AnimIaRender, AssistantAgentJob,
+        AssistantAnimIaJob, AssistantAnimJob, AssistantCommandInvocation, AssistantModelJob,
+        AssistantParameterAssignment, AssistantProposalJob, AssistantRemoteJob,
         AssistantRemoteRoute, AssistantRuntime, DecisionAnimacion, DesenlaceAnimIa, GifExportJob,
         IntegralPedido, LocalAssistantDisposition, PedidoSpecIa, RemoteProposalVerification,
         RemoteStage, SpecAnimIa, SpecTerminadoGuard, TangentePedido, TaylorPedido,
@@ -11824,6 +11862,29 @@ mod tests {
         assert!(prompt.contains("integral-area"), "{prompt}");
         assert!(prompt.contains("matchear la intención"), "{prompt}");
         assert!(prompt.contains("jamás copies el ejemplo"), "{prompt}");
+    }
+
+    #[test]
+    fn spec_ia_sanea_prosa_pegada_y_valida_x2() {
+        // Caso real ("animación explicando una derivada"): la IA devolvió
+        // `"x^2", punto móvil recorriendo la curva, recta secante` y el
+        // turno moría en "no se puede evaluar". Ahora sanea a x^2 y valida.
+        assert_eq!(
+            sanear_expr_spec_ia("\"x^2\", punto móvil recorriendo la curva, recta secante"),
+            "x^2"
+        );
+        assert_eq!(sanear_expr_spec_ia("x^2, punto móvil"), "x^2");
+        assert_eq!(sanear_expr_spec_ia("max(x, 0)"), "max(x, 0)");
+        assert_eq!(sanear_expr_spec_ia("x^2"), "x^2");
+        let texto = r#"{"expr": "\"x^2\", punto móvil recorriendo la curva, recta secante", "p0": -1.5, "p1": 1.5, "plantilla": "derivative-slope"}"#;
+        let spec = parsear_spec_anim_ia(texto, "haceme una animación explicando una derivada")
+            .expect("x^2 contaminado igual valida");
+        assert_eq!(spec.expr, "x^2");
+        assert!(validar_spec_anim_ia(&spec).is_ok());
+        // El prompt ya no invita prosa en `expr`.
+        let prompt = prompt_spec_anim_ia("animación de derivada");
+        assert!(prompt.contains("SOLO fórmula"), "{prompt}");
+        assert!(!prompt.contains("en palabras"), "{prompt}");
     }
 
     #[test]
