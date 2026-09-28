@@ -634,6 +634,11 @@ pub(crate) fn keyword_plantilla_anim(plantilla: &str) -> &'static str {
         "taylor-series" => "Taylor",
         "subspace" => "el span",
         "fractal" => "el fractal",
+        "gradient-field" => "el campo",
+        "euler" => "el número e",
+        "fourier" => "Fourier",
+        "logistic-bifurcation" => "la bifurcación",
+        "mobius-transform" => "Möbius",
         p if p.starts_with("edo-") => "la EDO",
         p if p.starts_with("sup-") => "la superficie",
         p if p.starts_with("chaos-") => "el caos",
@@ -1682,6 +1687,26 @@ pub(crate) fn titulo_curado_localized(
         "pitagoras" | "pythagoras" => t("media.title.pitagoras", locale).to_string(),
         "taylor-series" => t("media.title.taylor", locale).to_string(),
         "conformal-map" => t("media.title.conformal", locale).to_string(),
+        "euler" => match locale {
+            grafito_ui::i18n::Locale::En => "Euler's number".to_string(),
+            _ => "Número e de Euler".to_string(),
+        },
+        "fourier" => match locale {
+            grafito_ui::i18n::Locale::En => "Fourier series".to_string(),
+            _ => "Serie de Fourier".to_string(),
+        },
+        "logistic-bifurcation" => match locale {
+            grafito_ui::i18n::Locale::En => "Logistic bifurcation".to_string(),
+            _ => "Bifurcación logística".to_string(),
+        },
+        "gradient-field" => match locale {
+            grafito_ui::i18n::Locale::En => "Gradient field".to_string(),
+            _ => "Campo de gradiente".to_string(),
+        },
+        "mobius-transform" => match locale {
+            grafito_ui::i18n::Locale::En => "Möbius transform".to_string(),
+            _ => "Transformación de Möbius".to_string(),
+        },
         // Frente asistente-subspace/fractal: literales ES/EN curados a
         // propósito (más específicos que el catálogo genérico
         // `media.title.subspace/fractal`, que queda para otros usos).
@@ -12875,6 +12900,9 @@ mod tests {
             ),
             ("sup-interseccion", "Esfera y plano", "Sphere and plane"),
             ("sup-laplace-3d", "Laplace en 3D", "Laplace in 3D"),
+            ("gradient-field", "Campo de gradiente", "Gradient field"),
+            ("euler", "Número e de Euler", "Euler's number"),
+            ("fourier", "Serie de Fourier", "Fourier series"),
             ("tesseract-xw", "Tesseract rotando", "Rotating tesseract"),
             (
                 "moser-spindle-coloreo",

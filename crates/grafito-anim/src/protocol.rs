@@ -1408,6 +1408,12 @@ pub fn template_for_concept(concept: &str) -> &'static str {
         return "logistic-bifurcation";
     }
     if c.contains("gradiente") || c.contains("gradient") {
+        // Laplace manda sobre gradiente ("laplace con gradiente" es la
+        // superficie 3D con fill, no el campo 2D): se resuelve abajo en
+        // su rama propia. Descenso sí es optimización (ver abajo).
+        if c.contains("laplace") {
+            return "sup-laplace-3d";
+        }
         // Descenso: optimización sobre el paisaje (no campo estático).
         if c.contains("descenso") {
             return "gradient-descent";
@@ -2111,6 +2117,10 @@ mod universal_tests {
         for (concepto, esperada) in [
             ("animación de laplace", "edo-laplace"),
             ("animación 3d de laplace", "sup-laplace-3d"),
+            (
+                "mostra animacion 3d de laplace con gradiente",
+                "sup-laplace-3d",
+            ),
             ("haceme una senoidal con un parametro", "taylor-series"),
             ("matriz de transformación", "matriz-transformacion"),
             ("matriz inversa y núcleo", "matriz-inversa-nucleo"),
