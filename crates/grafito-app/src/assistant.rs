@@ -401,6 +401,12 @@ pub(crate) const ANIM_MOTOR_JOB_TIMEOUT_SECS: u64 = 15;
 /// La prosa del turno usa la canónica declarada existente.
 pub(crate) const ANIM_SIN_IA_AVISO: &str = "sin conexión: te muestro x², pedime otra";
 
+/// W-B — la IA devolvió SPEC inválido pero el pedido no traía función
+/// propia (decisión canónica): se muestra la canónica con este aviso en
+/// vez de tarjeta de error (el fallo es del modelo, no del pedido).
+pub(crate) const ANIM_IA_INVALIDO_AVISO: &str =
+    "la IA no devolvió una función válida: te muestro la canónica, pedime otra";
+
 /// W-B — SPEC validado venido de la IA (función, rango, kind/plantilla).
 /// El motor solo renderiza esto tras validar con `infer_*`; jamás basura.
 ///
@@ -487,6 +493,17 @@ pub(crate) enum DesenlaceAnimIa {
 /// - Con IA + `Invalido` → error honesto, jamás basura en pantalla.
 ///
 /// Un solo desenlace → el llamante renderiza una sola vez (o IA o local).
+/// W-B — ¿un SPEC inválido cae a la canónica? Solo si el pedido no traía
+/// función propia (decisión canónica, ej "animación de una integral"): el
+/// fallo es del modelo, no del pedido. Con función explícita se mantiene
+/// el error honesto (jamás canónica mentirosa). Puro, sin I/O.
+pub(crate) fn debe_caer_a_canonica_ante_invalido(pedido: &str) -> bool {
+    matches!(
+        decide_animacion(pedido),
+        DecisionAnimacion::RenderCanonico { .. }
+    )
+}
+
 pub(crate) fn resolver_turno_anim_ia(ia_disponible: bool, salida: PedidoSpecIa) -> DesenlaceAnimIa {
     if !ia_disponible {
         return DesenlaceAnimIa::FallbackCanonico {
@@ -609,13 +626,19 @@ pub(crate) fn prosa_canonica_para_plantilla(plantilla: &str) -> String {
 /// pedido: `x^2 en [0,2] (integral)` o `x^2 en [-1.5,1.5] (tangente)`.
 /// Puro, sin I/O.
 pub(crate) fn aviso_fallback_canonico(spec: &SpecAnimIa) -> String {
+    aviso_fallback_canonico_con_causa(spec, "sin conexión")
+}
+
+/// Variante con causa propia (ej IA inválida): mismo detalle de lo
+/// renderizado, sin mentir "sin conexión" cuando sí había red.
+pub(crate) fn aviso_fallback_canonico_con_causa(spec: &SpecAnimIa, causa: &str) -> String {
     let kind = if spec.plantilla.trim().to_lowercase() == "derivative-slope" {
         "tangente"
     } else {
         "integral"
     };
     format!(
-        "sin conexión: te muestro {} en [{},{}] ({}), pedime otra",
+        "{causa}: te muestro {} en [{},{}] ({}), pedime otra",
         spec.expr, spec.p0, spec.p1, kind
     )
 }
@@ -7379,6 +7402,20 @@ impl GrafitoApp {
                 worker_cancel.clone(),
             );
             let desenlace = resolver_turno_anim_ia(true, salida);
+            // La IA falló pero el pedido no traía función propia (decisión
+            // canónica, ej "animación de una integral"): cae a la canónica
+            // con aviso en vez de tarjeta de error. Con función explícita
+            // se mantiene el error honesto (jamás canónica mentirosa).
+            let desenlace = match desenlace {
+                DesenlaceAnimIa::ErrorHonesto(_)
+                    if debe_caer_a_canonica_ante_invalido(&pedido_hilo) =>
+                {
+                    DesenlaceAnimIa::FallbackCanonico {
+                        aviso: ANIM_IA_INVALIDO_AVISO,
+                    }
+                }
+                otro => otro,
+            };
             let resultado = match desenlace {
                 DesenlaceAnimIa::RenderIa { spec, prosa } => {
                     // Frente asistente-subspace/fractal: la IA no conoce estas
@@ -7438,7 +7475,10 @@ impl GrafitoApp {
                         }
                     }
                 }
-                DesenlaceAnimIa::FallbackCanonico { aviso: _ } => {
+                DesenlaceAnimIa::FallbackCanonico { aviso } => {
+                    // Causa propia del resolver (ej IA inválida) vs "sin
+                    // conexión" genérico: el aviso final no miente la causa.
+                    let causa_propia = aviso != ANIM_SIN_IA_AVISO;
                     // R6a CRÍTICO: el fallback NUNCA sustituye la plantilla
                     // pedida (bug de la captura: prosa Taylor + frames
                     // integral). taylor → renderer taylor DEDICADO con lo
@@ -7485,10 +7525,15 @@ impl GrafitoApp {
                                     } else {
                                         prosa_taylor_explicita(&spec.expr, &pedido_hilo)
                                     };
-                                    let aviso = format!(
-                                        "sin conexión: te muestro Taylor de {} en x={}, orden {}; pedime otra",
+                                    let base = format!(
+                                        "te muestro Taylor de {} en x={}, orden {}; pedime otra",
                                         spec.expr, spec.centro, spec.orden
                                     );
+                                    let aviso = if causa_propia {
+                                        format!("{aviso}: {base}")
+                                    } else {
+                                        format!("sin conexión: {base}")
+                                    };
                                     let title = titulo_curado(&plantilla_hilo, &spec.expr, None);
                                     Ok(AnimIaRender {
                                         media: grafito_ui::assistant::AssistantMedia {
@@ -7509,8 +7554,13 @@ impl GrafitoApp {
                         // especializa por el PUNTO ÚNICO con la canónica
                         // EFECTIVAMENTE renderizada (plantilla y rango
                         // reales, no promesa del pedido).
-                        let (prosa, aviso) =
+                        let (prosa, aviso_punto) =
                             prosa_y_aviso_canonicos_para_pedido(&plantilla_hilo, &pedido_hilo);
+                        let aviso = if causa_propia {
+                            aviso_fallback_canonico_con_causa(&canonico, aviso)
+                        } else {
+                            aviso_punto
+                        };
                         match render_media_desde_spec_ia(&canonico, &worker_cancel) {
                             Ok(media) => Ok(AnimIaRender {
                                 media,
@@ -9696,23 +9746,25 @@ mod tests {
         accepts_model_result, accepts_remote_context, accepts_remote_result,
         anim_parametrica_para_pedido, append_canonical_integral_prose, apply_local_assistant_plan,
         assistant_graph_perspective, attachment_error_message, aviso_fallback_canonico,
-        build_latex_document, can_offer_assistant_proposal_correction, clasifica_pedido_integral,
+        aviso_fallback_canonico_con_causa, build_latex_document,
+        can_offer_assistant_proposal_correction, clasifica_pedido_integral,
         clasifica_pedido_tangente, clasifica_pedido_taylor, classify_local_assistant_response,
-        commit_assistant_graph_preflight, decide_animacion, detect_dvisvgm_available,
-        detect_latex_available, esperar_spec_ia_con_timeout, export_orbit_supported_for_title,
-        fnv1a64, ia_disponible_para_anim, inspect_remote_action_proposals,
-        inspect_remote_proposals, inspect_remote_proposals_cancellable,
-        is_agent_spark_responses_unsupported_error, is_session_or_account_error,
-        is_socratic_repair_error, join_gif_handle_bounded, join_puente_bounded,
-        keyword_plantilla_anim, limpiar_media_si_no_animacion, parsear_spec_anim_ia,
-        pedido_menciona_fractal, pedido_menciona_subspace, plantilla_para_pedido,
-        playlist_para_pedido, pop_provisional_stream_turn, preflight_assistant_flower_scene,
-        preflight_assistant_graph_command, preflight_assistant_graph_command_with_prerequisites,
-        preflight_assistant_parameter, preflight_assistant_scene, prompt_spec_anim_ia,
-        prosa_canonica_para_plantilla, prosa_fractal_canonica, prosa_integral_explicita,
-        prosa_para_spec_anim_ia, prosa_subspace_canonica, prosa_tangente_explicita,
-        prosa_taylor_canonica, prosa_taylor_explicita, prosa_turno_generica,
-        prosa_turno_para_guion, prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
+        commit_assistant_graph_preflight, debe_caer_a_canonica_ante_invalido, decide_animacion,
+        detect_dvisvgm_available, detect_latex_available, esperar_spec_ia_con_timeout,
+        export_orbit_supported_for_title, fnv1a64, ia_disponible_para_anim,
+        inspect_remote_action_proposals, inspect_remote_proposals,
+        inspect_remote_proposals_cancellable, is_agent_spark_responses_unsupported_error,
+        is_session_or_account_error, is_socratic_repair_error, join_gif_handle_bounded,
+        join_puente_bounded, keyword_plantilla_anim, limpiar_media_si_no_animacion,
+        parsear_spec_anim_ia, pedido_menciona_fractal, pedido_menciona_subspace,
+        plantilla_para_pedido, playlist_para_pedido, pop_provisional_stream_turn,
+        preflight_assistant_flower_scene, preflight_assistant_graph_command,
+        preflight_assistant_graph_command_with_prerequisites, preflight_assistant_parameter,
+        preflight_assistant_scene, prompt_spec_anim_ia, prosa_canonica_para_plantilla,
+        prosa_fractal_canonica, prosa_integral_explicita, prosa_para_spec_anim_ia,
+        prosa_subspace_canonica, prosa_tangente_explicita, prosa_taylor_canonica,
+        prosa_taylor_explicita, prosa_turno_generica, prosa_turno_para_guion,
+        prosa_turno_para_playlist, prosa_y_aviso_canonicos_para_pedido,
         prosa_y_aviso_offline_para_pedido, read_bounded_attachment, remote_error_message,
         remote_stage_for_job, render_media_desde_spec_ia, resolver_turno_anim_ia,
         sanear_expr_spec_ia, should_fallback_agent_spark_to_deepseek,
@@ -11885,6 +11937,41 @@ mod tests {
         let prompt = prompt_spec_anim_ia("animación de derivada");
         assert!(prompt.contains("SOLO fórmula"), "{prompt}");
         assert!(!prompt.contains("en palabras"), "{prompt}");
+    }
+
+    #[test]
+    fn invalido_sin_funcion_cae_a_canonica_y_con_funcion_no() {
+        // Caso real ("animación de una integral" sin f): el SPEC sin
+        // función cae a la canónica con aviso, no a tarjeta de error.
+        assert!(debe_caer_a_canonica_ante_invalido(
+            "haceme una animación de una integral"
+        ));
+        assert!(debe_caer_a_canonica_ante_invalido(
+            "haceme una animación explicando una derivada"
+        ));
+        // Con función explícita jamás se sustituye: error honesto.
+        assert!(!debe_caer_a_canonica_ante_invalido(
+            "taylor de x^3 con animación"
+        ));
+        assert!(!debe_caer_a_canonica_ante_invalido("graficá x^2"));
+        // El aviso con causa no miente "sin conexión".
+        let spec = SpecAnimIa {
+            expr: "x^2".into(),
+            p0: 0.0,
+            p1: 2.0,
+            plantilla: "integral-area".into(),
+            param: "p".into(),
+            centro: 0.0,
+            orden: 3,
+        };
+        let aviso =
+            aviso_fallback_canonico_con_causa(&spec, "la IA no devolvió una función válida");
+        assert!(aviso.contains("x^2 en [0,2] (integral)"), "{aviso}");
+        assert!(!aviso.contains("sin conexión"), "{aviso}");
+        assert!(
+            aviso_fallback_canonico(&spec).starts_with("sin conexión:"),
+            "genérico intacto"
+        );
     }
 
     #[test]
