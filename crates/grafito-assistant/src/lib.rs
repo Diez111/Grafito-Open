@@ -251,7 +251,7 @@ pub const REMOTE_SLOW_STAGE_SECS: u64 = 10;
 const NO_NETWORK_MESSAGE: &str =
     "assistant network support is disabled in this build (feature assistant-net is off)";
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
-const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
+const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; when the user names a classic function without parameters (seno/sine, coseno/cosine), assume sin(x)/cos(x) with defaults and propose it directly instead of asking; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 /// Delimitadores del contenido NO confiable (documento/web) que viaja en el
 /// prompt de usuario: el modelo debe tratarlo como dato, jamás como órdenes.
 const UNTRUSTED_DATA_OPEN: &str = "<datos_no_confiables>
@@ -306,7 +306,7 @@ pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
         } else if let Some(response) = solve_local_cas(problem, &request.budget) {
             response
         } else if let Some(expression) = parse_graph_request(problem) {
-            solve_graph_request(request, expression)
+            solve_graph_request(request, &expression)
         } else if problem.contains('=') {
             solve_equation(problem)
         } else {
@@ -915,27 +915,151 @@ fn solve_graph_request(request: &AssistantRequest, expression: &str) -> Assistan
     }
 }
 
-fn parse_graph_request(problem: &str) -> Option<&str> {
+/// Modo directo: acepta `graficá` con tilde, `graficame`, `dibujá/mostrame`,
+/// y pedidos implícitos con verbo de acción + función clásica
+/// (`haceme para aplicar un seno` → `sin(x)`). Sin verbo ni expresión
+/// evaluable devuelve `None` honesto (jamás inventa).
+fn parse_graph_request(problem: &str) -> Option<String> {
     let trimmed = problem.trim();
-    let lower = trimmed.to_ascii_lowercase();
-    for prefix in ["graph", "plot", "graficar", "grafica", "gráfica"] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            if !rest.is_empty() && !rest.starts_with(char::is_whitespace) && !rest.starts_with(':')
-            {
+    if trimmed.is_empty() {
+        return None;
+    }
+    let norm = normaliza_pedido_grafico(&trimmed.to_lowercase());
+    // 1) Prefijo clásico al inicio (lista de largo a corto para `graficame`).
+    for prefix in [
+        "graficame",
+        "graficar",
+        "grafica",
+        "grafic",
+        "graph",
+        "plot",
+        "dibujar",
+        "dibuja",
+        "mostrar",
+        "mostrame",
+        "visualizar",
+    ] {
+        if let Some(rest) = norm.strip_prefix(prefix) {
+            if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with(':') {
                 continue;
             }
-            let offset = trimmed.len() - rest.len();
-            let mut expression = trimmed[offset..].trim_start_matches([':', ' ']).trim();
-            if let Some(after_y) = expression.strip_prefix("y") {
+            let mut expression = rest.trim_start_matches([':', ' ']).trim();
+            if let Some(after_y) = expression.strip_prefix('y') {
                 expression = after_y.trim_start();
                 if let Some(after_equals) = expression.strip_prefix('=') {
                     expression = after_equals.trim();
                 }
             }
-            return Some(expression);
+            // `graficame un seno` → canónica aunque el resto no sea expresión.
+            if let Some(canonica) = funcion_trig_mencionada(expression) {
+                return Some(canonica);
+            }
+            if expression.is_empty() {
+                if let Some(canonica) = funcion_trig_mencionada(&norm) {
+                    return Some(canonica);
+                }
+                continue;
+            }
+            // Guardia honesta: `graficame unas cosas` no es matemática (sin
+            // x, dígitos, operadores ni función conocida) → None, jamás
+            // propone basura que el evaluador rechazaría igual.
+            if !parece_expresion(expression) {
+                continue;
+            }
+            return Some(expression.to_string());
+        }
+    }
+    // 2) Sin prefijo: verbo de acción en cualquier parte + función clásica.
+    // `haceme para aplicar un seno` cae acá (empieza con `haceme`, no con
+    // `grafic`). `cosas` no matchea `cos` (palabra exacta con bordes).
+    let hay_verbo = [
+        "grafic", "graf", "dibuj", "mostr", "visualiz", "traz", "haceme", "hace", "hazme",
+        "aplicar", "aplica", "poneme", "dame", "quiero", "necesito",
+    ]
+    .iter()
+    .any(|verbo| norm.contains(verbo));
+    if hay_verbo {
+        if let Some(canonica) = funcion_trig_mencionada(&norm) {
+            return Some(canonica);
         }
     }
     None
+}
+
+/// Minúsculas ya aplicadas por el llamante; acá solo se quitan tildes para
+/// que `graficá` matchee `grafica` (el parser es ASCII).
+fn normaliza_pedido_grafico(lower: &str) -> String {
+    lower
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'ä' | 'â' => 'a',
+            'é' | 'è' | 'ë' | 'ê' => 'e',
+            'í' | 'ì' | 'ï' | 'î' => 'i',
+            'ó' | 'ò' | 'ö' | 'ô' => 'o',
+            'ú' | 'ù' | 'ü' | 'û' => 'u',
+            'ñ' => 'n',
+            _ => c,
+        })
+        .collect()
+}
+
+/// Función trigonométrica clásica mencionada en texto normalizado.
+/// `sin`/`cos`/`tan` exigen bordes de palabra (`cosas` no es `cos`).
+fn funcion_trig_mencionada(norm: &str) -> Option<String> {
+    if norm.contains("seno") || norm.contains("senoide") || palabra_exacta(norm, "sin") {
+        return Some("sin(x)".to_string());
+    }
+    if norm.contains("coseno") || palabra_exacta(norm, "cos") {
+        return Some("cos(x)".to_string());
+    }
+    if (norm.contains("tangente") && norm.contains("funcion")) || palabra_exacta(norm, "tan") {
+        return Some("tan(x)".to_string());
+    }
+    None
+}
+
+/// ¿El resto del pedido parece matemática graficable (x, dígitos, operadores
+/// o función conocida)? Frena `graficame unas cosas` antes de proponer basura.
+fn parece_expresion(expression: &str) -> bool {
+    let lower = expression.to_lowercase();
+    if funcion_trig_mencionada(&normaliza_pedido_grafico(&lower)).is_some() {
+        return true;
+    }
+    lower.chars().any(|c| {
+        c == 'x'
+            || c.is_ascii_digit()
+            || matches!(c, '^' | '+' | '-' | '*' | '/' | '(' | ')' | '=' | '²' | '³')
+    }) || ["sqrt", "exp", "log", "abs"]
+        .iter()
+        .any(|f| lower.contains(f))
+        || ["sin", "cos", "tan"]
+            .iter()
+            .any(|f| palabra_exacta(&lower, f))
+}
+
+/// ¿`palabra` aparece rodeada de bordes no alfanuméricos?
+fn palabra_exacta(haystack: &str, palabra: &str) -> bool {
+    if palabra.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(palabra) {
+        let abs = start + pos;
+        let antes_ok = abs == 0
+            || !haystack[..abs]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_alphanumeric());
+        let despues_ok = haystack[abs + palabra.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric());
+        if antes_ok && despues_ok {
+            return true;
+        }
+        start = abs + palabra.len();
+    }
+    false
 }
 
 fn evaluate_with_context(
@@ -5437,6 +5561,38 @@ mod tests {
             .operations
             .iter()
             .all(AssistantOperation::is_graph));
+    }
+
+    #[test]
+    fn graph_request_modo_directo_seno_con_verbo_implicito() {
+        // Queja real: "haceme para aplicar un seno" preguntaba en vez de
+        // graficar. Modo directo: propone sin(x) con Aplicar.
+        assert_eq!(
+            parse_graph_request("haceme para aplicar un seno"),
+            Some("sin(x)".to_string())
+        );
+        let response = solve_local(&request("haceme para aplicar un seno"));
+        assert_eq!(response.status, LocalAssistantStatus::Solved);
+        assert!(response.plan.is_some());
+    }
+
+    #[test]
+    fn graph_request_acepta_tilde_y_graficame() {
+        assert_eq!(parse_graph_request("graficá x^2"), Some("x^2".to_string()));
+        assert_eq!(
+            parse_graph_request("graficame un seno"),
+            Some("sin(x)".to_string())
+        );
+        assert_eq!(
+            parse_graph_request("graficá y = sin(x)"),
+            Some("sin(x)".to_string())
+        );
+    }
+
+    #[test]
+    fn graph_request_no_confunde_cosas_con_cos() {
+        // `cosas` contiene `cos` pero no es función: honesto, sin inventar.
+        assert_eq!(parse_graph_request("graficame unas cosas"), None);
     }
 
     #[test]
