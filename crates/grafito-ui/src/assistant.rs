@@ -8451,7 +8451,7 @@ fn draw_media_card(
                     ui.add_space(SPACE_XS);
                     ui.label(
                         egui::RichText::new(
-                            "Pedí una integral, tangente, Taylor, Pitágoras, subspace o fractal.",
+                            "Pedí cálculo, álgebra, Laplace, probabilidad, 3D, grafos o caos.",
                         )
                         .color(theme.text_tertiary)
                         .size(TYPE_XS),
@@ -18685,7 +18685,7 @@ mod tests {
             "vacío honesto"
         );
         assert!(
-            card.contains("Pitágoras, subspace o fractal"),
+            card.contains("cálculo, álgebra, Laplace"),
             "el vacío sugiere qué pedir"
         );
         assert!(
