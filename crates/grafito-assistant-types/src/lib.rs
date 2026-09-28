@@ -257,6 +257,26 @@ impl AssistantRepairFeedback {
         self.push_prompt_text(&mut out);
         out
     }
+
+    /// Fusiona fallos previos (intentos anteriores) con los nuevos, sin
+    /// repetir par comando+kind y capeando a `MAX_ASSISTANT_REPAIR_FAILURES`.
+    /// Así el reintento N aprende de TODOS los intentos, no solo del último.
+    pub fn combinado_con(&self, previo: &Self) -> Self {
+        let mut failures = previo.failures.clone();
+        for nuevo in &self.failures {
+            let repetido = failures
+                .iter()
+                .any(|v| v.command == nuevo.command && v.kind == nuevo.kind);
+            if !repetido {
+                failures.push(nuevo.clone());
+            }
+            if failures.len() >= MAX_ASSISTANT_REPAIR_FAILURES {
+                break;
+            }
+        }
+        failures.truncate(MAX_ASSISTANT_REPAIR_FAILURES);
+        Self { failures }
+    }
 }
 
 /// Política de privacidad de una solicitud del asistente.
@@ -2080,6 +2100,39 @@ mod tests {
             }],
         };
         assert!(unsafe_feedback.validate().is_err());
+    }
+
+    #[test]
+    fn repair_feedback_combinado_acumula_sin_repetir_y_capea() {
+        let falla = |command: &str, kind: AssistantRepairFailureKind| AssistantRepairFailure {
+            command: command.into(),
+            kind,
+            expected_syntax: Vec::new(),
+        };
+        let previo = AssistantRepairFeedback {
+            failures: vec![
+                falla("Foo", AssistantRepairFailureKind::InvalidSyntax),
+                falla("Bar", AssistantRepairFailureKind::InvalidArity),
+            ],
+        };
+        let nuevo = AssistantRepairFeedback {
+            failures: vec![
+                falla("Foo", AssistantRepairFailureKind::InvalidSyntax),
+                falla("Baz", AssistantRepairFailureKind::UnsupportedCommand),
+                falla("Qux", AssistantRepairFailureKind::CommandRejected),
+                falla("Quux", AssistantRepairFailureKind::NoNewObject),
+            ],
+        };
+        let combinado = nuevo.combinado_con(&previo);
+        // Sin repetir Foo+InvalidSyntax, capeado a 4.
+        let comandos: Vec<&str> = combinado
+            .failures
+            .iter()
+            .map(|f| f.command.as_str())
+            .collect();
+        assert_eq!(comandos, vec!["Foo", "Bar", "Baz", "Qux"]);
+        assert!(combinado.validate().is_ok());
+        assert!(combinado.prompt_text().contains("Baz"));
     }
 
     #[test]

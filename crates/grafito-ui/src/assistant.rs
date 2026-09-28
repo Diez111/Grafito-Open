@@ -1907,6 +1907,14 @@ pub struct AssistantPanelState {
     proposal_correction_target_turn: Option<usize>,
     proposal_correction_attempt: Option<u8>,
     proposal_correction_context: Option<AssistantCorrectionContext>,
+    /// Feedback ya enviado en un intento de corrección previo del mismo
+    /// turno: el siguiente intento lo acumula (`combinado_con`) para no
+    /// repetir errores. Se resetea con cada turno nuevo.
+    correccion_feedback_enviado: Option<AssistantRepairFeedback>,
+    /// El controlador pide reintentar solo (sin tap) tras ofrecer corrección;
+    /// el shim lo drena y lanza `request_assistant_proposal_correction`.
+    /// Tope total: 1 intento inicial + 2 correcciones = 3.
+    reintento_automatico_pendiente: bool,
     /// La aplicación tiene una consulta remota en curso.
     pub is_pending: bool,
     /// Consulta local no resuelta que espera una autorización remota explícita.
@@ -2018,6 +2026,8 @@ impl Default for AssistantPanelState {
             proposal_correction_target_turn: None,
             proposal_correction_attempt: None,
             proposal_correction_context: None,
+            correccion_feedback_enviado: None,
+            reintento_automatico_pendiente: false,
             remote_stage: RemoteStage::Autorizada,
             remote_stage_elapsed_secs: 0,
             remote_stage_note: None,
@@ -2340,6 +2350,16 @@ impl AssistantPanelState {
         attempt: u8,
         context: AssistantCorrectionContext,
     ) {
+        // Turno nuevo (intento 0): se olvida el historial de intentos
+        // anteriores. Si es una corrección que también falló, se acumulan
+        // sus errores con los ya enviados para no repetirlos.
+        if attempt == 0 {
+            self.correccion_feedback_enviado = None;
+        }
+        let feedback = match &self.correccion_feedback_enviado {
+            Some(previo) => feedback.combinado_con(previo),
+            None => feedback,
+        };
         self.set_proposal_correction(question, feedback, target_turn, attempt, context);
     }
 
@@ -2386,7 +2406,20 @@ impl AssistantPanelState {
         let target_turn = self.proposal_correction_target_turn?;
         let attempt = self.proposal_correction_attempt?;
         self.proposal_correction_available = false;
+        // Historial para el próximo intento: si también falla, sus errores
+        // se acumulan con estos.
+        self.correccion_feedback_enviado = Some(feedback.clone());
         Some((question, feedback, target_turn, attempt))
+    }
+
+    /// Marca (y consume) un reintento automático pendiente.
+    pub fn take_reintento_automatico_pendiente(&mut self) -> bool {
+        std::mem::replace(&mut self.reintento_automatico_pendiente, false)
+    }
+
+    /// Pide al shim lanzar la corrección ya ofrecida, sin tap del usuario.
+    pub fn pedir_reintento_automatico(&mut self) {
+        self.reintento_automatico_pendiente = true;
     }
 
     /// Reactiva el diagnóstico reservado después de un fallo recuperable de red.
@@ -3657,6 +3690,8 @@ impl AssistantPanelState {
         self.proposal_correction_target_turn = None;
         self.proposal_correction_attempt = None;
         self.proposal_correction_context = None;
+        self.correccion_feedback_enviado = None;
+        self.reintento_automatico_pendiente = false;
     }
 
     fn clear_proposal_cards(&mut self) {
@@ -13014,6 +13049,7 @@ fn should_submit_on_enter(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use grafito_assistant_types::{AssistantRepairFailure, AssistantRepairFailureKind};
 
     #[test]
     fn lifecycle_sin_variantes_muertas() {
@@ -13128,6 +13164,64 @@ mod tests {
             document_digest: context.digest,
             focus: None,
         }
+    }
+
+    #[test]
+    fn correccion_acumula_errores_y_flag_auto_reintento() {
+        // Loop agéntico: el intento 2 aprende de los errores del intento 1
+        // (no solo del último fallo) y el flag se consume una sola vez.
+        let falla = |command: &str| AssistantRepairFeedback {
+            failures: vec![AssistantRepairFailure {
+                command: command.into(),
+                kind: AssistantRepairFailureKind::InvalidSyntax,
+                expected_syntax: Vec::new(),
+            }],
+        };
+        let mut state = AssistantPanelState::default();
+        state.offer_proposal_correction_for_turn(
+            "graficá".into(),
+            falla("Foo"),
+            Some(0),
+            0,
+            correction_context(),
+        );
+        let (_, fb0, _, _) = state
+            .take_proposal_correction_session()
+            .expect("sesión intento 0");
+        assert!(fb0.failures.iter().any(|f| f.command == "Foo"));
+        // El intento 1 también falla (Bar): lo ofrecido trae Foo+Bar.
+        state.offer_proposal_correction_for_turn(
+            "graficá".into(),
+            falla("Bar"),
+            Some(0),
+            1,
+            correction_context(),
+        );
+        let (_, fb1, _, attempt) = state
+            .take_proposal_correction_session()
+            .expect("sesión intento 1");
+        assert_eq!(attempt, 1);
+        let comandos: Vec<&str> = fb1.failures.iter().map(|f| f.command.as_str()).collect();
+        assert!(
+            comandos.contains(&"Foo") && comandos.contains(&"Bar"),
+            "{comandos:?}"
+        );
+        // Turno nuevo resetea el historial: solo Baz.
+        state.offer_proposal_correction_for_turn(
+            "otra".into(),
+            falla("Baz"),
+            Some(1),
+            0,
+            correction_context(),
+        );
+        let (_, fb2, _, _) = state
+            .take_proposal_correction_session()
+            .expect("sesión turno nuevo");
+        assert_eq!(fb2.failures.len(), 1);
+        // Flag automático: se pide y se consume una vez.
+        state.pedir_reintento_automatico();
+        assert!(state.take_reintento_automatico_pendiente());
+        assert!(!state.take_reintento_automatico_pendiente());
     }
 
     fn command_proposal(text: &str) -> AssistantProposal {

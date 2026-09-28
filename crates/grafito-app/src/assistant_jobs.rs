@@ -2156,6 +2156,12 @@ impl AssistantJobsController {
                                             focus: preflight_focus.clone(),
                                         },
                                     );
+                                    // Loop agéntico: sin propuestas válidas la IA
+                                    // reintenta sola con el error aprendido
+                                    // (tope 1+2=3, ver can_offer). El shim
+                                    // drena el flag y lanza la corrección; el
+                                    // botón manual queda como respaldo.
+                                    ctx.panel.pedir_reintento_automatico();
                                 }
                             }
                             if rejected_count > 0 {

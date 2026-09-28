@@ -8867,6 +8867,19 @@ impl GrafitoApp {
         self.with_assistant_jobs(|jobs| {
             AssistantJobsController::poll_assistant_jobs(jobs, ctx);
         });
+        // Loop agéntico: si la verificación tumbó todas las propuestas, la
+        // corrección ya quedó ofrecida y se reintenta sola (máx 3 intentos
+        // totales). Sin tap, con aviso. En examen no sale a red.
+        if self.assistant.take_reintento_automatico_pendiente() {
+            if self.exam_mode {
+                return;
+            }
+            self.notify(
+                "La propuesta no validó; reintento automático con IA (máx. 3 intentos).",
+                ToastKind::Info,
+            );
+            self.request_assistant_proposal_correction(ctx);
+        }
     }
 
     fn assistant_provider_settings(&mut self) -> Result<ProviderSettings, String> {
