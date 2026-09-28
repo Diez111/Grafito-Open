@@ -125,6 +125,11 @@ pub const NATIVE_TEMPLATES: &[&str] = &[
     "force-directed",
     "moser-spindle-coloreo",
     "unit-distance",
+    // Ola extra: EoLA 7-9 (`grafito-anim::tpl_extra`, 3) + Laplace 3D (`tpl_3d`, 1).
+    "matriz-inversa-nucleo",
+    "matriz-no-cuadrada",
+    "producto-punto-dualidad",
+    "sup-laplace-3d",
 ];
 
 /// ¿La plantilla tiene renderer nativo propio?
@@ -4152,15 +4157,38 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
         || c.contains("determin")
         || c.contains("gauss")
     {
-        return "universal";
+        // Gaussiana/campana es distribución, no eliminación.
+        if c.contains("gaussiana")
+            || c.contains("campana")
+            || c.contains("distrib")
+            || c.contains("normal")
+        {
+            return "distribuciones";
+        }
+        // Inversas, rectangulares y dualidad tienen renderer propio.
+        if c.contains("inversa") || c.contains("núcleo") || c.contains("nucleo") {
+            return "matriz-inversa-nucleo";
+        }
+        if c.contains("no cuadrada") || c.contains("rectangular") {
+            return "matriz-no-cuadrada";
+        }
+        if c.contains("producto punto") || c.contains("dualidad") {
+            return "producto-punto-dualidad";
+        }
+        return "matriz-transformacion";
     }
     // Genéricas a Taylor. OJO: "fourier" pelado NO se reclama acá: lo
     // resuelve el protocolo hacia su renderer dedicado (degradarlo a
     // taylor era regresión silenciosa).
-    if c.contains("serie")
+    // Calor: ecuación con renderer propio (no derivada 2D).
+    if c.contains("calor") {
+        return "edo-calor-onda";
+    }
+    if (c.contains("serie")
         || c.contains("sucesi")
         || c.contains("geométrica")
-        || c.contains("geometrica")
+        || c.contains("geometrica"))
+        && !c.contains("fourier")
     {
         return "taylor-series";
     }
@@ -4172,6 +4200,10 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
         || contiene_palabra(&c, "sistema")
         || contiene_palabra(&c, "sistemas")
     {
+        // Ecuación diferencial: campo de direcciones propio (no tangente 2D).
+        if c.contains("diferencial") || contiene_palabra(&c, "edo") {
+            return "edo-campo-direcciones";
+        }
         return "derivative-slope";
     }
     if c.contains("trigon")
@@ -4191,6 +4223,13 @@ pub fn detect_template_for_concept(concept: &str) -> &'static str {
         return "conformal-map";
     }
     if c.contains("límite") || c.contains("limite") || c.contains("hueco en a") {
+        // Límite central o épsilon-delta: teoremas propios (no tangente 2D).
+        if c.contains("central") || contiene_palabra(&c, "clt") {
+            return "limite-central";
+        }
+        if c.contains("epsilon") || c.contains("épsilon") || c.contains("delta") {
+            return "epsilon-delta";
+        }
         return "derivative-slope";
     }
     if c.contains("funcion") || c.contains("función") || c.contains("f(x)") {
@@ -6461,6 +6500,10 @@ fn resolve_native_template(template: &str, concept: &str) -> &'static str {
         "force-directed" => "force-directed",
         "moser-spindle-coloreo" => "moser-spindle-coloreo",
         "unit-distance" => "unit-distance",
+        "matriz-inversa-nucleo" => "matriz-inversa-nucleo",
+        "matriz-no-cuadrada" => "matriz-no-cuadrada",
+        "producto-punto-dualidad" => "producto-punto-dualidad",
+        "sup-laplace-3d" => "sup-laplace-3d",
         // F5: templates pedagógicos inline — mapeo a nativos existentes
         "fraccion-visual" => "integral-area",
         "vector-anim" => "conformal-map",
@@ -8066,6 +8109,35 @@ fn ola_set_rgba(
     Some(out)
 }
 
+/// Álgebra lineal extra (EoLA 7-9): raster CPU directo del módulo (3 ids).
+fn render_ola_extra(
+    id: &str,
+    concept: &str,
+    width: u32,
+    height: u32,
+    con_rotulo: bool,
+    on_frame: &mut dyn FnMut(usize, usize),
+) -> Vec<egui::ColorImage> {
+    let ((w, h), _) = resolve_native_size_budgeted(width, height, NATIVE_ANIM_FRAME_COUNT + 1);
+    let w32 = w.min(u32::MAX as usize) as u32;
+    let h32 = h.min(u32::MAX as usize) as u32;
+    // 49 para no cerrar el ciclo: se toman los primeros 48 (`t=g/48`).
+    if let Ok(cuadros) =
+        grafito_anim::tpl_extra::render_extra_frames(id, w32, h32, NATIVE_ANIM_FRAME_COUNT + 1)
+    {
+        let tuplas: Vec<(u32, u32, Vec<u8>)> = cuadros
+            .into_iter()
+            .take(NATIVE_ANIM_FRAME_COUNT)
+            .map(|f| (f.width, f.height, f.pixels))
+            .collect();
+        if let Some(set) = ola_set_rgba(tuplas, w, h) {
+            ola_emitir_progreso(&set, on_frame);
+            return set;
+        }
+    }
+    render_universal_youtube_frames_impl(concept, width, height, con_rotulo, on_frame)
+}
+
 /// Emite el progreso 1..=48 de un set ya armado (caché/hits del dispatcher
 /// hacen lo mismo: el callback nunca altera píxeles).
 fn ola_emitir_progreso(set: &[egui::ColorImage], on_frame: &mut dyn FnMut(usize, usize)) {
@@ -8311,6 +8383,9 @@ fn render_ola_sup(
                         .ok()
                         .and_then(|e| e.perfil_en(muestra.alpha).ok())
                         .and_then(|c| c.puntos.into_iter().next()),
+                    "sup-laplace-3d" => grafito_anim::tpl_3d::Laplace3D::desde_params(&base)
+                        .ok()
+                        .map(|e| e.sonda_en(muestra.alpha)),
                     _ => grafito_anim::tpl_3d::SillaDescenso::desde_params(&base)
                         .ok()
                         .and_then(|e| e.punto_en(muestra.alpha).ok()),
@@ -8888,6 +8963,7 @@ fn es_plantilla_ola(id: &str) -> bool {
         || grafito_anim::tpl_3d::TEMPLATE_IDS.contains(&id)
         || grafito_anim::tpl_4d::TEMPLATE_IDS.contains(&id)
         || grafito_anim::tpl_graphs::TEMPLATE_IDS.contains(&id)
+        || grafito_anim::tpl_extra::TEMPLATE_IDS.contains(&id)
 }
 
 /// Dispatcher único de la ola (los 3 dispatchers históricos delegan acá
@@ -8907,6 +8983,8 @@ fn render_ola_por_id(
         render_ola_4d(id, concept, width, height, con_rotulo, on_frame)
     } else if grafito_anim::tpl_graphs::TEMPLATE_IDS.contains(&id) {
         render_ola_graphs(id, concept, width, height, con_rotulo, on_frame)
+    } else if grafito_anim::tpl_extra::TEMPLATE_IDS.contains(&id) {
+        render_ola_extra(id, concept, width, height, con_rotulo, on_frame)
     } else if grafito_anim::tpl_edo::TEMPLATE_IDS.contains(&id) {
         render_ola_edo(id, concept, width, height, params, on_frame)
     } else if grafito_anim::tpl_chaos::TEMPLATE_IDS.contains(&id) {
@@ -10380,6 +10458,44 @@ mod tests {
             detect_template_for_concept("transformación de Möbius w=(z-c)/(1-cz)"),
             "mobius-transform"
         );
+        // Casos reales reportados: laplace y senoidal caían a `universal`
+        // vacío; matriz/límite/serie-fourier/gaussiana a ramas viejas.
+        assert_eq!(
+            detect_template_for_concept("animación de laplace"),
+            "edo-laplace"
+        );
+        assert_eq!(
+            detect_template_for_concept("haceme una senoidal con un parametro"),
+            "taylor-series"
+        );
+        assert_eq!(
+            detect_template_for_concept("matriz de transformación"),
+            "matriz-transformacion"
+        );
+        assert_eq!(
+            detect_template_for_concept("matriz inversa"),
+            "matriz-inversa-nucleo"
+        );
+        assert_eq!(
+            detect_template_for_concept("teorema del límite central"),
+            "limite-central"
+        );
+        assert_eq!(
+            detect_template_for_concept("serie de fourier"),
+            "fourier"
+        );
+        assert_eq!(
+            detect_template_for_concept("campana de gauss"),
+            "distribuciones"
+        );
+        assert_eq!(
+            detect_template_for_concept("ecuación diferencial"),
+            "edo-campo-direcciones"
+        );
+        assert_eq!(
+            detect_template_for_concept("HACE UNA ANIMACION 3D DE LAPLACE"),
+            "sup-laplace-3d"
+        );
     }
     #[test]
     fn robustness_zero_and_giant_clamp_no_panic_no_oom() {
@@ -11532,8 +11648,8 @@ mod tests {
 
     // ── v3: registro + divergencia honesta ──────────────────────────────
     #[test]
-    fn native_templates_son_65_y_despachan() {
-        assert_eq!(NATIVE_TEMPLATES.len(), 65, "registro canónico = 65");
+    fn native_templates_son_69_y_despachan() {
+        assert_eq!(NATIVE_TEMPLATES.len(), 69, "registro canónico = 69");
         for tmpl in NATIVE_TEMPLATES {
             assert!(is_known_native_template(tmpl), "{tmpl} conocido");
             let f = render_timed(tmpl, 64, 64, || render_anim_by_template(tmpl, 64, 64));
@@ -11569,10 +11685,10 @@ mod tests {
     // ── v4 sync mecánico + dispatch honesto (ANIM-REVIVE) ────────────────
     #[test]
     fn registros_nativo_protocolo_sync_once() {
-        // Nativo y protocolo sincronizados: 65 canónicas en ambos, mismo
-        // orden (las 13 históricas primero, la ola de 52 después).
-        assert_eq!(NATIVE_TEMPLATES.len(), 65);
-        assert_eq!(CANONICAL_TEMPLATES.len(), 65);
+        // Nativo y protocolo sincronizados: 69 canónicas en ambos, mismo
+        // orden (las 13 históricas primero, la ola después).
+        assert_eq!(NATIVE_TEMPLATES.len(), 69);
+        assert_eq!(CANONICAL_TEMPLATES.len(), 69);
         assert_eq!(NATIVE_TEMPLATES, CANONICAL_TEMPLATES);
     }
 
@@ -11592,6 +11708,7 @@ mod tests {
             grafito_anim::tpl_3d::TEMPLATE_IDS,
             grafito_anim::tpl_4d::TEMPLATE_IDS,
             grafito_anim::tpl_graphs::TEMPLATE_IDS,
+            grafito_anim::tpl_extra::TEMPLATE_IDS,
         ] {
             for id in ids {
                 assert!(vistos.insert(*id), "{id} duplicada entre módulos");
@@ -11604,7 +11721,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(vistos.len(), 52, "la ola son 52 ids");
+        assert_eq!(vistos.len(), 56, "la ola son 52 + 3 extra + laplace 3d");
         // Y siguen sin renderer los históricos sin dueño: fallback intacto.
         for tmpl in ["limit-epsilon", "ode-system", "ode", "typo-total"] {
             assert!(!es_plantilla_ola(tmpl), "{tmpl} no es de la ola");

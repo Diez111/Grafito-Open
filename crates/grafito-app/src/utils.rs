@@ -546,6 +546,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn dark_mode_roundtrips_through_json() {
+        // Regresión: el toggle de tema debe persistir (los 3 sitios que
+        // cambian `dark_mode` llaman `save_app_config`, que serializa esto).
+        let config = AppConfig {
+            dark_mode: true,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"dark_mode\":true"), "dark_mode se serializa");
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(back.dark_mode, "dark_mode sobrevive al roundtrip");
+    }
+
+    #[test]
     fn legacy_configuration_defaults_assistant_preferences() {
         let config: AppConfig =
             serde_json::from_str(r#"{"dark_mode":false,"show_grid":true,"snap_to_grid":false}"#)

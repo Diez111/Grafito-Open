@@ -357,6 +357,7 @@ fn draw_view_menu(ui: &mut egui::Ui, app: &mut GrafitoApp) {
             } else {
                 LIGHT.apply(ui.ctx());
             }
+            app.save_app_config();
             ui.close_menu();
         }
         // G snap como `shortcut_text` real (handler en `shortcuts.rs:146`).
@@ -836,6 +837,7 @@ pub(crate) fn draw_top_bar(
                             } else {
                                 LIGHT.apply(ui.ctx());
                             }
+                            app.save_app_config();
                         }
                     }
                     // Configuración — ventana única (Asistente + Perfil + preview persistente)

@@ -103,7 +103,7 @@
 //!
 //! Sin `unwrap`/`expect` en producción (`unwrap_used = deny`).
 
-use crate::anims::{Animation, Scratch};
+use crate::anims::{smooth, Animation, Scratch};
 use crate::player::{centroide_de, PlacedMobject, PLAYER_MAX_FRAMES};
 use crate::protocol::{scene_param, SCENE_PARAM_TERMS};
 use crate::scene::{
@@ -1156,7 +1156,10 @@ pub fn escena_para(
         "edo-laplace" => {
             let terms = params.terminos()?;
             let m = params.muestras()?;
-            let s_estrella = params.s_estrella()?;
+            // Barrido en s: la sonda viaja 0.5→3.0 con el clip (antes s*
+            // fijo de params y la escena solo se revelaba por prefijo:
+            // a mitad de clip parecía congelada).
+            let s_estrella = 0.5 + smooth(a) * 2.5;
             let mut out = Vec::with_capacity(terms + 3);
             for j in 0..terms {
                 let s = 0.5 * (j as f64 + 1.0);
@@ -1423,6 +1426,29 @@ mod edo_tests {
             assert!(par[1][1] <= par[0][1], "1/s decrece");
         }
         assert!(curva_laplace(2.0, 1.0, 8).is_err());
+    }
+
+    #[test]
+    fn laplace_sonda_barre_con_alpha() {
+        // La sonda s* viaja 0.5→3.0 con el clip (antes fija: la escena
+        // parecía congelada). Se verifica por el Dot sobre F(s).
+        let base = EdoParams::por_defecto("edo-laplace");
+        let mut scratch = Scratch::nuevo();
+        let mut punto = |alpha: f64| {
+            let d = debe(escena_para("edo-laplace", &base, alpha, &mut scratch));
+            d.iter()
+                .filter_map(|o| match o.mobject {
+                    Mobject::Dot { x, y } => Some((x, y)),
+                    _ => None,
+                })
+                .next()
+        };
+        let (x0, y0) = punto(0.0).expect("dot en alpha 0");
+        let (x1, y1) = punto(1.0).expect("dot en alpha 1");
+        assert!((x0 - 0.5).abs() < 1e-9, "arranca en s=0.5, fue {x0}");
+        assert!((x1 - 3.0).abs() < 1e-9, "termina en s=3.0, fue {x1}");
+        assert!((y0 - 2.0).abs() < 0.05, "F(0.5)≈2, fue {y0}");
+        assert!((y1 - 1.0 / 3.0).abs() < 0.05, "F(3)≈1/3, fue {y1}");
     }
 
     #[test]

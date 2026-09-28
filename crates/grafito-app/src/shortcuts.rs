@@ -207,6 +207,7 @@ impl GrafitoApp {
                 } else {
                     LIGHT.apply(ctx);
                 }
+                self.save_app_config();
             }
             // Ctrl+P / Ctrl+E: Lápiz y Borrador (etiquetas de toolbar.rs GROUP_PENCIL/GROUP_ERASER).
             if ctx.input(|i| i.key_pressed(Key::P) && i.modifiers.ctrl && !i.modifiers.shift) {
