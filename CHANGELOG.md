@@ -9,6 +9,30 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 > a la renumeración; la versión vigente es `1.2.0` (fuente de verdad: `Cargo.toml`,
 > tag `v1.2.0` y artefactos en `dist/`).
 
+## [1.3.0] - 2026-09-28
+
+#### Agregado
+- **Asistente directo para graficar**: `haceme un seno`, `graficá x^2`,
+  `graficame un seno`, `senoidal` y funciones complejas (`DomainColoring`,
+  ej `graficá z^2`) resuelven en local con botón Aplicar, sin preguntas.
+  Sin función compleja nombrada se propone la canónica `1/z` declarada.
+- **Loop agéntico con reintento automático**: si la IA propone sintaxis
+  inválida, reintenta sola hasta salida válida, tope 3 intentos totales,
+  acumulando los errores de todos los intentos para no repetirlos.
+- **Animación IA robusta**: el SPEC sanea prosa pegada (`"x^2", punto
+  móvil...` → `x^2`); el extractor corta comillas internas; el prompt exige
+  fórmula pelada. SPEC inválido sin función propia cae a la canónica con
+  aviso (con función explícita se mantiene el error honesto).
+- **Transporte tolerante**: si la respuesta trae texto + `tool_calls` se usa
+  el texto en vez de tarjeta de error; el prompt prohibe `tool_calls`.
+
+#### Cambiado
+- **Header del asistente sin solape** (`tokenLimpiar`): Limpiar es icono,
+  títulos y contador truncan en panel angosto.
+- **Defaults**: tutor socrático apagado (respuestas directas) y modo agente
+  (herramientas y actividad) prendido.
+- Respuestas de graficación local en español.
+
 ## [Unreleased]
 
 #### Agregado
@@ -893,6 +917,7 @@ y este proyecto adhiere a [Semantic Versioning](https://semver.org/lang/es/spec/
 [1.2.4-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.4-beta
 [1.2.3-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.2.3-beta
 [1.2.1-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.1-beta
+[1.3.0]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.3.0
 [1.2.0-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.2.0-beta
 [1.1.4-beta]: https://github.com/Diez111/Grafito-Open/releases/tag/v1.1.4-beta
 [1.0.0-beta]: https://github.com/Diez111/Grafito/releases/tag/v1.0.0-beta
