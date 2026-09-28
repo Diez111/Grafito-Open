@@ -544,7 +544,7 @@ fn chat_completions_rejects_non_final_or_non_displayable_content_without_echoing
     assert_eq!(truncated, "provider-private-partial");
 
     let tool_call = chat_completion_result(
-        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"provider-private-tool","tool_calls":[]}}]}"#,
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"","tool_calls":[]}}]}"#,
     )
     .unwrap_err();
     assert_eq!(
@@ -552,6 +552,18 @@ fn chat_completions_rejects_non_final_or_non_displayable_content_without_echoing
         "remote assistant response content is not displayable: tool or function calls are not displayable final content"
     );
     assert!(!tool_call.contains("provider-private-tool"));
+}
+
+#[test]
+fn chat_completions_usa_el_texto_aunque_vengan_tool_calls() {
+    // El modelo a veces combina texto + tool_calls: el texto usable se
+    // conserva en vez de matar el turno con "not displayable".
+    let _serial = rate_limit_test_guard();
+    let text = chat_completion_result(
+        r#"{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"mirá este gráfico","tool_calls":[]}}]}"#,
+    )
+    .unwrap();
+    assert_eq!(text, "mirá este gráfico");
 }
 
 #[test]

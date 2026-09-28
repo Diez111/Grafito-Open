@@ -30,6 +30,7 @@ grafito-plugins = { path = "crates/grafito-plugins" }
 grafito-profile = { path = "crates/grafito-profile" }
 grafito-core = { path = "crates/grafito-core" }
 grafito-command = { path = "crates/grafito-command" }
+grafito-complex = { path = "crates/grafito-complex" }
 grafito-geometry = { path = "crates/grafito-geometry" }
 grafito-lab = { path = "crates/grafito-lab" }
 grafito-render = { path = "crates/grafito-render" }

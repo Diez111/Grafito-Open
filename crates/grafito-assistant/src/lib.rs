@@ -251,7 +251,7 @@ pub const REMOTE_SLOW_STAGE_SECS: u64 = 10;
 const NO_NETWORK_MESSAGE: &str =
     "assistant network support is disabled in this build (feature assistant-net is off)";
 const GRAFITO_CAPABILITY_SCOPE: &str = "Grafito is a broad dynamic-mathematics environment, not only a y=f(x) plotter. Consider geometric construction; real, parametric, polar and implicit curves; contours and vector fields; a full symbolic CAS (Derivative, Integral, Limit, TaylorSeries, Solve, Factor, Expand) and numeric analysis (roots, extrema, inflection, intercepts, tangent, arc length, curvature); statistics and regression; complex mappings and domain coloring; fractals; 3D solids, curves, surfaces and fields; dynamical systems and attractors; and CPU-projected 4D objects. The local engine solves many requests without a network: arithmetic, equations, graph proposals, and symbolic derivadas/integrales/límites. When the user asks for Taylor/Integral/Derivative without specifying a function, reuse the most recent Function from the document context instead of defaulting to sin(x). Match the user's goal to the most useful area and mention relevant built-in perspectives. The per-request tool catalog remains authoritative for actionable syntax: use a catalogued command only when it fits, and describe the suitable Grafito workflow instead of inventing a command when it is not catalogued.";
-const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; when the user names a classic function without parameters (seno/sine, coseno/cosine), assume sin(x)/cos(x) with defaults and propose it directly instead of asking; do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
+const REMOTE_SYSTEM_PROMPT: &str = "Assist with Grafito math. Use the focused object when one is supplied, otherwise use the most recent Function in the document context for Taylor/Integral/Derivative when the user does not specify one (do not default to sin(x) if x^2 is visible). Ask one concise clarifying question only when a required mathematical value or a target object is genuinely unknown; when the user names a classic function without parameters (seno/sine, coseno/cosine), assume sin(x)/cos(x) with defaults and propose it directly instead of asking; never emit tool_calls or function_call (plain text with fenced ```grafito blocks only); do not ask for confirmation when the request already supplies a graphable expression and valid defaults exist. Format mathematical answers in concise Markdown: use pipe tables for tabular values and LaTex delimiters $...$ or $$...$$ for equations. The user prompt can include a bounded catalog of locally verified Grafito graph commands and the full document context (visible objects). When the catalog contains suitable choices, offer one to four independently useful fenced ```grafito commands, each on exactly one line and using only a catalogued command with every required literal known. When a graph needs a numeric parameter, emit its separate assignment in a one-line ```grafito-param block using an ASCII identifier and a finite numeric literal, for example `a = 2.5`; do not place it inside the graph command. For a requested 3D flower, emit exactly one ```grafito-scene block with seven lines: one Cylinder[x,y,z,radius,height] stem, one Sphere[x,y,z,radius] center, and five Surface3D[(x(u,v),y(u,v),z(u,v)),umin,umax,vmin,vmax] petals. Keep the stem vertical on Y, put the center at the stem top, and make every petal share that center height in its second Surface3D component. These commands may create 2D, 3D, or CPU-projected 4D graphs; Grafito opens the required view only after the user explicitly applies a card. Never invent a command, placeholder object label, or target-dependent construction. Use lowercase expression functions with parentheses, for example sin(x), cos(t), and sqrt(x). Prefer Function[expr] for a real y=f(x), DomainColoring for phase and modulus of f(z), and Surface3D for a real surface. Do not claim a command ran: Grafito preflights it locally and the user explicitly chooses whether to apply it. Never emit file, shell, network, save, export, delete, import, or Script commands.";
 /// Delimitadores del contenido NO confiable (documento/web) que viaja en el
 /// prompt de usuario: el modelo debe tratarlo como dato, jamás como órdenes.
 const UNTRUSTED_DATA_OPEN: &str = "<datos_no_confiables>
@@ -305,6 +305,8 @@ pub fn solve_local(request: &AssistantRequest) -> AssistantResponse {
             unsupported("Paste an arithmetic problem, a one-variable equation, or a graph request.")
         } else if let Some(response) = solve_local_cas(problem, &request.budget) {
             response
+        } else if let Some((expression, defaulted)) = parse_complex_graph_request(problem) {
+            solve_complex_graph_request(request, &expression, defaulted)
         } else if let Some(expression) = parse_graph_request(problem) {
             solve_graph_request(request, &expression)
         } else if problem.contains('=') {
@@ -897,19 +899,19 @@ fn solve_graph_request(request: &AssistantRequest, expression: &str) -> Assistan
             domain_max: 10.0,
         }],
     );
-    plan.summary = format!("Preview graph y = {expression}");
+    plan.summary = format!("Vista previa del gráfico y = {expression}");
     AssistantResponse {
         schema_version: grafito_assistant_types::ASSISTANT_SCHEMA_VERSION,
         status: LocalAssistantStatus::Solved,
         answer: format!(
-            "Prepared a safe preview for y = {expression}. Apply it only after reviewing the diff."
+            "Te preparé una vista previa de y = {expression}. Revisá el diff y tocá Aplicar."
         ),
         derivation: vec![DerivationStep {
             before: expression.to_string(),
             after: format!("y = {expression}, -10 <= x <= 10"),
-            rule: "Recognize a graphing request".into(),
-            verification:
-                "The expression evaluated to a finite value at at least one bounded sample.".into(),
+            rule: "Reconocer un pedido de graficación".into(),
+            verification: "La expresión dio un valor finito en al menos una muestra acotada."
+                .into(),
         }],
         plan: Some(plan),
     }
@@ -1060,6 +1062,113 @@ fn palabra_exacta(haystack: &str, palabra: &str) -> bool {
         start = abs + palabra.len();
     }
     false
+}
+
+/// Canónica compleja cuando el pedido no nombra función (`1/z`, la misma de
+/// los ejemplos del catálogo).
+const COMPLEX_DEFAULT_EXPR: &str = "1/z";
+
+/// Pedido de gráfico complejo (`DomainColoring`): devuelve `(expresión,
+/// es_default)`. Directo y honesto: con mención explícita (`compleja`,
+/// `dcolor`) o verbo gráfico + token con `z` (`graficá 1/z`) propone sin
+/// preguntar; sin función nombra la canónica `1/z` declarada en la prosa.
+/// Sin nada graficable devuelve `None` (jamás inventa otra cosa).
+fn parse_complex_graph_request(problem: &str) -> Option<(String, bool)> {
+    let trimmed = problem.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let norm = normaliza_pedido_grafico(&trimmed.to_lowercase());
+    let menciona_complejo = norm.contains("complej")
+        || norm.contains("complex")
+        || norm.contains("dcolor")
+        || norm.contains("domaincoloring");
+    if !menciona_complejo {
+        // Vía corta sin la palabra: verbo gráfico + token con `z`, sin `x`
+        // real (`graficá 1/z`). Con `x` manda la vía real (`graficá x^2`).
+        let hay_verbo = [
+            "grafic", "graf", "graph", "plot", "dibuj", "mostr", "visualiz", "dame", "quiero",
+            "haceme", "hace",
+        ]
+        .iter()
+        .any(|verbo| norm.contains(verbo));
+        if !hay_verbo || palabra_exacta(&norm, "x") {
+            return None;
+        }
+    }
+    if let Some(token) = token_complejo(&norm) {
+        return Some((token, false));
+    }
+    menciona_complejo.then(|| (COMPLEX_DEFAULT_EXPR.to_string(), true))
+}
+
+/// Primer token con `z` que parsea Y evalúa solo con `z`
+/// (`1/z`, `z^2`, `sin(z)`). Basura como `zebra` (variable libre) se
+/// descarta acá con una evaluación de prueba, no en Aplicar.
+fn token_complejo(norm: &str) -> Option<String> {
+    for crudo in norm.split_whitespace() {
+        let token = crudo.trim_matches([
+            ',', '.', ';', ':', '(', ')', '[', ']', '"', '\'', '¡', '!', '¿', '?',
+        ]);
+        if token.len() > 64
+            || !token.contains('z')
+            || !token.chars().all(|c| {
+                c.is_ascii_alphanumeric()
+                    || matches!(c, '+' | '-' | '*' | '/' | '^' | '(' | ')' | '.' | ' ')
+            })
+        {
+            continue;
+        }
+        let compacto: String = token.chars().filter(|c| !c.is_whitespace()).collect();
+        let Ok(expresion) = grafito_complex::complex_expr::parse(&compacto) else {
+            continue;
+        };
+        let mut vars = std::collections::HashMap::new();
+        vars.insert("z".to_string(), num_complex::Complex64::new(1.0, 1.0));
+        if expresion.eval(&vars).is_ok_and(|valor| valor.is_finite()) {
+            return Some(compacto);
+        }
+    }
+    None
+}
+
+fn solve_complex_graph_request(
+    request: &AssistantRequest,
+    expression: &str,
+    defaulted: bool,
+) -> AssistantResponse {
+    // `RunCommand` allowlisted (bridge lo valida al stagear): el botón
+    // Aplicar llega igual que en la vía real.
+    let comando = format!("DomainColoring[{expression}, -2, 2, -2, 2, 200]");
+    let mut plan = ProposedPlan::new(
+        request.context.basis(),
+        vec![AssistantOperation::RunCommand {
+            texto: comando.clone(),
+        }],
+    );
+    plan.summary = format!("DomainColoring de {expression} en el plano [-2, 2]");
+    let answer = if defaulted {
+        format!(
+            "Te preparé DomainColoring de {expression} (default; no nombraste función). Revisá el diff y tocá Aplicar — o pedime otra, ej: graficá z^2."
+        )
+    } else {
+        format!(
+            "Te preparé DomainColoring de {expression} en [-2, 2]. Revisá el diff y tocá Aplicar."
+        )
+    };
+    AssistantResponse {
+        schema_version: grafito_assistant_types::ASSISTANT_SCHEMA_VERSION,
+        status: LocalAssistantStatus::Solved,
+        answer,
+        derivation: vec![DerivationStep {
+            before: expression.to_string(),
+            after: comando,
+            rule: "Reconocer un pedido de graficación compleja".into(),
+            verification:
+                "La expresión parsea como función compleja y el comando está allowlisted.".into(),
+        }],
+        plan: Some(plan),
+    }
 }
 
 fn evaluate_with_context(
@@ -4632,22 +4741,37 @@ fn chat_completion_text(body: &Value) -> Result<(String, bool), String> {
             "first choice message must have the assistant role",
         ));
     }
-    if message.contains_key("tool_calls") || message.contains_key("function_call") {
-        return Err(response_content_error(
-            "tool or function calls are not displayable final content",
-        ));
+    // Tolerancia: si hay texto usable se usa aunque vengan `tool_calls`
+    // (algunos modelos combinan ambos; antes se descartaba todo con "not
+    // displayable" y el turno moría en tarjeta de error). Solo sin texto
+    // sigue el error honesto.
+    let tiene_tools = message.contains_key("tool_calls") || message.contains_key("function_call");
+    let content = message.get("content");
+    let texto: Option<String> = match content {
+        None => None,
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Array(blocks)) => Some(chat_completion_text_blocks(blocks)?),
+        Some(_) => {
+            return Err(response_content_error(
+                "content must be a text string or an array of text blocks",
+            ));
+        }
+    };
+    match texto {
+        Some(texto) if !texto.trim().is_empty() => Ok((texto, truncated)),
+        _ => {
+            if tiene_tools {
+                return Err(response_content_error(
+                    "tool or function calls are not displayable final content",
+                ));
+            }
+            match content {
+                None => Err(response_content_error("a text content field is required")),
+                // Texto vacío como antes: lo decide el llamante (turno vacío honesto).
+                Some(_) => Ok((texto.unwrap_or_default(), truncated)),
+            }
+        }
     }
-    let content = message
-        .get("content")
-        .ok_or_else(|| response_content_error("a text content field is required"))?;
-    let text = match content {
-        Value::String(text) => Ok(text.clone()),
-        Value::Array(blocks) => chat_completion_text_blocks(blocks),
-        _ => Err(response_content_error(
-            "content must be a text string or an array of text blocks",
-        )),
-    }?;
-    Ok((text, truncated))
 }
 
 fn anthropic_completion_text(body: &Value) -> Result<(String, bool), String> {
@@ -5593,6 +5717,57 @@ mod tests {
     fn graph_request_no_confunde_cosas_con_cos() {
         // `cosas` contiene `cos` pero no es función: honesto, sin inventar.
         assert_eq!(parse_graph_request("graficame unas cosas"), None);
+    }
+
+    #[test]
+    fn complex_request_sin_funcion_propone_canonica_declarada() {
+        // Queja real: "funcion de numeros complejos" moría en tarjeta de
+        // error. Modo directo: DomainColoring de 1/z con Aplicar.
+        assert_eq!(
+            parse_complex_graph_request("haceme un grafico de una funcion de numeros complejos"),
+            Some(("1/z".to_string(), true))
+        );
+        let response = solve_local(&request(
+            "haceme un grafico de una funcion de numeros complejos",
+        ));
+        assert_eq!(response.status, LocalAssistantStatus::Solved);
+        let plan = response.plan.expect("hay propuesta");
+        assert!(matches!(
+            &plan.operations[..],
+            [AssistantOperation::RunCommand { texto }]
+                if texto == "DomainColoring[1/z, -2, 2, -2, 2, 200]"
+        ));
+        assert!(response.answer.contains("1/z"));
+    }
+
+    #[test]
+    fn complex_request_con_expresion_usa_la_pedida() {
+        assert_eq!(
+            parse_complex_graph_request("graficá la función compleja 1/z"),
+            Some(("1/z".to_string(), false))
+        );
+        assert_eq!(
+            parse_complex_graph_request("graficá z^2"),
+            Some(("z^2".to_string(), false))
+        );
+        // Con `x` real manda la vía real, no la compleja.
+        assert_eq!(parse_complex_graph_request("graficá x^2"), None);
+        // Basura con z (`zebra`) no se propone: cae a la canónica declarada.
+        assert_eq!(
+            parse_complex_graph_request("graficá zebra compleja"),
+            Some(("1/z".to_string(), true))
+        );
+    }
+
+    #[test]
+    fn complex_request_stagea_en_documento_vacio() {
+        // El plan local pasa el staging (allowlist): el botón Aplicar llega.
+        let documento = grafito_core::Document::new();
+        let pedido =
+            crate::harness::local_request(&documento, "haceme un grafico de una funcion compleja");
+        let resultado = crate::harness::request(&documento, &pedido).expect("stagea sin mutar");
+        assert_eq!(resultado.response.status, LocalAssistantStatus::Solved);
+        assert!(resultado.staged_plan.is_some());
     }
 
     #[test]
