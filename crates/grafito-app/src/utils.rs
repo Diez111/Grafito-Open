@@ -42,7 +42,7 @@ pub(crate) struct AppConfig {
     #[serde(default = "default_full_permission")]
     pub(crate) assistant_full_permission: bool,
     /// Modo agente (loop con herramientas) para el asistente.
-    #[serde(default)]
+    #[serde(default = "default_agent_mode")]
     pub(crate) assistant_agent_mode: bool,
     /// Modo razonador: pide esfuerzo de razonamiento al proveedor.
     #[serde(default)]
@@ -51,7 +51,7 @@ pub(crate) struct AppConfig {
     #[serde(default)]
     pub(crate) assistant_web_search_enabled: bool,
     /// Tutor socrático: repreguntas y repair antes de la solución directa.
-    /// Apagado = respuestas directas. Default true (pedagogía del producto).
+    /// Apagado = respuestas directas. Default false (directo por defecto).
     #[serde(default = "default_socratic_enabled")]
     pub(crate) assistant_socratic_enabled: bool,
     /// Onboarding 30s ya visto (Scandinavian, sin laberinto).
@@ -71,6 +71,10 @@ fn default_full_permission() -> bool {
 }
 
 const fn default_socratic_enabled() -> bool {
+    false
+}
+
+const fn default_agent_mode() -> bool {
     true
 }
 
@@ -224,7 +228,7 @@ impl Default for AppConfig {
             enabled_plugins: Vec::new(),
             disabled_plugins: Vec::new(),
             assistant_full_permission: default_full_permission(),
-            assistant_agent_mode: false,
+            assistant_agent_mode: default_agent_mode(),
             assistant_reasoning_enabled: false,
             assistant_web_search_enabled: false,
             assistant_socratic_enabled: default_socratic_enabled(),

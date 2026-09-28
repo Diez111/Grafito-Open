@@ -3252,10 +3252,11 @@ mod tests {
 
     #[test]
     fn tutor_encendido_repara_pedido_exploratorio_con_math() {
-        // Con el tutor activo (default), un pedido exploratorio genérico cuya
-        // respuesta trae matemática sí se convierte en repregunta.
+        // Con el tutor activo (explícito; el default es apagado), un pedido
+        // exploratorio genérico cuya respuesta trae matemática sí se convierte
+        // en repregunta.
         with_test_ctx_notify(|ctx, egui_ctx, avisos| {
-            assert!(ctx.panel.socratic_enabled, "default encendido");
+            ctx.panel.socratic_enabled = true;
             let launch = grafito_command::assistant_context::document_context(ctx.document);
             let (tx, rx) = sync_channel(1);
             let mut job = remote_job_with_context(&launch, rx);

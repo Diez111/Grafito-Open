@@ -2038,7 +2038,7 @@ impl Default for AssistantPanelState {
             next_turn_id: 0,
             reasoning_enabled: false,
             web_search_enabled: false,
-            socratic_enabled: true,
+            socratic_enabled: false,
             is_pending: false,
             pending_remote_authorization: None,
             pending_clarification: None,
@@ -9690,19 +9690,28 @@ fn draw_assistant_header(
                         t("assistant.header.greeting", locale)
                             .replace("{name}", state.user_name.trim())
                     };
-                    ui.label(
-                        egui::RichText::new(greeting)
-                            .color(theme.text_primary)
-                            .size(crate::tokens::TYPE_BASE)
-                            .strong(),
-                    );
-                    ui.label(
-                        egui::RichText::new(
-                            t("assistant.header.subtitle", locale)
-                                .replace("{assistant_name}", &assistant_name),
+                    // Truncado: en panel angosto (300px) el título cede lugar
+                    // a tokens + controles en vez de empujarlos (ver fix
+                    // superposición "tokenLimpiar").
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(greeting)
+                                .color(theme.text_primary)
+                                .size(crate::tokens::TYPE_BASE)
+                                .strong(),
                         )
-                        .color(Theme::dimmed_text(theme.text_secondary, 0.60))
-                        .size(crate::tokens::TYPE_XS),
+                        .truncate(),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                t("assistant.header.subtitle", locale)
+                                    .replace("{assistant_name}", &assistant_name),
+                            )
+                            .color(Theme::dimmed_text(theme.text_secondary, 0.60))
+                            .size(crate::tokens::TYPE_XS),
+                        )
+                        .truncate(),
                     );
                 });
                 // Consumo acumulado de la sesión (sólo si el proveedor
@@ -9710,15 +9719,19 @@ fn draw_assistant_header(
                 let session_tokens = state.session_token_total();
                 if session_tokens > 0 {
                     ui.add_space(crate::tokens::SPACE_SM);
-                    ui.label(
-                        egui::RichText::new(
-                            t("assistant.header.tokens", locale)
-                                .replace("{n}", &format_token_count(session_tokens)),
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(
+                                t("assistant.header.tokens", locale)
+                                    .replace("{n}", &format_token_count(session_tokens)),
+                            )
+                            .color(theme.text_tertiary)
+                            .size(crate::tokens::TYPE_XS),
                         )
-                        .color(theme.text_tertiary)
-                        .size(crate::tokens::TYPE_XS),
+                        .truncate(),
                     )
                     .on_hover_text(t("assistant.header.tokens_hint", locale));
+                    ui.add_space(crate::tokens::SPACE_XS);
                 }
                 // Centro flexible para empujar controles a la derecha
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -9732,16 +9745,18 @@ fn draw_assistant_header(
                     {
                         action = Some(AssistantUiAction::HidePanel);
                     }
+                    // Icono en vez de pill de texto: en panel angosto el
+                    // pill "Limpiar" se soldaba al contador ("tokenLimpiar").
                     let can_clear = !state.is_pending && !state.conversation.is_empty();
                     ui.add_enabled_ui(can_clear, |ui| {
-                        let btn = egui::Button::new(
-                            egui::RichText::new(t("assistant.header.clear", locale))
-                                .size(crate::tokens::TYPE_XS),
+                        if action_icon_button(
+                            ui,
+                            Icon::Delete,
+                            theme.text_secondary,
+                            t("assistant.header.clear", locale),
                         )
-                        .rounding(crate::tokens::RADIUS_PILL)
-                        .fill(theme.button_bg.gamma_multiply(0.0))
-                        .stroke(theme.hairline_stroke());
-                        if ui.add(btn).clicked() {
+                        .clicked()
+                        {
                             action = Some(AssistantUiAction::ClearConversation);
                         }
                     });
