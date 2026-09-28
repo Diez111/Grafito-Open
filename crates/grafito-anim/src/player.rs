@@ -34,7 +34,7 @@
 //!
 //! Presupuesto propio del set jugado (2026-09): [`PLAYER_MAX_TOTAL_BYTES`]
 //! 64 MiB LÓGICOS estimados ([`estimate_placed_bytes`]) enforceados durante
-//! el compuesto ([`empuja_frame`]): `try_play` devuelve `Err` honesto y
+//! el compuesto (empuje acotado privado de frames): `try_play` devuelve `Err` honesto y
 //! `play` corta el armado con lo ya jugado. Antes el peor caso compuesto
 //! (96 frames × 32 capas × 4096 pts) clonaba la escena base CADA frame y
 //! acumulaba ~192 MB sin chequeo real.

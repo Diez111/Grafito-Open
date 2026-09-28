@@ -540,7 +540,7 @@ fn load_plugin(
 ///
 /// El límite de bytes del texto completo y el de entradas por sección evitan
 /// que un `grafito-plugin.toml` hostil agote memoria en el arranque. La
-/// lectura de disco va acotada por separado en [`read_manifest_bounded`].
+/// lectura de disco va acotada por separado en la función privada de este módulo.
 pub fn parse_manifest(raw: &str) -> Result<PluginManifest, String> {
     if raw.len() > MAX_MANIFEST_BYTES {
         return Err(format!(

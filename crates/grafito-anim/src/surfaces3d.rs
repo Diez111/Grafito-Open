@@ -1,12 +1,12 @@
 //! Superficies 3D CPU/offline (nivel 3Blue1Brown, espejo de `ThreeDScene`).
 //!
-//! - [`Surface3D`]: mallas paramétricas `(u, v) -> [x, y, z]` con normales
+//! - [`surfaces3d::Surface3D`]: mallas paramétricas `(u, v) -> [x, y, z]` con normales
 //!   por diferencias centrales, constructores (`esfera`, `plano`, `toro`) y
-//!   salida sólida ([`Surface3D::solido`], sombreado Lambert a doble cara
-//!   con luz direccional) o wireframe ([`Surface3D::alambre`]).
-//! - [`Curva3D`]: `traza_en` 3D (espejo de Manim `TracedPath`) con
-//!   [`Curva3D::proyecta`] que corta el trazo donde cae detrás de la cámara.
-//! - [`Ejes3D`]: ejes con ticks y [`Ejes3D::etiquetas`] posicionadas por
+//!   salida sólida ([`surfaces3d::Surface3D::solido`], sombreado Lambert a doble cara
+//!   con luz direccional) o wireframe ([`surfaces3d::Surface3D::alambre`]).
+//! - [`surfaces3d::Curva3D`]: `traza_en` 3D (espejo de Manim `TracedPath`) con
+//!   [`surfaces3d::Curva3D::proyecta`] que corta el trazo donde cae detrás de la cámara.
+//! - [`surfaces3d::Ejes3D`]: ejes con ticks y [`surfaces3d::Ejes3D::etiquetas`] posicionadas por
 //!   [`Camera::project_3d`].
 //! - Orden por profundidad = painter's algorithm `O(n log n)` (`sort` por
 //!   [`Camera::depth_of`], lejos→cerca): espejo CONCEPTUAL del

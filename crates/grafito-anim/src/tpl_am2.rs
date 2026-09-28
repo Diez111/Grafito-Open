@@ -502,7 +502,7 @@ impl Descenso {
     /// el muestreo).
     pub fn try_new(x0: f64, y0: f64, lr: f64, pasos: usize) -> Result<Self, Am2Error> {
         let inicio = valida_punto(x0, y0)?;
-        if !lr.is_finite() || !(0.0 < lr && lr <= 0.4) {
+        if !(lr.is_finite() && 0.0 < lr && lr <= 0.4) {
             return Err(Am2Error::TasaInvalida(lr));
         }
         valida_conteo("descenso.pasos", pasos, AM2_TOPE_PASOS)?;
@@ -844,7 +844,7 @@ pub struct GreenStokes {
 impl GreenStokes {
     /// Constructor validado (`r` en `(0, 3]`).
     pub fn try_new(r: f64) -> Result<Self, Am2Error> {
-        if !r.is_finite() || !(0.0 < r && r <= AM2_VENTANA) {
+        if !(r.is_finite() && 0.0 < r && r <= AM2_VENTANA) {
             return Err(Am2Error::RadioInvalido(r));
         }
         Ok(Self { r })

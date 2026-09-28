@@ -48,7 +48,7 @@
 //! | Términos/armónicos/núcleos | 1..=16 ([`EDO_MAX_TERMINOS`]) | `terms` vivo |
 //! | Retícula del campo | 1..=64 por lado | `MAX_FIELD_DIVISIONS` |
 //! | Muestras de trazo/curva | 2..=512 ([`EDO_MAX_MUESTRAS`]) | `SCENE_MORPH_MAX_SAMPLES` |
-//! | Puntos por polilínea | ≤4096 (chequeado en [`valida_trazo`]) | `MAX_MOBJECT_POINTS` |
+//! | Puntos por polilínea | ≤4096 (chequeado en validación privada de trazo) | `MAX_MOBJECT_POINTS` |
 //! | Grilla calor/onda | `nx` 2..=128, `nt` 1..=48, `nx·nt` ≤ 6144 | player 48 frames |
 //! | Wire | cada polilínea ≤512 pts (~10 KiB JSON ≪ 64 KiB) | `line_cap` 64 KiB, `MAX_TEX_SVG_BYTES` |
 //!
@@ -704,7 +704,7 @@ pub fn malla_tau(t_max: f64, muestras: usize) -> SceneResult<Vec<f64>> {
 /// Formas cerradas (pineadas por test): `t ∈ [0,2] → 1-e^{-t}`,
 /// `t ≥ 2 → e^{-(t-2)}-e^{-t}`, `h(0) = 0`.
 pub fn convolucion_en(t: f64, muestras: usize) -> SceneResult<f64> {
-    if !t.is_finite() || t < 0.0 || t > 8.0 {
+    if !t.is_finite() || !(0.0..=8.0).contains(&t) {
         return Err(SceneError::MobjectInvalido {
             donde: "convolucion_en",
             detalle: format!("t {t} fuera de 0..=8"),
@@ -778,7 +778,7 @@ pub fn laplace_producto(t: f64, s: f64) -> f64 {
 /// `F(s)` por trapecios en `[0, 20]` con 512 pasos fijos (con `f = 1` da
 /// `1/s` con error < 5e-3 en `s ≥ 0.1`; la cola vale `e^{-20s}/s`).
 pub fn laplace_en(s: f64) -> SceneResult<f64> {
-    if !s.is_finite() || s < 0.1 || s > 10.0 {
+    if !s.is_finite() || !(0.1..=10.0).contains(&s) {
         return Err(SceneError::MobjectInvalido {
             donde: "laplace_en",
             detalle: format!("s {s} fuera de 0.1..=10"),

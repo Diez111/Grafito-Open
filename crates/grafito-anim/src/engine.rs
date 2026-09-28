@@ -1175,8 +1175,8 @@ pub const MAX_DIAGNOSTIC_LINES: usize = 64;
 ///
 /// Espeja en chico el `line_cap` del stdout: el stderr de un worker hostil
 /// con 64 líneas de 100 MB ya no retiene 6 GB sino 64×2 KiB = 128 KiB.
-/// [`push_diagnostic_line`] trunca acá (punto único de inserción, puro y
-/// testeable); el drenador además lee por chunks para no materializar la
+/// La inserción trunca acá (punto único, puro y testeable); el drenador
+/// además lee por chunks para no materializar la
 /// línea gigante ni siquiera en tránsito.
 pub const MAX_DIAGNOSTIC_LINE_BYTES: usize = 2048;
 

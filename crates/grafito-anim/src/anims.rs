@@ -31,8 +31,8 @@
 //!   con desplazamiento (Manim `FadeIn` con `shift`).
 //!
 //! Presupuestos (paridad con el resto del crate): frames por anim 1..=48
-//! ([`PLAYER_MAX_FRAMES`]), total compuesto ≤96
-//! ([`PLAYER_MAX_TOTAL_FRAMES`]), sub-anims 1..=32 (paridad
+//! ([`crate::player::PLAYER_MAX_FRAMES`]), total compuesto ≤96
+//! ([`crate::player::PLAYER_MAX_TOTAL_FRAMES`]), sub-anims 1..=32 (paridad
 //! `MAX_GROUP_CHILDREN`), puntos por polilínea 1..=4096
 //! (`MAX_MOBJECT_POINTS`), remuestreo 2..=512, `run` 100..=60000 ms.
 

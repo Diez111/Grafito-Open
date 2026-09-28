@@ -527,8 +527,7 @@ fn item_for_branch(branch: &str, idx: usize) -> (String, String, f64, &'static s
 /// Banco calibrado demo — ≥15 ítems por rama con `a,b,c` no constantes.
 ///
 /// Generación determinista: `a` y `c` con dispersión via hash para evitar
-/// constantes; `b` desde la tabla razonada por pregunta (ver
-/// [`item_for_branch`], FIX 6). Validado por `bank_has_fifteen_items_per_branch`.
+/// constantes; `b` desde la tabla razonada por pregunta (ver la función privada por rama, FIX 6). Validado por `bank_has_fifteen_items_per_branch`.
 ///
 /// Los bancos son estáticos: se construyen una vez (`OnceLock`) y cada llamada
 /// clona el de su familia (misma semántica, sin `format!`/`parse` por ítem en

@@ -371,7 +371,7 @@ impl WhiteboardCrdt {
     /// Retorna cuántas entradas se aplicaron (nuevas o más recientes).
     ///
     /// Réplica remota = hostil hasta demostrar lo contrario; cada entrada pasa
-    /// por `validate_crdt_value` + [`validate_remote_ts`] y las que faltan se
+    /// por `validate_crdt_value` + la validación privada de timestamp remoto y las que faltan se
     /// saltean honestamente (el conteo solo cuenta aplicadas). Entradas con
     /// `ts.site == self.site` también se saltean (nadie suplanta a esta
     /// réplica sin autenticar; un fork local debe reclamar un `site` propio).

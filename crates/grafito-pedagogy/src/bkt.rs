@@ -106,7 +106,7 @@ impl BktParams {
 /// **Contrato NaN gemelo de `grafito-profile::bkt_update`** (duplicado a
 /// propósito para no crear ciclo pedagogy→profile): entradas no finitas caen a
 /// defaults (`p=0.3`, `guess=0.2`, `slip=0.1`, `learn=0.3`) y la salida
-/// SIEMPRE es finita y ∈ [0,1]. Antes `clamp` dejaba pasar NaN (con
+/// SIEMPRE es finita y ∈ `[0,1]`. Antes `clamp` dejaba pasar NaN (con
 /// `p_learn = NaN`, posible por struct literal con campos `pub`) y la función
 /// retornaba NaN — mismo nombre y firma, contrato distinto al gemelo.
 pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
@@ -155,7 +155,7 @@ pub fn bkt_update(p_known: f64, correct: bool, params: &BktParams) -> f64 {
 /// Probabilidad predicha de acierto dado `p_known` y `params`.
 ///
 /// `P(correct) = p_known*(1-p_slip) + (1-p_known)*p_guess`
-/// NaN-safe con los mismos defaults que [`bkt_update`] (salida finita ∈ [0,1]).
+/// NaN-safe con los mismos defaults que [`bkt_update`] (salida finita ∈ `[0,1]`).
 pub fn predict_correct_prob(p_known: f64, params: &BktParams) -> f64 {
     let p = if p_known.is_finite() {
         p_known.clamp(0.0, 1.0)

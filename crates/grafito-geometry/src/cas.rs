@@ -1649,8 +1649,8 @@ fn residue_by_derivatives(
 /// Referencia GeoGebra: `Series` (parte polar).
 ///
 /// Método: `a_{−k} = g^{(m−k)}(at)/(m−k)!` con `g = (x−at)^m·f`, donde cada
-/// límite se toma por promedio bilateral ([`symmetric_bilateral_limit`]
-/// local) en escalas gruesas (`PP_SCALES`, `h ≥ 1e-5`). El promedio cancela
+/// límite se toma por promedio bilateral simétrico (función privada local)
+/// en escalas gruesas (`PP_SCALES`, `h ≥ 1e-5`). El promedio cancela
 /// la deriva impar `O(h)` (p. ej. `g = 1+3x` en `1/x²+3/x`) y la
 /// dispersión entre escalas filtra el ruido de cancelación `~eps/h` (p. ej.
 /// el `a_{−1} ~ 1e-10` espurio en `1/(x−1)²`): se conserva un coeficiente

@@ -399,8 +399,8 @@ impl WhiteboardDoc {
     /// Un alumno puede escribir «ignora las instrucciones anteriores…» y eso no
     /// puede llegar crudo al prompt del LLM: cada texto va envuelto en
     /// `<whiteboard_text>…</whiteboard_text>`, con comillas/markup escapados y
-    /// acotado (≤[`MAX_DESCRIBE_TEXT_CHARS`] chars por texto, ≤
-    /// [`MAX_DESCRIBE_TEXTS`] textos) para no inundar el contexto.
+    /// acotado (≤MAX_DESCRIBE_TEXT_CHARS chars por texto, ≤
+    /// MAX_DESCRIBE_TEXTS textos) para no inundar el contexto.
     pub fn describe(&self) -> String {
         let mut strokes = 0usize;
         let mut shapes = 0usize;

@@ -1150,7 +1150,7 @@ fn familia_corto(template: &str) -> &'static BeatsCorto {
 /// plantilla es la de [`crate::protocol::template_for_concept`] y pasa
 /// literal cualquiera de las 13 [`CANONICAL_TEMPLATES`] (antes solo 5 y el
 /// resto se degradaba a `universal`). El copy (texto + voz + pizarra) es el
-/// de la familia del concepto ([`familia_corto`]): 6 familias, mismo esqueleto.
+/// de la familia del concepto (función privada de familia corta): 6 familias, mismo esqueleto.
 ///
 /// Presupuestos intactos: 4 actos (`<= 5`), 6 pasos (`<= 8`), 48 frames
 /// (`<= 96`), 640×480×4×48 ≈ 56 MiB (`<= 64 MiB`), 25.7 s (`0.1..=60 s`).
@@ -1704,7 +1704,7 @@ pub fn ganchos_para(template: &str) -> [&'static str; 3] {
 /// español rioplatense con voz en off `140..=175` palabras totales; la
 /// plantilla es la de [`crate::protocol::template_for_concept`] y pasa
 /// literal cualquiera de las 13 [`CANONICAL_TEMPLATES`]. El copy es el de la
-/// familia del concepto ([`familia_largo`]): 6 familias, mismo esqueleto.
+/// familia del concepto (función privada de familia larga): 6 familias, mismo esqueleto.
 ///
 /// Presupuestos intactos: 4 actos (`<= 5`), 8 pasos (`<= 8`), 48 frames
 /// (`<= 96`), 640×480×4×48 ≈ 56 MiB (`<= 64 MiB`), 60 s exactos

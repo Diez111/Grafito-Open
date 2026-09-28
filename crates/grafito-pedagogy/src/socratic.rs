@@ -133,7 +133,7 @@ impl SocraticRepair {
     /// incluye el marcador literal `la solución` (antes
     /// `contains_solution_marker(to_student_voice(..)) == true` →
     /// `TellingTooEarly` otra vez si el repair volvía por el guard) y los
-    /// campos interpolados pasan por [`Self::redactar_igual_numerico`], así
+    /// campos interpolados pasan por redacción numérica privada, así
     /// `is_telling` sobre la voz devuelve `false` en cualquier estado.
     pub fn to_student_voice(&self) -> String {
         let pregunta = Self::redactar_igual_numerico(&self.pregunta_humana);

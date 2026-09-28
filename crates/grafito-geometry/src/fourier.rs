@@ -2,8 +2,8 @@
 //!
 //! Regla de diseño del repo: un solo AST (`crate::ast::Expr`) y un solo
 //! bytecode (`crate::expr`). Toda evaluación caliente va por
-//! [`compile_flat_ops`](crate::expr::compile_flat_ops) →
-//! [`eval_opcodes_flat_raw`](crate::expr::eval_opcodes_flat_raw) (que ejecuta
+//! [`crate::expr::compile_flat_ops`] →
+//! [`crate::expr::eval_opcodes_flat_raw`] (que ejecuta
 //! `run_opcodes_flat`), y los coeficientes "simbólicos" salen de la
 //! antiderivada del mismo `Expr` (nunca de una representación paralela).
 //!
@@ -110,7 +110,7 @@ fn compute_gauss_legendre(order: usize) -> Vec<(f64, f64)> {
 /// Es el mismo pipeline que `evaluate_cached` (`src/expr.rs:1019`):
 /// `preprocess_expr` → `parse_ast` → `compile_flat_ops` (`src/expr.rs:2256`)
 /// y evaluación con `run_opcodes_flat` (`src/expr.rs:1976`) vía
-/// [`eval_opcodes_flat_raw`](crate::expr::eval_opcodes_flat_raw). Sin
+/// [`crate::expr::eval_opcodes_flat_raw`]. Sin
 /// re-parseo por muestra.
 pub struct QuadFn {
     ops: ValidatedOps,

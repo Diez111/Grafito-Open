@@ -23,7 +23,7 @@
 //! - Easing: [`crate::anims::smooth`] / [`crate::anims::linear`].
 //! - Geometría: [`crate::scene::Mobject`] + [`crate::player::PlacedMobject`]
 //!   (lo que la Piel rasteriza) y [`crate::scene::RateFunc`].
-//! - Paisaje 3D: [`crate::surfaces3d::Surface3D`] (el bowl del descenso).
+//! - Paisaje 3D: [`crate::scene::surfaces3d::Surface3D`] (el bowl del descenso).
 //! - Rótulos: [`crate::textanim::Titulo`] (validación + layout centrado).
 //!
 //! ## Presupuestos (paridad con el protocolo)
@@ -212,7 +212,7 @@ impl Lcg {
 
 /// Densidad normal N(μ, σ) en x. `Err` si σ no es (0, 4].
 pub fn normal_pdf(x: f64, mu: f64, sigma: f64) -> Result<f64, StatsError> {
-    if !x.is_finite() || !mu.is_finite() || !sigma.is_finite() || !(0.0 < sigma && sigma <= 4.0) {
+    if !(x.is_finite() && mu.is_finite() && sigma.is_finite() && 0.0 < sigma && sigma <= 4.0) {
         return Err(StatsError::ParametroFueraDeRango {
             detalle: format!("normal_pdf(x={x}, μ={mu}, σ={sigma}): σ válido (0, 4]"),
         });
@@ -329,7 +329,7 @@ impl NormalAnim {
             }
         }
         for (nombre, v) in [("sig0", sig0), ("sig1", sig1)] {
-            if !v.is_finite() || !(0.0 < v && v <= 4.0) {
+            if !(v.is_finite() && 0.0 < v && v <= 4.0) {
                 return Err(StatsError::ParametroFueraDeRango {
                     detalle: format!("{nombre}={v}: σ válido (0, 4]"),
                 });
@@ -967,7 +967,7 @@ impl PerceptronMlp {
     pub fn entrada(&self) -> [f64; 2] {
         self.entrada
     }
-    /// Forward exacto: (oculta[2], salida).
+    /// Forward exacto: `(oculta[2], salida)`.
     pub fn forward(&self) -> ([f64; 2], f64) {
         let mut h = [0.0; 2];
         for (j, hj) in h.iter_mut().enumerate() {

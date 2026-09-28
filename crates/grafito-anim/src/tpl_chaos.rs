@@ -47,7 +47,7 @@
 //! | Iteraciones de escape | 1..=256 ([`CHAOS_MAX_ITER`]) | tiempo de escape clásico |
 //! | Grilla fractal | `nx` 2..=64, `ny` 2..=48, `nx·ny` ≤ 3072 | `line_cap` 64 KiB |
 //! | Muestras de trazo/curva | 2..=512 ([`CHAOS_MAX_MUESTRAS`]) | `SCENE_MORPH_MAX_SAMPLES` |
-//! | Puntos por polilínea | ≤4096 (chequeado en [`valida_trazo`]) | `MAX_MOBJECT_POINTS` |
+//! | Puntos por polilínea | ≤4096 (chequeado en validación privada de trazo) | `MAX_MOBJECT_POINTS` |
 //! | Pasos de trayectoria ODE | 2..=4096 ([`CHAOS_MAX_PASOS`]) | player 48 frames |
 //! | Barrido de bifurcación | columnas ≤128, muestras ≤64, celdas ≤8192 | grilla calor/onda 6144 |
 //! | Transitorio logístico | 0..=512 ([`BIF_MAX_TRANSITORIO`]) | — |
@@ -57,7 +57,7 @@
 //! caso que "pide grilla": van acotadas por los tres topes a la vez; el
 //! frente compone por frames y jamás arma el `Vec` total en long-form
 //! (contrato P0.1 del protocolo). Las trayectorias ODE se submuestrean a
-//! ≤512 pts antes de viajar al wire ([`submuestrea`]).
+//! ≤512 pts antes de viajar al wire (submuestreo privado).
 //!
 //! ## Precisión del zoom (límite honesto, sin `BigFloat`)
 //!

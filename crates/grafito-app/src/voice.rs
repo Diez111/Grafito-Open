@@ -1366,7 +1366,7 @@ pub fn arma_comando_duck(
     valida_ruta_mux("musica", musica)?;
     valida_ruta_mux("voz", voz)?;
     valida_ruta_mux("salida", salida)?;
-    if !threshold.is_finite() || !(0.0 < threshold && threshold <= 1.0) {
+    if !(threshold.is_finite() && 0.0 < threshold && threshold <= 1.0) {
         return Err(MuxError::Rango(format!(
             "threshold {threshold} fuera de 0.0..=1.0: probá {DUCK_THRESHOLD_DEFAULT}"
         )));

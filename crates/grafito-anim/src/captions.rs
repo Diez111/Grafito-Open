@@ -304,7 +304,7 @@ impl CaptionTrack {
 
     /// Baja la pista a SRT (RFC: numeración 1-based, `HH:MM:SS,mmm`,
     /// ≤2 renglones, tags escapados). Cota `<= 256 KiB` PREVENTIVA: el
-    /// chequeo corre dentro del armado ([`empuja_acotado`]) y aborta al
+    /// chequeo corre dentro del armado (función privada de empuje acotado) y aborta al
     /// cruzar el tope, sin materializar la salida entera.
     pub fn to_srt(&self) -> Result<String, CaptionError> {
         self.validate()?;
@@ -330,8 +330,8 @@ impl CaptionTrack {
     /// Baja la pista a WebVTT (`WEBVTT`, cues `HH:MM:SS.mmm -->
     /// HH:MM:SS.mmm`, ≤2 renglones, tags escapados). Sin karaoke inline: una
     /// cue por segmento (el karaoke palabra a palabra vive en
-    /// [`KaraokeTrack::to_vtt`]). Cota `<= 256 KiB` PREVENTIVA vía
-    /// [`empuja_acotado`], igual que `to_srt`/`to_ass`.
+    /// [`KaraokeTrack::to_vtt`]). Cota `<= 256 KiB` PREVENTIVA vía empuje
+    /// acotado privado, igual que `to_srt`/`to_ass`.
     pub fn to_vtt(&self) -> Result<String, CaptionError> {
         self.validate()?;
         let mut out = String::new();
@@ -354,7 +354,7 @@ impl CaptionTrack {
         Ok(out)
     }
 
-    /// Lee un `.vtt` propio de vuelta a pista (roundtrip de [`to_vtt`]: las
+    /// Lee un `.vtt` propio de vuelta a pista (roundtrip de [`Self::to_vtt`]: las
     /// ≤2 líneas de cada cue se re-unen con un espacio, que invierte
     /// [`envuelve_dos_lineas`]). Los segmentos salen sin karaoke. Pura.
     pub fn from_vtt(s: &str) -> Result<Self, CaptionError> {
@@ -389,7 +389,7 @@ impl CaptionTrack {
     /// highlight amarillo `#FFD700` por palabra vía karaoke `{\k}`,
     /// outline 3, MarginV 80, fontsize relativo). Sin `palabras` la
     /// frase va entera. Cota `<= 256 KiB` PREVENTIVA: el chequeo corre
-    /// dentro del armado ([`empuja_acotado`]/[`empuja_karaoke`]) y aborta
+    /// dentro del armado (funciones privadas de empuje acotado) y aborta
     /// al cruzar el tope, sin materializar la salida entera.
     pub fn to_ass(&self) -> Result<String, CaptionError> {
         self.validate()?;
@@ -443,7 +443,7 @@ fn empuja_acotado(out: &mut String, frag: &str) -> Result<(), CaptionError> {
 }
 
 /// Escribe el karaoke ASS por palabra sobre `out` (`{\k<cs>}palabra `,
-/// `cs` por piso con mínimo 1) pasando por [`empuja_acotado`]: un fragmento
+/// `cs` por piso con mínimo 1) pasando por empuje acotado privado: un fragmento
 /// por palabra, jamás el segmento entero. Las palabras ya vienen validadas
 /// en orden. Equivale byte a byte al viejo `karaoke_ass` (sin espacio
 /// colgante final).
@@ -723,7 +723,7 @@ impl KaraokeTrack {
 
     /// Baja la pista a WebVTT: una cue numerada por palabra
     /// (`HH:MM:SS.mmm --> HH:MM:SS.mmm`, payload de una palabra escapada).
-    /// Cota `<= 256 KiB` PREVENTIVA vía [`empuja_acotado`].
+    /// Cota `<= 256 KiB` PREVENTIVA vía empuje acotado privado.
     pub fn to_vtt(&self) -> Result<String, CaptionError> {
         self.validate()?;
         let mut out = String::new();
