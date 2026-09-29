@@ -39,7 +39,75 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 }
 
 fn hash_debug(s: &str) -> u64 {
-    fnv1a64(s.as_bytes())
+    fnv1a64(normaliza_flotantes(s).as_bytes())
+}
+
+/// Normaliza flotantes del dump `Debug` a 9 decimales (`-0.0` → `0.0`).
+/// Sin esto, 1 ulp de diferencia en libm entre distros (glibc 2.35 de CI
+/// vs 2.44 local) cambia el hash aunque la geometría sea idéntica: solo
+/// pinnea cambios reales (>>1e-9). Solo toca tokens con `.` o exponente;
+/// enteros, `inf`/`NaN` y texto quedan intactos. Pura.
+fn normaliza_flotantes(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + 64);
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let es_inicio = c.is_ascii_digit()
+            || ((c == '-' || c == '+')
+                && bytes
+                    .get(i + 1)
+                    .is_some_and(|b| (*b as char).is_ascii_digit() || *b == b'.'));
+        if !es_inicio {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        if bytes[j] == b'-' || bytes[j] == b'+' {
+            j += 1;
+        }
+        while j < bytes.len() && (bytes[j] as char).is_ascii_digit() {
+            j += 1;
+        }
+        let mut es_flotante = false;
+        if bytes.get(j) == Some(&b'.') {
+            es_flotante = true;
+            j += 1;
+            while j < bytes.len() && (bytes[j] as char).is_ascii_digit() {
+                j += 1;
+            }
+        }
+        if bytes.get(j) == Some(&b'e') || bytes.get(j) == Some(&b'E') {
+            let mut k = j + 1;
+            if bytes.get(k) == Some(&b'-') || bytes.get(k) == Some(&b'+') {
+                k += 1;
+            }
+            let inicio_dig = k;
+            while k < bytes.len() && (bytes[k] as char).is_ascii_digit() {
+                k += 1;
+            }
+            if k > inicio_dig {
+                es_flotante = true;
+                j = k;
+            }
+        }
+        if !es_flotante {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let token = &s[i..j];
+        match token.parse::<f64>() {
+            Ok(v) => {
+                let v = if v == 0.0 { 0.0 } else { v };
+                out.push_str(&format!("{v:.9}"));
+            }
+            Err(_) => out.push_str(token),
+        }
+        i = j;
+    }
+    out
 }
 
 /// Calcula el golden de un template: `(kind, w, h, hash)`.
@@ -244,55 +312,55 @@ const ESPERADOS: &[(&str, &str, u32, u32, u64)] = &[
         72,
         0xceff_221d_e7ae_b407,
     ),
-    ("chain-rule", "spec", 0, 0, 0xda23_2496_e286_f6e3),
-    ("epsilon-delta", "spec", 0, 0, 0x8d47_c6c4_c6aa_4fb6),
-    ("improper-integral", "spec", 0, 0, 0x240c_dcd6_a04d_9819),
+    ("chain-rule", "spec", 0, 0, 0x0530_41db_b946_8a32),
+    ("epsilon-delta", "spec", 0, 0, 0x941c_9abc_9bce_3e93),
+    ("improper-integral", "spec", 0, 0, 0x2ee5_6263_7dd3_f529),
     ("ode-slope-field", "spec", 0, 0, 0xd4f3_45fb_2d09_cebd),
-    ("riemann-sums", "spec", 0, 0, 0xcb84_37b9_a7b1_ee8d),
-    ("taylor-remainder", "spec", 0, 0, 0xb667_37a2_8f87_dd57),
-    ("double-integral", "spec", 0, 0, 0x9784_5602_a411_f672),
-    ("gradient-descent", "spec", 0, 0, 0x761d_51b0_8556_8f18),
-    ("green-stokes", "spec", 0, 0, 0x2a87_0333_07b1_6bc0),
-    ("jacobian", "spec", 0, 0, 0x947d_7309_5c61_8d44),
-    ("lagrange-multipliers", "spec", 0, 0, 0x903f_835f_48b5_dc9f),
+    ("riemann-sums", "spec", 0, 0, 0x0554_ad9e_1655_b99c),
+    ("taylor-remainder", "spec", 0, 0, 0xaf00_3a6d_2c65_7bb0),
+    ("double-integral", "spec", 0, 0, 0x7245_0bf0_16a6_91ef),
+    ("gradient-descent", "spec", 0, 0, 0x0e3b_d88e_f304_4a55),
+    ("green-stokes", "spec", 0, 0, 0x8168_f497_9cc6_9827),
+    ("jacobian", "spec", 0, 0, 0xab00_b355_733d_1e22),
+    ("lagrange-multipliers", "spec", 0, 0, 0xfc09_9b8d_2caa_a3df),
     ("partial-derivatives", "spec", 0, 0, 0x4cd8_a3f8_9425_0550),
     (
         "chaos-bifurcacion-barrido",
         "geom",
         0,
         0,
-        0x5df3_5508_c386_e511,
+        0x822f_d0bc_834b_7204,
     ),
-    ("chaos-julia-morph", "geom", 0, 0, 0x1230_7e97_2264_b49c),
-    ("chaos-lorenz", "geom", 0, 0, 0x2219_3d9f_af86_8985),
-    ("chaos-mandelbrot-zoom", "geom", 0, 0, 0xdc52_acb7_f9a0_b9ae),
-    ("chaos-pendulo-doble", "geom", 0, 0, 0xab27_2f99_361f_a58e),
-    ("edo-calor-onda", "geom", 0, 0, 0x1876_8f9a_2d6c_1a01),
-    ("edo-campo-direcciones", "geom", 0, 0, 0x7240_cef9_bf00_75f5),
-    ("edo-convolucion", "geom", 0, 0, 0xddf7_11c1_6591_5ac1),
-    ("edo-fourier-epiciclos", "geom", 0, 0, 0x3c03_bec4_846e_628f),
-    ("edo-laplace", "geom", 0, 0, 0xa98a_2b5f_8d59_6448),
-    ("backprop-flujo", "spec", 0, 0, 0xbcde_4041_57dc_d970),
-    ("descenso-gradiente-3d", "spec", 0, 0, 0xf2a0_4b71_3655_3897),
-    ("distribuciones", "spec", 0, 0, 0x460e_6ec9_a9ea_01a1),
-    ("limite-central", "spec", 0, 0, 0xe1a8_378e_a4e2_89b7),
-    ("pca-rotacion", "spec", 0, 0, 0x697f_925e_2fb9_6559),
-    ("perceptron-mlp", "spec", 0, 0, 0xc199_4b2a_7413_ee0f),
-    ("regresion-lineal", "spec", 0, 0, 0x65d9_8ce7_73be_6e2c),
-    ("teorema-bayes", "spec", 0, 0, 0x2c06_205b_def3_e406),
-    ("sup-campo-vectorial", "geom", 0, 0, 0x1387_15bc_5868_f793),
-    ("sup-interseccion", "geom", 0, 0, 0x9879_ef2d_ae68_b610),
-    ("sup-onda-3d", "geom", 0, 0, 0xf127_9bda_42cd_ac70),
+    ("chaos-julia-morph", "geom", 0, 0, 0x852b_bf67_2d3e_4126),
+    ("chaos-lorenz", "geom", 0, 0, 0x0626_b2fa_0e39_aa4a),
+    ("chaos-mandelbrot-zoom", "geom", 0, 0, 0x4aab_b893_d934_59f7),
+    ("chaos-pendulo-doble", "geom", 0, 0, 0xe5f9_adf1_5e38_e9a9),
+    ("edo-calor-onda", "geom", 0, 0, 0x7de1_9470_3d19_b8d1),
+    ("edo-campo-direcciones", "geom", 0, 0, 0xa060_4be0_53c4_d450),
+    ("edo-convolucion", "geom", 0, 0, 0x85ed_cf0f_5ce2_5880),
+    ("edo-fourier-epiciclos", "geom", 0, 0, 0xfd6f_b85d_4812_184e),
+    ("edo-laplace", "geom", 0, 0, 0xfd94_7fff_3779_5573),
+    ("backprop-flujo", "spec", 0, 0, 0x36f3_77ab_d171_9d73),
+    ("descenso-gradiente-3d", "spec", 0, 0, 0x1774_3d14_b230_09d7),
+    ("distribuciones", "spec", 0, 0, 0x4c2e_e4a4_8208_b075),
+    ("limite-central", "spec", 0, 0, 0x8edd_c6ba_5b67_a1a2),
+    ("pca-rotacion", "spec", 0, 0, 0x6dff_9984_5ba4_2112),
+    ("perceptron-mlp", "spec", 0, 0, 0x4b03_1016_9fc4_c6fb),
+    ("regresion-lineal", "spec", 0, 0, 0xd294_b911_3084_4aae),
+    ("teorema-bayes", "spec", 0, 0, 0x72f8_d12b_e988_a686),
+    ("sup-campo-vectorial", "geom", 0, 0, 0x36e4_f9f5_d2ed_f69b),
+    ("sup-interseccion", "geom", 0, 0, 0xae19_5e1e_a12b_2b15),
+    ("sup-onda-3d", "geom", 0, 0, 0x3e94_2472_5739_a74c),
     (
         "sup-paraboloide-tangente",
         "geom",
         0,
         0,
-        0x49e0_bac6_c0cd_b1cc,
+        0xc310_f34d_414b_af25,
     ),
-    ("sup-silla-descenso", "geom", 0, 0, 0xc59d_57ae_72a5_c5f8),
-    ("sup-laplace-3d", "geom", 0, 0, 0x0efe_1605_39e7_9cc6),
-    ("sup-toro-rotante", "geom", 0, 0, 0x31e4_8d5a_e758_18ff),
+    ("sup-silla-descenso", "geom", 0, 0, 0x8bbe_42c5_33ee_6835),
+    ("sup-laplace-3d", "geom", 0, 0, 0x371b_b7b7_0b74_8f72),
+    ("sup-toro-rotante", "geom", 0, 0, 0x624f_2d42_a7bd_a16c),
     ("celda-24", "rgba", 96, 72, 0x5cc0_9976_eb1b_c1d9),
     ("estereografica", "rgba", 96, 72, 0x105c_f261_b718_ed77),
     ("hipercubo-corte", "rgba", 96, 72, 0xbf17_39e5_831d_639e),
@@ -325,6 +393,23 @@ const ESPERADOS: &[(&str, &str, u32, u32, u64)] = &[
         0x5992_a004_624f_d6c6,
     ),
 ];
+
+#[test]
+fn normaliza_flotantes_absorbe_ulp_y_respeta_enteros() {
+    // 1 ulp de libm entre distros no debe mover el golden.
+    assert_eq!(
+        normaliza_flotantes("x: 0.30000000000000004, y: -0.0, n: 4"),
+        "x: 0.300000000, y: 0.000000000, n: 4"
+    );
+    assert_eq!(
+        normaliza_flotantes("e: 1e-5, E: 2E+3"),
+        "e: 0.000010000, E: 2000.000000000"
+    );
+    assert_eq!(
+        normaliza_flotantes("inf NaN [0,1] (oculta[2])"),
+        "inf NaN [0,1] (oculta[2])"
+    );
+}
 
 #[test]
 fn goldens_cubren_69_sin_duplicados() {
